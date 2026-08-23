@@ -1,0 +1,129 @@
+{
+  "targetFile": "docs/implementation-guides/experimental/token-exchange.en.md",
+  "updatedAt": "2026-08-11T07:54:57.307Z",
+  "comments": [
+    {
+      "id": "comment-1786430078322-hhw10n",
+      "type": "text-selection",
+      "selectedText": "Delegation (the actor_token pattern, where A acts on behalf of B and the token records both) is a non-goal.",
+      "contextBefore": "o whom the token is issued acts as the subject\").\nThe exchanged token's sub remains the subject_token's sub, unchanged.",
+      "contextAfter": "段落にコメント\n\nClient (e.g. a gateway)                        OP\n    │  POST /token (client-authenticated)        │\n    │  gra",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "What the feature does"
+      ],
+      "comment": "これってなんでゴールから外しているの？別に実装してもよいのでは？\nというか可能なら実装してほしいから、今この時点でブランチを切って実装をしてマージリクエストを作成してほしい。\nなので、ドキュメントの修正と実装までを行うようにしてほしい。",
+      "status": "open",
+      "createdAt": "2026-08-11T06:34:38.322Z"
+    },
+    {
+      "id": "comment-1786431094201-8wrt9d",
+      "type": "paragraph",
+      "selectedText": "delegation (actor_token / actor_token_type): explicitly rejected with invalid_request when presented",
+      "targetText": "delegation (actor_token / actor_token_type): explicitly rejected with invalid_request when presented",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "What the feature does",
+        "Scope and non-goals"
+      ],
+      "comment": "これも対応したいね。",
+      "status": "open",
+      "createdAt": "2026-08-11T06:51:34.201Z"
+    },
+    {
+      "id": "comment-1786433691995-rvpuao",
+      "type": "text-selection",
+      "selectedText": "requestedTokenType !== TOKEN_TYPE_ACCESS_TOKEN",
+      "contextBefore": "を発行する。\n  const requestedTokenType = optional(params['requested_token_type']);\n  if (requestedTokenType !== undefined &&",
+      "contextAfter": ") {\n    throw new TokenExchangeError(\n      'invalid_request',\n      `Unsupported requested_token_type. Only ${TOKEN_TYP",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "The implementation, file by file",
+        "token-exchange-request.ts (the grant's validation pipeline)"
+      ],
+      "comment": "仕様上アクセストークン以外も行けたと思うんだよね。だから、拒否するまではやりすぎかなと思う。\n例えば、Cross App Accessの実装を見越したとき、交換するのはIDトークンになると思うんだよね。\nそうなると、アクセストークンに限定するのはやりすぎかなと思う。\n後、Cross App Accessの文脈でいうとIDトークンを受け取って、JWT Client Asertion返すじゃん。これに対応するにはどうしようね？\nそれはCross App Accessの実装です。という形で閉じちゃうか。",
+      "status": "open",
+      "createdAt": "2026-08-11T07:34:51.995Z"
+    },
+    {
+      "id": "comment-1786433903205-x8y3n5",
+      "type": "text-selection",
+      "selectedText": "audience?: string;\n  resource?: string;",
+      "contextBefore": "hangeParams {\n  subjectToken: string;\n  /** 空白区切りの要求 scope。省略時は undefined（subject の scope を継承する） */\n  scope?: string;",
+      "contextAfter": "}\n\n/**\n * 発行素材。生成コードはこれを core の `buildAccessTokenAudience` /\n * `buildAccessTokenPayload` / `AccessTokenIssuer.issue` /",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "The implementation, file by file",
+        "token-exchange-request.ts (the grant's validation pipeline)"
+      ],
+      "comment": "そういえばresourceとaudienceって役割的にほぼ同列だっけ？となると、複数のパラメータが存在する理由ってなんだっけ？",
+      "status": "open",
+      "createdAt": "2026-08-11T07:38:23.205Z"
+    },
+    {
+      "id": "comment-1786433972700-brnmle",
+      "type": "text-selection",
+      "selectedText": "configuredExpiresIn",
+      "contextBefore": "resource` で要求できる対象の許可リスト。既定は空（安全側） */\n  allowedTargets: string[];\n  /** 設定上のアクセストークン有効期間（秒）。subject の残存期間で cap される */",
+      "contextAfter": ": number;\n  /** 現在時刻。テストと決定的な期限計算のために注入できる */\n  now?: Date;\n}\n\n/**\n * ステップ 1: クライアントが交換を要求してよいかを検証する。\n *\n * RFC 8693 §2.",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "The implementation, file by file",
+        "token-exchange-request.ts (the grant's validation pipeline)"
+      ],
+      "comment": "こいつなんだっけ？",
+      "status": "open",
+      "createdAt": "2026-08-11T07:39:32.700Z"
+    },
+    {
+      "id": "comment-1786434285768-k5z6gp",
+      "type": "section",
+      "selectedText": "The complete generated-code diff (hono)",
+      "targetText": "The complete generated-code diff (hono)",
+      "heading": "The complete generated-code diff (hono)",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "CLI integration and the generated-code contribution",
+        "The complete generated-code diff (hono)"
+      ],
+      "comment": "ここについては、そもそも出し方を考えたいね。正直差分をどんってだされても白文字が長すぎて、読む気に全くならない。\nなので、typescriptのシンタックスハイライトが付与されるような表示になるようにそもそも資料の作り方を考えてほしいね。これちなみに、このリポジトリに設定しているClaude Codeのルーティーンタスクにも影響があるから、対応したらそっちにも対応してほしい。",
+      "status": "open",
+      "createdAt": "2026-08-11T07:44:45.768Z"
+    },
+    {
+      "id": "comment-1786434663640-utceu5",
+      "type": "text-selection",
+      "selectedText": "should exchange a browser-obtained access token for a narrowed one",
+      "contextBefore": "ps\n * the shared spec suite green across all sample OPs.\n */\ntest.describe('Token Exchange (RFC 8693)', () => {\n  test('",
+      "contextAfter": "', async ({\n    page,\n    request,\n    baseURL,\n  }) => {\n    const issuer = requireBaseUrl(baseURL);\n    const supporte",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "The E2E test, in full"
+      ],
+      "comment": "このテストケースはどこでtoken exchangeの処理をしているの？最初のトークン取得しかしていなさそうに見える",
+      "status": "open",
+      "createdAt": "2026-08-11T07:51:03.640Z"
+    },
+    {
+      "id": "comment-1786434821612-l3i3ip",
+      "type": "section",
+      "selectedText": "The unit tests, in full",
+      "targetText": "The unit tests, in full",
+      "heading": "The unit tests, in full",
+      "headingPath": [
+        "Token Exchange: Implementation Guide",
+        "The unit tests, in full"
+      ],
+      "comment": "まあ記載に間違いはないんだけど、こららの単体テストを全部パスすると適切な順序で関数を利用した場合、どういう動作を担保できるかは書いておいてほしいね。\n\nコード長すぎてなかなか全部見れない。",
+      "status": "open",
+      "createdAt": "2026-08-11T07:53:41.612Z"
+    },
+    {
+      "id": "comment-1786434878251-iouvs9",
+      "type": "document",
+      "comment": "書き方とかのコメントについて、Claude Codeに設定しているルーティーンタスクにも反映させておいてね。\n後、中身について修正したい場合、日本語版も修正しておいて。",
+      "status": "open",
+      "createdAt": "2026-08-11T07:54:38.251Z"
+    }
+  ]
+}

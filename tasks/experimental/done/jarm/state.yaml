@@ -1,0 +1,14 @@
+status: Implemented
+feature_id: jarm
+created_at: 2026-08-02
+last_reviewed_at: 2026-08-04
+next_review_on: null
+review_count: 3
+implementation_ready: true
+approved_at: 2026-08-04
+blocked_reasons: []
+implementation_started_at: 2026-08-04
+implementation_branch: claude/gallant-hypatia-c4htl7
+pull_request: 18
+implemented_at: 2026-08-04
+merge_commit: 3f53d6abc734b7a0cc6baa63aa91be7b8618688c

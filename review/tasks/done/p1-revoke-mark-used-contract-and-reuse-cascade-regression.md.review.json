@@ -1,0 +1,43 @@
+{
+  "targetFile": "tasks/done/p1-revoke-mark-used-contract-and-reuse-cascade-regression.md",
+  "updatedAt": "2026-06-18T12:58:36.659Z",
+  "comments": [
+    {
+      "id": "comment-1781782257298-8c57jj",
+      "type": "section",
+      "selectedText": "[P1] revoke* resolver の mark-used 意味論を契約として明文化し、再利用カスケード失効を回帰固定する見出し配下にコメント",
+      "targetText": "[P1] revoke* resolver の mark-used 意味論を契約として明文化し、再利用カスケード失効を回帰固定する見出し配下にコメント",
+      "heading": "[P1] revoke* resolver の mark-used 意味論を契約として明文化し、再利用カスケード失効を回帰固定する見出し配下にコメント",
+      "headingPath": [
+        "[P1]"
+      ],
+      "comment": "タイトルが意味不明。意味論を契約とかわけわからんことはいわないで。",
+      "createdAt": "2026-06-18T11:30:57.298Z"
+    },
+    {
+      "id": "comment-1781782300016-vz38nu",
+      "type": "text-selection",
+      "selectedText": "store 実装の意味論に暗黙依存",
+      "contextBefore": "・リフレッシュトークンの再利用を検知したら、それに紐づく発行済みトークンをすべて失効する（SHOULD）」を求める。core はこれを revokeTokensByGrantId(grantId) で実装しているが、その発火条件が利用者の",
+      "contextAfter": "している。段落にコメント\n\nAuthorizationCodeResolver.revokeAuthorizationCode(code) / RefreshTokenResolver.revokeRefreshToken(token) は",
+      "headingPath": [
+        "[P1]",
+        "背景"
+      ],
+      "comment": "これはstoreの実装に依存していて、ライブラリ側で制御できないということ？",
+      "createdAt": "2026-06-18T11:31:40.016Z"
+    },
+    {
+      "id": "comment-1781782796739-e6lkwj",
+      "type": "document",
+      "comment": "これって、要は一度つかったものを再利用した時に漏洩したかもといった可能性を考えて関連したトークンを全て消すようにした方がよいけど、それがdeleteで物理削除するとできなくなるってこと？",
+      "createdAt": "2026-06-18T11:39:56.739Z"
+    },
+    {
+      "id": "comment-1781787513505-4fiunm",
+      "type": "document",
+      "comment": "思想としては分かるが実装は強制せずとももう少し、この実装をなくすなら使用者側がなくすことを意識できるようにしたい。\n具体的にはconformance.test.tsやe2eにこの失効のテストコードを書くことで、テストが落ちることでライブラリとしてやってほしいことからは外れていることを認識できるようにしたい。\nそういう意味ではドキュメントにカスタマイズしてもいいけど、conformance.test.tsが通っている状態じゃないと動作の担保しないよってことを明示しておきたいね。そして、別にconformance.test.tsを全てパスしなくてもいいけど、それはこっちが想定している挙動から外れているよと意識させるようにしたいので、そのタスクも追加して。\nconformance.test.tsを活用するためにsamples内のアプリに対してはconformance.test.tsが充実していることが求められるね。ここについてはCLUADE.mdといった実装規約に書いておきたいね。",
+      "createdAt": "2026-06-18T12:58:33.505Z"
+    }
+  ]
+}

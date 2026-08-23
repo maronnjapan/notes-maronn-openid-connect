@@ -1,0 +1,14 @@
+status: Implemented
+feature_id: device-authorization-grant
+created_at: 2026-08-05
+last_reviewed_at: 2026-08-07
+next_review_on: null
+review_count: 3
+implementation_ready: true
+approved_at: 2026-08-07
+blocked_reasons: []
+implementation_started_at: 2026-08-07
+implementation_branch: claude/gallant-hypatia-yd8ajh
+pull_request: 34
+implemented_at: 2026-08-07
+merge_commit: 599293962ab2c8e520e1c867e21c97256104df31

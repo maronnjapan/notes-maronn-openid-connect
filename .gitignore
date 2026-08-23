@@ -1,0 +1,7 @@
+# Machine-local Claude Code state
+/claude/.cc-writes/
+/claude/scheduled_tasks.lock
+/claude/settings.local.json
+
+# Regenerable Serena state
+/serena/cache/

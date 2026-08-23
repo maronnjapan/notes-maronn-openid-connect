@@ -1,0 +1,14 @@
+status: Implemented
+feature_id: par
+created_at: 2026-07-27
+last_reviewed_at: 2026-07-29
+next_review_on: null
+review_count: 3
+implementation_ready: true
+approved_at: 2026-07-29
+blocked_reasons: []
+implementation_started_at: 2026-07-29
+implementation_branch: experimental/par
+pull_request: 30
+implemented_at: 2026-07-29
+merge_commit: 7d48e1634515f6622c28a11ecd851094e8ce3890
