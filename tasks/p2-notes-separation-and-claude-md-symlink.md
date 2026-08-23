@@ -2,7 +2,10 @@
 
 ## ステータス
 
-🟡 Medium / 未着手
+🟡 Medium / 対応中
+
+2026-08-23 にフェーズ0〜3、ローカルリンク、手動セッション用手順書、公開アクセス、Contents API の書き込み経路、ビルドおよびテストを確認した。
+未完了は Claude Code on the Web の環境設定、クラウド固有の取得・push拒否確認、ルーティーン2件の更新と手動実行である。
 
 ## 背景
 
@@ -203,10 +206,10 @@ SessionStart フックは終了コード 0 で次の JSON を出すと、その�
 
 ## フェーズ0: notes リポジトリの前提整備
 
-- [ ] notes リポジトリを public のまま維持する
-- [ ] 認証なしの `git clone` が成功することを確認する
-- [ ] `/var/www/notes-maronn-openid-connect` の内容を push し、リモートが空でない状態にする
-- [ ] `/var/www/maronn-openid-provider` の origin が `https://github.com/maronnjapan/maronn-openid-connect` であることを確認する
+- [x] notes リポジトリを public のまま維持する
+- [x] 認証なしの `git clone` が成功することを確認する
+- [x] `/var/www/notes-maronn-openid-connect` の内容を push し、リモートが空でない状態にする
+- [x] `/var/www/maronn-openid-provider` の origin が `https://github.com/maronnjapan/maronn-openid-connect` であることを確認する
 
 ## フェーズ1: `README.md` の切り出しと `CLAUDE.md` の分離
 
@@ -235,12 +238,12 @@ SessionStart フックは終了コード 0 で次の JSON を出すと、その�
 
 「experimental 機能の昇格レビュー」の節は、フェーズ3のツール削除に合わせて消す。
 
-- [ ] `README.md` を作成する（`japanese-tech-writing` スキルを使う）
-- [ ] `.notes/CLAUDE.md` を上記 4 点に絞る
+- [x] `README.md` を作成する（`japanese-tech-writing` スキルを使う）
+- [x] `.notes/CLAUDE.md` を上記 4 点に絞る
 
 ### タスク1-2: `CLAUDE.md` の実体を notes リポジトリへ移す
 
-- [ ] `CLAUDE.md` を `/var/www/notes-maronn-openid-connect/CLAUDE.md` へ移してコミットする
+- [x] `CLAUDE.md` を `/var/www/notes-maronn-openid-connect/CLAUDE.md` へ移してコミットする
 
 ### タスク1-3: `.gitignore` の更新
 
@@ -263,13 +266,13 @@ SessionStart フックは終了コード 0 で次の JSON を出すと、その�
 /docs/implementation-guides
 ```
 
-- [ ] 先頭スラッシュ付きで追記する（ルート直下だけを対象にするため）
-- [ ] `.notes` に末尾スラッシュを付けない（シンボリックリンクにマッチしなくなるため）
+- [x] 先頭スラッシュ付きで追記する（ルート直下だけを対象にするため）
+- [x] `.notes` に末尾スラッシュを付けない（シンボリックリンクにマッチしなくなるため）
 
 ### タスク1-4: 追跡を外す
 
-- [ ] `git rm --cached CLAUDE.md AGENTS.md GEMINI.md` を実行する
-- [ ] `.gitignore` と `README.md` の変更と合わせて 1 コミットにする
+- [x] `git rm --cached CLAUDE.md AGENTS.md GEMINI.md` を実行する
+- [x] `.gitignore` と `README.md` の変更と合わせて 1 コミットにする
 
 ### タスク1-5: notes リポジトリにリンク用スクリプトを置く
 
@@ -391,55 +394,55 @@ fi
 printf '✔ notes を更新しました。\n'
 ```
 
-- [ ] 2 本とも `chmod +x` する
-- [ ] `pull.sh` は `--ff-only` にする（メモ側にローカル変更があるとき、勝手にマージコミットを作らないため）
+- [x] 2 本とも `chmod +x` する
+- [x] `pull.sh` は `--ff-only` にする（メモ側にローカル変更があるとき、勝手にマージコミットを作らないため）
 
 ### タスク1-6: 動作確認
 
 この 2 本のスクリプトは、notes 側と OSS 側の upstream を模したサンドボックスで実行し、12 本のリンク生成、リンク越しの読み取り、`git status` が汚れないこと、サブディレクトリからの `git pull` での追従、ガード（実体が残っている / origin が別リポジトリ / 既存 post-merge フックあり / 再実行）を確認してある（2026-08-23、git 2.43.0）。
 実環境では次を確認する。
 
-- [ ] `bash /var/www/notes-maronn-openid-connect/scripts/link-oss-repo.sh` を実行する
-- [ ] `readlink CLAUDE.md` が `.notes/CLAUDE.md` を返し、`cat CLAUDE.md` で notes 側の中身が読める
-- [ ] `git status --porcelain` に移送対象が現れない
-- [ ] `git -C .notes rev-parse HEAD` を控えてから `packages/core` で `git pull` を実行し、notes 側の HEAD も更新される
+- [x] `bash /var/www/notes-maronn-openid-connect/scripts/link-oss-repo.sh` を実行する
+- [x] `readlink CLAUDE.md` が `.notes/CLAUDE.md` を返し、`cat CLAUDE.md` で notes 側の中身が読める
+- [x] `git status --porcelain` に移送対象が現れない
+- [x] `git -C .notes rev-parse HEAD` を控えてから `packages/core` で `git pull` を実行し、notes 側の HEAD も更新される
 
 ## フェーズ2: メモ・設定・実装解説の移送と参照修復
 
 ### タスク2-1: 移送
 
-- [ ] 「移す・残す・消すの一覧」の表に従って notes リポジトリへコピーし、notes 側でコミットする
-- [ ] OSS 側で `git rm -r` し、`.gitignore` の追加と同じコミットにまとめる
-- [ ] 本タスク文書も `tasks/` と一緒に移す（決定3）
-- [ ] `.codex` を削除する
-- [ ] `bash /var/www/notes-maronn-openid-connect/scripts/link-oss-repo.sh` を再実行し、12 本のリンクが張られることを確認する
+- [x] 「移す・残す・消すの一覧」の表に従って notes リポジトリへコピーし、notes 側でコミットする
+- [x] OSS 側で `git rm -r` し、`.gitignore` の追加と同じコミットにまとめる
+- [x] 本タスク文書も `tasks/` と一緒に移す（決定3）
+- [x] `.codex` を削除する
+- [x] `bash /var/www/notes-maronn-openid-connect/scripts/link-oss-repo.sh` を再実行し、12 本のリンクが張られることを確認する
 - [ ] `.claude` がリンク経由でも Claude Code から読めること（スキルとサブエージェントが認識されること）をローカルセッションで確認する
 
 ### タスク2-2: 参照修復
 
 パスを書かず、内容で説明する形へ寄せる。
 
-- [ ] `RELEASE.md:161` / `:468` の `CLAUDE.md` 参照を `README.md` へ
-- [ ] `samples/README.md:3`、`samples/nextjs-vercel/scripts/deploy-vercel.sh:7`、`samples/hono-cloudflare/scripts/deploy-cloudflare.sh:7`、`scripts/lib/deploy-fly-node-sample.sh:10` の `CLAUDE.md` 参照を `README.md` へ
-- [ ] `packages/cli/src/frameworks/hono/templates.ts` の 4 件（`CLAUDE.md` 2 件、メモパス 2 件）。生成コードへ出るので、修正後に `samples/*` を再生成する
-- [ ] `packages/experimental/src/device-authorization-grant/verification.ts` の 2 件。掲載元の実装解説（notes 側へ移動済み）も同じ変更で直す
-- [ ] `packages/core/src/token-response.ts` の 1 件、`packages/cli/src/__tests__/hono-generator.test.ts` の 1 件、`tests/conformance/README.md` の 1 件、`.github/scripts/verify-ci-gate.mjs` の 1 件
-- [ ] `packages/experimental/README.md:72` の実装解説への参照。OSS 実装リポジトリから外す資料なので、参照ごと落とす
-- [ ] `grep -rnE '(tasks|study-material|docs/implementation-guides)/[A-Za-z0-9._/-]+' --exclude-dir=node_modules .` と `grep -rn 'CLAUDE\.md' --exclude-dir=node_modules .` が 0 件になる
+- [x] `RELEASE.md:161` / `:468` の `CLAUDE.md` 参照を `README.md` へ
+- [x] `samples/README.md:3`、`samples/nextjs-vercel/scripts/deploy-vercel.sh:7`、`samples/hono-cloudflare/scripts/deploy-cloudflare.sh:7`、`scripts/lib/deploy-fly-node-sample.sh:10` の `CLAUDE.md` 参照を `README.md` へ
+- [x] `packages/cli/src/frameworks/hono/templates.ts` の 4 件（`CLAUDE.md` 2 件、メモパス 2 件）。生成コードへ出るので、修正後に `samples/*` を再生成する
+- [x] `packages/experimental/src/device-authorization-grant/verification.ts` の 2 件。掲載元の実装解説（notes 側へ移動済み）も同じ変更で直す
+- [x] `packages/core/src/token-response.ts` の 1 件、`packages/cli/src/__tests__/hono-generator.test.ts` の 1 件、`tests/conformance/README.md` の 1 件、`.github/scripts/verify-ci-gate.mjs` の 1 件
+- [x] `packages/experimental/README.md:72` の実装解説への参照。OSS 実装リポジトリから外す資料なので、参照ごと落とす
+- [x] `grep -rnE '(tasks|study-material|docs/implementation-guides)/[A-Za-z0-9._/-]+' --exclude-dir=node_modules .` と `grep -rn 'CLAUDE\.md' --exclude-dir=node_modules .` が 0 件になる
 
 ### タスク2-3: 動作確認
 
-- [ ] `pnpm run build` と `pnpm run typecheck` が通る
-- [ ] `pnpm --filter "./packages/*" test` が通る
-- [ ] `pnpm run test:conformance` が通る（`samples/*` を再生成したため）
+- [x] `pnpm run build` と `pnpm run typecheck` が通る
+- [x] `pnpm --filter "./packages/*" test` が通る
+- [x] `pnpm run test:conformance` が通る（`samples/*` を再生成したため）
 
 ## フェーズ3: 昇格レビューツールの削除
 
-- [ ] `scripts/experimental-review/` を削除する
-- [ ] `package.json` から `review:experimental` と `test:experimental-review` を削除し、`test:ci` の連結からも外す
-- [ ] `docs/library-document` 側に昇格レビューへの言及が無いことを確認する（現状は無い）
-- [ ] notes 側へ移した実装解説（`package-overview.{ja,en}.md` と `README.md`、計 6 箇所）の言及を削除または書き換える
-- [ ] `pnpm run test:ci` と `pnpm run test:ci-gate` が通る
+- [x] `scripts/experimental-review/` を削除する
+- [x] `package.json` から `review:experimental` と `test:experimental-review` を削除し、`test:ci` の連結からも外す
+- [x] `docs/library-document` 側に昇格レビューへの言及が無いことを確認する（現状は無い）
+- [x] notes 側へ移した実装解説（`package-overview.{ja,en}.md` と `README.md`、計 6 箇所）の言及を削除または書き換える
+- [x] `pnpm run test:ci` と `pnpm run test:ci-gate` が通る
 
 ## フェーズ4: クラウド実行からの notes 取得
 
@@ -468,8 +471,8 @@ printf '✔ notes を更新しました。\n'
 2. `bash /opt/notes/scripts/link-oss-repo.sh <OSS リポジトリのパス>`
 3. `.notes/CLAUDE.md` を読む。公開側の規約は OSS リポジトリの `README.md`
 
-- [ ] 手順書を notes リポジトリの `docs/cloud-session-bootstrap.md`（仮）に置く
-- [ ] スキルはリンク作成が Claude Code の起動後になるため、スキルとして自動認識されない場合がある。その場合は `.notes/claude/skills/<name>/SKILL.md` を直接読んで従う旨を手順書に明記する
+- [x] 手順書を notes リポジトリの `docs/cloud-session-bootstrap.md`（仮）に置く
+- [x] スキルはリンク作成が Claude Code の起動後になるため、スキルとして自動認識されない場合がある。その場合は `.notes/claude/skills/<name>/SKILL.md` を直接読んで従う旨を手順書に明記する
 
 ### タスク4-3: 取得と書き戻しの経路を実地確認する
 
@@ -572,7 +575,7 @@ OSS リポジトリのコード変更は従来どおりブランチと PR で行
 `git rm` が消すのは以後のツリーだけであり、履歴から消すには 218 コミットを書き換えて force push する必要がある。
 それは 10 件以上の open PR のブランチを無効化する。
 
-- [ ] 移送対象に、公開したままにできない記述（資格情報、他者の非公開情報）が含まれていないかを確認する。含まれる場合は履歴書き換えの要否を別途判断する
+- [x] 移送対象に、公開したままにできない記述（資格情報、他者の非公開情報）が含まれていないかを確認する。含まれる場合は履歴書き換えの要否を別途判断する
 
 ## スコープ外
 
