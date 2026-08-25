@@ -28,7 +28,7 @@ RAR（RFC 9396）は authorize / consent / token / introspection の複数層に
 
 | 観点 | 評価 |
 |---|---|
-| プロジェクト関連性 | 署名付きイントロスペクションは FAPI 系・高保証 API の PoC で要求される構成要素で、「イントロスペクション結果の出所と完全性を RS 側で暗号的に検証したい」は本ライブラリの典型的検証テーマ。RFC 9701 は 2025 年 1 月発行の Proposed Standard で、Speed（最新仕様への最速追隨）の実績になる |
+| プロジェクト関連性 | 署名付きイントロスペクションは FAPI 系・高保証 API の PoC で要求される構成要素で、「イントロスペクション結果の出所と完全性を RS 側で暗号的に検証したい」は本ライブラリの典型的検証テーマ。RFC 9701 は 2025 年 1 月発行の Proposed Standard で、Speed（最新仕様への最速追随）の実績になる |
 | Experimental隔離の妥当性 | `Accept: application/token-introspection+jwt` が明示された場合のみ挙動が変わる。指定がない・`application/json` の場合は完全に従来どおりで、既存イントロスペクションのデフォルト挙動を一切変えない。JARM の「response_mode に JWT 系の値が明示された場合のみ」と同じ隔離構造 |
 | core無変更 | 可能。トークン判定・属性構築は core の公開関数の出力をそのまま使う。JWT 署名は JARM の先例（`packages/experimental/src/jarm/response-jwt.ts`）どおり Web Crypto の compact JWS 自前実装で行い、core の非公開ヘルパーに依存しない。鍵は生成コードの既存コンテキスト（`c.set('signingKeys', ...)`、`templates.ts:290`。全ルート共通の `app.use('*')` ミドルウェアで供給）と core 公開の `selectSigningKeyByAlg`（`packages/core/src/index.ts:242`）で得る |
 | CLI `--enable` 提供 | 可能。`EXPERIMENTAL_FEATURES` に `'jwt-introspection-response'` を追加する。introspection 機能への依存があるため、`--disable introspection` との組み合わせ検証を新設する（CLIオプション案の節） |
