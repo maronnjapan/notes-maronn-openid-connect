@@ -25,7 +25,7 @@
   6. **[スコープ判断・記録] JSON 経路への audience 制限の不適用**: RFC 9701 は RFC 7662 応答を廃止しないこと、JSON 経路の呼び出し元認可は既存タスク `p3-introspection-caller-authorization-hook.md` の責務であることを確認し、JWT 経路限定の設計判断として非目標・sources「記録」に明記した
 - **修正**: 指摘 2・3 を同日中に反映（specification.md）。指摘 1・6 は初稿執筆中に確認して本文へ組み込み済み
 - **残リスク**:
-  - U1（audience 制限に使う `aud` の意味論。生成コードのトークンに `aud` がどう入るかの実地確認)が open。制限既定の妥当性に関わるため Review 2 のセキュリティ観点で確認する
+  - U1（audience 制限に使う `aud` の意味論。生成コードのトークンに `aud` がどう入るかの実地確認）が open。制限既定の妥当性に関わるため Review 2 のセキュリティ観点で確認する
   - U3（conformance テストでの JWT 検証手段。既存 conformance テンプレートの ID トークン検証を流用できるか）が open。Review 3 の実装着手可否で確認する
   - cross-feature 依存の検証（`--enable jwt-introspection-response --disable introspection` の拒否）は本機能が初の仕組みで、`resolveFeatures` への挿入位置と既存テストへの影響を Review 3 で確認する
 - **判定**: **Pass with changes**（指摘 2・3 を同日修正済み。仕様の完全性の観点で残る事項は未解決事項表に明示されており、Review 2 の観点（セキュリティ・適合性）に引き継ぐ）

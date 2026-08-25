@@ -4,7 +4,7 @@
 
 | タイトル | 発行元 | URL | 種別 | 参照セクション | 使用内容 | 確認日 | 仕様バージョン |
 |---|---|---|---|---|---|---|---|
-| RFC 9701: JWT Response for OAuth Token Introspection | IETF | https://www.rfc-editor.org/rfc/rfc9701 | Normative | §3 / §4 / §5 / §6 / §7 / §8.1 / §8.2 / §9 | 本機能の準拠仕様。要求方法（Accept ヘッダ）・JWT 構造（typ / iss / aud / iat / token_introspection・sub/exp の SHOULD NOT）・audience 判定の MUST・メタデータ・セキュリティ / プライバシー考慮の全て。本文全文を取得して規範文言を直接確認 | 2026-08-24 | RFC 9701 (2025-01) |
+| RFC 9701: JWT Response for OAuth Token Introspection | IETF | https://www.rfc-editor.org/rfc/rfc9701 | Normative | §3 / §4 / §5 / §6 / §7 / §8.1 / §8.2 / §9 | 本機能の準拠仕様。要求方法（Accept ヘッダ）・JWT 構造（typ / iss / aud / iat / token_introspection・sub/exp の SHOULD NOT）・audience 判定の MUST・メタデータ・セキュリティ / プライバシー考慮の全て。本文全文を取得して規範文言を直接確認 | 2026-08-24（Review 2 の 2026-08-25 に §3 / §4 / §5 / §8 / §9 の規範文言を datatracker 版で再確認） | RFC 9701 (2025-01) |
 | RFC 7662: OAuth 2.0 Token Introspection | IETF | https://www.rfc-editor.org/rfc/rfc7662 | Normative | §2.1 / §2.2 / §2.3 | `token_introspection` クレームに収める応答メンバーの定義。エラー応答形式（401 invalid_client）の既存挙動の根拠 | 2026-08-24 | RFC 7662 (2015-10) |
 | RFC 7519: JSON Web Token (JWT) | IETF | https://www.rfc-editor.org/rfc/rfc7519 | Normative | §5.1 / §7.1 | typ ヘッダーの意味論と compact JWS への署名。RFC 9701 §5 が「cryptographically secured as specified in RFC7519」と参照 | 2026-08-24 | RFC 7519 (2015-05) |
 | RFC 8414: OAuth 2.0 Authorization Server Metadata | IETF | https://www.rfc-editor.org/rfc/rfc8414 | Normative | §2 | `introspection_signing_alg_values_supported` の広告先（RFC 9701 §7 / §10.2 が登録） | 2026-08-24 | RFC 8414 (2018-06) |
@@ -24,6 +24,8 @@
 | `study-material/ext-jwt-introspection-response-rfc9701.md` | 候補評価の下敷き。「導入しやすさ: 高」「JSON を JWT で包む差分に絞る」の評価と、候補 A（署名のみ・core 実装案）の記録。本仕様は候補 A の構成を experimental 隔離（core 無変更）へ読み替えた |
 | `packages/core/src/introspection.ts` | `IntrospectionResponse` の形（`client_id`: 135 行 / `aud`: 143-144 行）。audience 制限が応答オブジェクトだけで判定できる根拠。`INACTIVE_INTROSPECTION_RESPONSE` の形 |
 | `packages/core/src/index.ts:242` / `:246` / `:294` | `selectSigningKeyByAlg` / `SigningKey` / `INACTIVE_INTROSPECTION_RESPONSE` が公開 API であることの確認（core 無変更の根拠） |
+| `packages/core/src/token-response.ts:203` / `packages/core/src/authorization-request.ts:1109-1119` | `buildAccessTokenAudience` の合成規則（UserInfo エンドポイント URL の恒久メンバ化と `audience` パラメータ値の追加）。U1（`aud` の意味論）を確定した実地確認（Review 2） |
+| `packages/cli/src/frameworks/hono/templates.ts:4993` 付近 | JWKS ルート（T-022）が `signingKeys` の公開鍵を kid 付き重複排除で公開する現物。RS がイントロスペクション JWT を JWKS で検証できる根拠（Review 2） |
 | `packages/experimental/src/jarm/response-jwt.ts` | Web Crypto による compact JWS 自前実装・RS256 固定・kid 付与・「RS256 鍵であること」の引数契約の直接の先例。本機能の `createIntrospectionResponseJwt` はこの構造を踏襲する |
 | `packages/cli/src/frameworks/hono/templates.ts:6231-6360` | `introspectionRouteTemplate` の現物。クライアント認証パイプライン → core ステップ群 → `c.json(response)` の応答出口（本機能の分岐挿入点）と catch 分岐（`server_error` への伝播先） |
 | `packages/cli/src/frameworks/hono/templates.ts:290` | `c.set('signingKeys', ...)` が全ルート共通の `app.use('*')` ミドルウェアにあり、イントロスペクションルートから鍵セットを取得できる根拠 |
