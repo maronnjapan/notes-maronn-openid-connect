@@ -28,7 +28,7 @@ RAR（RFC 9396）は authorize / consent / token / introspection の複数層に
 
 | 観点 | 評価 |
 |---|---|
-| プロジェクト関連性 | 署名付きイントロスペクションは FAPI 系・高保証 API の PoC で要求される構成要素で、「イントロスペクション結果の出所と完全性を RS 側で暗号的に検証したい」は本ライブラリの典型的検証テーマ。RFC 9701 は 2025 年 1 月発行の Proposed Standard で、Speed（最新仕様への最速追随）の実績になる |
+| プロジェクト関連性 | 署名付きイントロスペクションは FAPI 系・高保証 API の PoC で要求される構成要素で、「イントロスペクション結果の出所と完全性を RS 側で暗号的に検証したい」は本ライブラリの典型的検証テーマ。RFC 9701 は 2025 年 1 月発行の Proposed Standard で、Speed（最新仕様への最速追隨）の実績になる |
 | Experimental隔離の妥当性 | `Accept: application/token-introspection+jwt` が明示された場合のみ挙動が変わる。指定がない・`application/json` の場合は完全に従来どおりで、既存イントロスペクションのデフォルト挙動を一切変えない。JARM の「response_mode に JWT 系の値が明示された場合のみ」と同じ隔離構造 |
 | core無変更 | 可能。トークン判定・属性構築は core の公開関数の出力をそのまま使う。JWT 署名は JARM の先例（`packages/experimental/src/jarm/response-jwt.ts`）どおり Web Crypto の compact JWS 自前実装で行い、core の非公開ヘルパーに依存しない。鍵は生成コードの既存コンテキスト（`c.set('signingKeys', ...)`、`templates.ts:290`。全ルート共通の `app.use('*')` ミドルウェアで供給）と core 公開の `selectSigningKeyByAlg`（`packages/core/src/index.ts:242`）で得る |
 | CLI `--enable` 提供 | 可能。`EXPERIMENTAL_FEATURES` に `'jwt-introspection-response'` を追加する。introspection 機能への依存があるため、`--disable introspection` との組み合わせ検証を新設する（CLIオプション案の節） |
@@ -147,6 +147,17 @@ active でないトークンも同じ構造の JWT で返す（§5: active メ�
 判定は experimental の `restrictIntrospectionResponseToCaller(response, callerClientId)` が行う。
 core の `IntrospectionResponse` は `client_id`（`packages/core/src/introspection.ts:135`）と保存されている場合の `aud`（同 143-144 行）を含むため、判定材料は応答オブジェクトだけで揃い、core 変更もストアアクセスも要らない。
 JSON 応答経路にはこの制限を適用しない（非目標の節。RFC 7662 の互換維持と、core 側フックタスクとの責務分離）。
+
+**`aud` の意味論と既定運用（U1 の確定、Review 2）**:
+生成コードのアクセストークン `aud` は core の `buildAccessTokenAudience`（`packages/core/src/token-response.ts:203`）が合成し、UserInfo エンドポイント URL（`${config.issuer}/userinfo`）を恒久メンバとして必ず含む。
+認可リクエストの `audience` パラメータ（空白区切り。`authorization-request.ts:1109`）や Token Exchange の `allowedTargets` にある値は末尾に加わる。
+つまり既定の `aud` メンバーはリソース識別子の URI であり、client_id は入らない。
+この前提での単純一致は fail-closed に働く。
+発行先本人は `client_id` メンバーの一致で開示され、それ以外の RS は、トークンがその RS の client_id を `audience` 値として発行されていない限り `{ active: false }` を受け取る。
+第三者の RS へ開示を許すには、その RS の client_id をトークンの `aud` に入れて発行する（クライアントが `audience` パラメータで要求するか、Token Exchange の `allowedTargets` に載せる）。
+この運用は README に明記する（ドキュメント要件の節）。
+リフレッシュトークンの応答は `aud` メンバーを持たないため（`buildRefreshTokenResponse`）、発行先本人だけに開示される。
+本 OP に動的クライアント登録はなく client_id は運用者が割り当てるため、リソース URI と同名の client_id を第三者が自称して開示を得る経路はない。
 
 ### エラー応答
 
@@ -289,7 +300,7 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 
 ## ドキュメント要件
 
-- `packages/experimental/README.md` に `jwt-introspection-response` の節を追加（Accept 明示のみ・RS256 固定・audience 制限の既定・JSON 経路は不変・401/400 の相違・TLS と PII の利用者責務、の明記）
+- `packages/experimental/README.md` に `jwt-introspection-response` の節を追加（Accept 明示のみ・RS256 固定・audience 制限の既定・第三者 RS へ開示するにはその client_id を `audience` 値としてトークンへ入れる運用・JSON 経路は不変・401/400 の相違・TLS と PII の利用者責務、の明記）
 - CLI の `--enable` ヘルプ文言（`features.ts` の JSDoc とヘルプ出力）
 - 生成コードコメントに Experimental である旨と API 不安定の警告（既存機能と同じ形式）
 - `docs/implementation-guides/experimental/jwt-introspection-response.ja.md` / `.en.md` を作成する（CLAUDE.md の規約。実装しきった時点で必須。掲載コードは抜粋ではなく全文）
@@ -325,7 +336,7 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 
 | ID | 内容 | 状態 |
 |---|---|---|
-| U1 | audience 制限の判定に使う `aud` の意味論: 本 OP の `AccessTokenInfo.audience` に client_id 以外（リソース URI 等）が入る運用で、呼び出し元 client_id との単純一致が §3 の意図（RS の識別）と一致するか。既定の一致規則で十分か、識別子の対応表を持つべきか | open（Review 2 でセキュリティ観点から確認する。既定の生成コードのトークンに `aud` がどう入るかの実地確認を含む） |
+| U1 | audience 制限の判定に使う `aud` の意味論: 本 OP の `AccessTokenInfo.audience` に client_id 以外（リソース URI 等）が入る運用で、呼び出し元 client_id との単純一致が §3 の意図（RS の識別）と一致するか。既定の一致規則で十分か、識別子の対応表を持つべきか | **確定（Review 2）**: 生成コードの `aud` は UserInfo エンドポイント URL と要求リソース値で構成され、client_id を含まないことを実地確認。単純一致は fail-closed で §3 の MUST を満たし、識別子の対応表は持たない。開示したい RS の client_id を `audience` 値として発行する運用を「audience 制限」の節と README に記載する |
 | U2 | JWT 応答の返却手段 | **確定（Review 1）**: `c.header('Content-Type', ...)` を設定した上で `c.text(jwt)` を使う。hono の `c.text` と web-standard 変換先の `WebContext.text`（`web-standard/templates.ts` 内 `WebContext` クラス）はどちらも設定済み `Content-Type` を上書きしない実装で、既存の `Cache-Control` / `Pragma` ヘッダもそのまま載る |
 | U3 | conformance テストでの JWT 検証の実装手段: 生成アプリの conformance.test.ts が JWKS から公開鍵を組み立てて RS256 検証するユーティリティを既に持つか（ID トークン検証の既存実装を流用できるか） | open（Review 3 で既存 conformance テンプレートを確認して確定する） |
 
