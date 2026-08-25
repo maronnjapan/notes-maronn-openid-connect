@@ -94,7 +94,7 @@ export interface BrowserSessionInfo {
 }
 
 export class BrowserSessionStore {
-  private sessions = new Map&lt;string, BrowserSessionInfo&gt;();
+  private sessions = new Map<string, BrowserSessionInfo>();
   set(sessionId: string, info: BrowserSessionInfo): void { this.sessions.set(sessionId, info); }
   get(sessionId: string): BrowserSessionInfo | undefined { return this.sessions.get(sessionId); }
   // 期限判定なし。他のストア（AuthorizationCodeStore / AccessTokenStore /
@@ -106,7 +106,7 @@ export class BrowserSessionStore {
 ```ts
 // packages/cli/src/frameworks/hono/templates.ts:1107 付近
 class JsonBrowserSessionStore implements BrowserSessionStorage {
-  async set(sessionId: string, info: BrowserSessionInfo): Promise&lt;void&gt; {
+  async set(sessionId: string, info: BrowserSessionInfo): Promise<void> {
     await this.backend.put(BROWSER_SESSION_PREFIX + sessionId, info);  // ttlSeconds 未指定 → expires_at = NULL
   }
 }
