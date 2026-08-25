@@ -25,8 +25,33 @@
   6. **[スコープ判断・記録] JSON 経路への audience 制限の不適用**: RFC 9701 は RFC 7662 応答を廃止しないこと、JSON 経路の呼び出し元認可は既存タスク `p3-introspection-caller-authorization-hook.md` の責務であることを確認し、JWT 経路限定の設計判断として非目標・sources「記録」に明記した
 - **修正**: 指摘 2・3 を同日中に反映（specification.md）。指摘 1・6 は初稿執筆中に確認して本文へ組み込み済み
 - **残リスク**:
-  - U1（audience 制限に使う `aud` の意味論。生成コードのトークンに `aud` がどう入るかの実地確認）が open。制限既定の妥当性に関わるため Review 2 のセキュリティ観点で確認する
+  - U1（audience 制限に使う `aud` の意味論。生成コードのトークンに `aud` がどう入るかの実地確認)が open。制限既定の妥当性に関わるため Review 2 のセキュリティ観点で確認する
   - U3（conformance テストでの JWT 検証手段。既存 conformance テンプレートの ID トークン検証を流用できるか）が open。Review 3 の実装着手可否で確認する
   - cross-feature 依存の検証（`--enable jwt-introspection-response --disable introspection` の拒否）は本機能が初の仕組みで、`resolveFeatures` への挿入位置と既存テストへの影響を Review 3 で確認する
 - **判定**: **Pass with changes**（指摘 2・3 を同日修正済み。仕様の完全性の観点で残る事項は未解決事項表に明示されており、Review 2 の観点（セキュリティ・適合性）に引き継ぐ）
 - **次回可能日**: 2026-08-25
+
+## Review 2
+
+- **日付**: 2026-08-25
+- **観点**: セキュリティと適合性（認証認可上の脅威 / 鍵とトークンの扱い / ログ禁止情報 / エラー情報の露出 / package 境界との整合 / CLI 後方互換 / 明示的有効化 / 生成コードの安全性 / セキュリティ要件のテスト検証可能性）。Review 1 が確認済みの完全性項目は繰り返さず、open だった U1 の確定と、仕様書のセキュリティ要件表を現物コードへ突き合わせる差分に集中した
+- **確認資料**:
+  - RFC 9701 本文（datatracker 版で §3 / §4 の認証必須 Note / §5 の MUST クレームと `typ`・`active: false` 時の他メンバー禁止・`sub` / `exp` の SHOULD NOT / §8.1 / §8.2 の TLS と認証必須 / §9 のプライバシー MUST を再確認。仕様書の引用に読み違いなし）
+  - `packages/core/src/token-response.ts`（`buildAccessTokenAudience`: 203 行。UserInfo エンドポイント URL を恒久メンバとし requested 値を合成する既定）
+  - `packages/core/src/authorization-request.ts:1109-1119`（`audience` パラメータの空白区切りパース）
+  - `packages/core/src/introspection.ts`（`buildAccessTokenResponse` の `aud` 反映: 143-144 行 / `buildRefreshTokenResponse` が `aud` を持たないこと: 151-163 行 / `IntrospectionError` の statusCode と WWW-Authenticate: 44-53 行 / `sanitizeErrorDescription` によるエラー文言の無害化: 37 行）
+  - `packages/cli/src/frameworks/hono/templates.ts`（`introspectionRouteTemplate`: 6231 行〜。クライアント認証パイプラインが応答構築より前にあること、トークン値・応答属性をログへ出さないこと、catch がエラーコードと無害化済み説明のみ返すこと / `c.set('signingKeys', ...)`: 290 行の全ルート共通ミドルウェア / JWKS ルート: 4993 行〜が T-022 で `signingKeys` の公開鍵を kid 付き重複排除で公開すること / Token Exchange の `allowedTargets` と `audience` の実例: 3974-4065 行）
+- **指摘**:
+  1. **[U1・確定] audience 制限に使う `aud` の意味論**: 生成コードのアクセストークン `aud` は UserInfo エンドポイント URL（恒久メンバ）と要求リソース値で構成され、client_id を含まないことを実地確認した。仕様の単純一致規則はこの前提で fail-closed に働き（発行先本人は `client_id` 一致で開示、他は `{ active: false }`）、誤開示の方向には倒れないため §3 の MUST を満たす。第三者 RS へ開示するには、その RS の client_id を `audience` 値としてトークンへ入れる運用が必要で、これを仕様書「audience 制限」の節・未解決事項 U1・ドキュメント要件（README 記載）・理解資料「誤解しやすい点」に追記した
+  2. **[確認] 認証なしダウングレード（§8.2）**: ルートテンプレートの現物で、クライアント認証パイプライン（`extractClientCredentials` → `resolveAuthenticatedTokenClient` → `validateClientAuthMethod` → `verifyClientSecret`）が応答構築より前に完了し、JWT 分岐の挿入点（`return c.json(response)` の出口）では認証済みであることを確認。`Accept` の値で認証を迂回する経路はない
+  3. **[確認] 鍵の扱いと RS 検証チェーン**: 署名鍵は全ルート共通ミドルウェアの `signingKeys` から `selectSigningKeyByAlg(keys, 'RS256')` で選ぶため alg 混乱の余地がなく、JWKS ルート（T-022）が `signingKeys` の公開鍵を kid 付きで公開しているため、RS が JWKS を介する検証チェーン（kid 解決 → RS256 検証）は既存基盤で成立する
+  4. **[確認] ログとエラー情報の露出**: 既存ルートはトークン値・イントロスペクション属性をログへ出さず、エラー応答はエラーコードと `sanitizeErrorDescription` 済みの説明のみ。本機能が追加する純関数 3 つはログ出力を持たない設計で、仕様書「バリデーション / エラー処理」の禁止事項と整合する
+  5. **[確認] オラクル防止のテスト検証可能性**: 制限適用後の応答は `INACTIVE_INTROSPECTION_RESPONSE` と同形（`{ active: false }` のみ）で、単体テスト計画の「他メンバーが 1 つも無いこと」と conformance の「発行先と異なるクライアントで `active: false`」がこの性質を固定できる。セキュリティ要件表の各行にテストの対応があることを確認
+  6. **[記録] client_id とリソース URI の衝突**: `aud` のリソース URI と同名の client_id を登録したクライアントは当該トークンの開示を受ける。本 OP に動的クライアント登録はなく client_id の割り当ては運用者の操作に限られるため、これは「RS へ開示を許す」意図的な構成手段そのものであり、脅威ではなく運用として README に記載する（指摘 1 の追記に含めた）
+- **修正**: 指摘 1・6 の追記を同日中に反映（specification.md の「audience 制限」「未解決事項」「ドキュメント要件」、understanding-guide.md の「誤解しやすい点」）
+- **残リスク**:
+  - U3（conformance テストでの JWT 検証手段）は open のまま。JWKS 公開側の成立は本レビューで確認したが、conformance テンプレートに検証ユーティリティがあるかは Review 3 の実装着手可否で確認する
+  - cross-feature 依存の検証（`--enable jwt-introspection-response --disable introspection` の拒否）の `resolveFeatures` への挿入位置と既存テストへの影響は Review 3 で確認する
+  - `Accept: application/token-introspection+jwt;q=0` を JWT 要求と解釈する設計判断は残る。メディアタイプを自ら列挙した呼び出し元にのみ影響し、開示範囲は変わらないため、セキュリティ上の残リスクとは扱わない
+- **判定**: **Pass with changes**（誤開示方向の欠陥は見つからず、U1 を確定して仕様書と理解資料へ反映済み。重大な未解決セキュリティ事項はない）
+- **次回可能日**: 2026-08-26
