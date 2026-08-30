@@ -46,13 +46,18 @@ Token Exchange の grant_type URN は共有するが、ディスパッチ順序�
 - 信頼設定（`trustedIdentityProviders` / `allowedAudiences`）の設定形状が実運用フィードバックで変わり得る
 - IdP とリソース AS のクライアント ID の対応付け（draft §5）をどこまで設定可能にするかが未収束（初期実装は同一 client_id 前提）
 
+## 対応範囲の拡張（初版からの変更）
+
+初版は refresh token の subject_token と actor_token を非目標としていたが、次の形で対応範囲に含めた（2026-08-30 改版）。
+
+- **Refresh Token の subject_token（draft §4.3 MAY / §4.3.2）**: `idJagConfig.allowRefreshTokenSubjects`（既定 true。refresh-token feature 有効時のみ生成）で受理する。ID トークンの期限切れ後も SSO をやり直さずに新しい ID-JAG を要求できる。検証は draft §4.3.3 のとおり「通常の refresh_token grant と同じ方法」とし、core の refresh grant ステップ関数を再利用する（rotation 済み RT の再提示は token family の失効を発火、online RT はログインセッションの生存確認、クライアント束縛、期限）。RT は消費しない（rotation しない。同じ RT で ID-JAG を繰り返し要求できる）。`openid` scope を持たない grant の RT は拒否する（ID トークンが存在し得ない grant の RT は Identity Assertion の代替にならない）。subject のクレーム（sub / auth_time / acr / amr）は RT の保存済み grant 文脈から組み立てる（§4.3.3 SHOULD）
+- **`actor_token` / `act` クレーム（draft §3.1 OPTIONAL / §9.7）**: draft は actor_token の処理規則を定義しないため、§9.7 の指針に沿った**本機能独自の拡張**として実装し、`idJagConfig.allowActorTokens`（既定 false の fail-safe）で明示的に有効化する。actor_token は subject と同じく**本 OP 発行・認証クライアント宛ての ID トークン**に限り、検証は subject と同一（core の `validateIdTokenHint`）。act に載せるのは actor の `sub` だけ（属性の不要な越境を避ける）。受領側は ID-JAG の act を構造検証（`sub` 必須、ネストは同形）して、発行するアクセストークンの payload と store metadata へ引き継ぐ。黙って落とすと委譲が impersonation に見えるため、malformed な act は `invalid_grant` で拒否する。無効化時（既定）の actor_token は従来どおり `invalid_request`
+
 ## 非目標（Non-goals）
 
 - **SAML 2.0 assertion の subject_token（`urn:ietf:params:oauth:token-type:saml2`、draft §3.2 / §4.5）**: 本 OP は OIDC OP であり SAML を発行しない。他の値は `invalid_request`
-- **Refresh Token の subject_token（`urn:ietf:params:oauth:token-type:refresh_token`、draft §4.3）**: draft 上は MAY。ID トークン再取得の省略という利便機能であり初期スコープから外す。`invalid_request` で拒否する
 - **`sub_id` クレーム（SAML NameID Subject Identifier、draft §3.2）**: SAML 連携前提の機能のため発行も検証もしない
 - **`authorization_details`（RAR、RFC 9396）**: リクエストパラメータとして受けた場合は `invalid_request` で明示拒否。クレームとしても発行しない
-- **`actor_token` / `act` クレーム**: draft §4.3 は actor_token の処理規則を定義していない（future extension）。存在すれば `invalid_request` で明示拒否する（draft §9.7 の委譲リスクへの fail-safe）
 - **DPoP / `cnf` による sender-constraining（draft §9.8）**: 本リポジトリに DPoP 基盤が無いため見送る。将来 DPoP タスクと合流して検討する
 - **step-up authentication（`insufficient_user_authentication`、draft §9.2 / RFC 9470）**: acr ポリシー評価基盤が無いため見送る
 - **`tenant` / `aud_tenant` / `aud_sub` / `email` クレーム**: 本 OP はシングルテナントで、subject 解決は `sub` の一致に限る（draft §9.6 のクレーム最小化にも沿う）
@@ -111,12 +116,12 @@ Requesting App                IdP OP (--enable id-jag)          Resource App AS 
 |---|---|---|
 | `requested_token_type` | REQUIRED | `urn:ietf:params:oauth:token-type:id-jag`（ディスパッチ条件そのもの） |
 | `audience` | REQUIRED | 必須。リソース AS の issuer identifier（RFC 8414 §2）。欠落は `invalid_request`。`allowedAudiences` に含まれない値は `invalid_target`。自 OP の issuer と同一の値は `invalid_target`（draft §9.3 のクロスドメイン限定） |
-| `subject_token` | REQUIRED | 必須。本 OP が発行した ID トークン。欠落は `invalid_request` |
-| `subject_token_type` | REQUIRED | 必須。`urn:ietf:params:oauth:token-type:id_token` のみ受理。欠落と他の値（saml2 / refresh_token を含む）は `invalid_request` |
+| `subject_token` | REQUIRED | 必須。本 OP が発行した ID トークン、または（`allowRefreshTokenSubjects` 有効時）本 OP が発行した refresh token。欠落は `invalid_request` |
+| `subject_token_type` | REQUIRED | 必須。`urn:ietf:params:oauth:token-type:id_token` を常時受理し、`...:refresh_token` は `allowRefreshTokenSubjects` 有効時のみ受理。欠落と他の値（saml2 を含む）は `invalid_request` |
 | `scope` | OPTIONAL | 任意。空白区切り。`allowedScopes` が設定されている場合はその部分集合であること（超過は `invalid_scope`）。未設定時は要求値をそのまま許可（ポリシー判断はリソース AS 側にもあるため。設計判断） |
 | `resource` | OPTIONAL | 任意。単一値。絶対 URI で fragment を含まないこと（RFC 8707 §2）。違反は `invalid_request`。検証後そのまま ID-JAG の `resource` クレームに入れる |
 | `authorization_details` | OPTIONAL | 非目標。存在すれば `invalid_request` |
-| `actor_token` / `actor_token_type` | OPTIONAL | 非目標。存在すれば `invalid_request` |
+| `actor_token` / `actor_token_type` | OPTIONAL | `allowActorTokens` 有効時のみ受理（本機能独自の拡張）。actor_token は本 OP 発行・認証クライアント宛ての ID トークンに限り、actor_token_type は `...:id_token` のみ。片方だけの指定は RFC 8693 §2.1 の対応規則で `invalid_request`。無効時（既定）は存在すれば `invalid_request` |
 
 subject_token（ID トークン）の検証は core の `validateIdTokenHint` を再利用し、次を確認する（draft §4.3.3）。
 
@@ -125,6 +130,18 @@ subject_token（ID トークン）の検証は core の `validateIdTokenHint` �
 - `aud` に**認証済みクライアントの client_id が含まれる**こと（draft §4.3.3 の MUST。他クライアント宛て ID トークンの流用を防ぐ）
 - `exp` が leeway（60 秒）内で未失効、`iat` が leeway 内で未来でないこと
 - `alg=none` と外部鍵取得ヘッダ（jku / jwk / x5u / x5c）の拒否（core 実装の RFC 8725 対策をそのまま享受する）
+
+subject_token が refresh token（`allowRefreshTokenSubjects` 有効時）の場合は、core の refresh grant ステップ関数で次を確認する（draft §4.3.3「通常の refresh_token grant と同じ方法で検証」）。
+
+- resolver で解決できること（不存在は拒否）
+- rotation 済み（used）でないこと。再提示は refresh grant と同じく token family の失効を発火させてから拒否する（OAuth 2.1 §4.3.1）
+- 認証クライアントに束縛されていること、未失効であること
+- online refresh token はログインセッションが生存していること（resolver 未注入時は fail-closed）
+- grant の scope に `openid` が含まれること（Identity Assertion の代替という位置づけの要件）
+
+RT は消費しない。subject のクレーム（sub / auth_time / acr / amr）は RT の保存済み grant 文脈から組み立てる。
+
+actor_token（`allowActorTokens` 有効時）の検証は subject の ID トークンと同一で、`aud` が認証済みクライアントと一致する本 OP 発行の ID トークンに限る。検証通過後、actor の `sub` だけを ID-JAG の `act` クレームに載せる。
 
 ### 発行側レスポンス（draft §4.3.4）
 
@@ -162,9 +179,10 @@ JOSE ヘッダー: `{ "alg": "RS256", "typ": "oauth-id-jag+jwt", "kid": "<署名
 | `exp` / `iat` | REQUIRED | `iat` = 発行時刻、`exp` = `iat + idJagLifetimeSeconds` |
 | `scope` | OPTIONAL | 許可された scope の空白区切り。scope 要求なしなら**クレーム自体を含めない** |
 | `resource` | OPTIONAL | `resource` パラメータの値。指定なしなら含めない |
-| `auth_time` / `acr` / `amr` | OPTIONAL | subject_token に存在する場合のみ同じ値を引き継ぐ（リソース AS の認証コンテキスト評価材料。draft §3.1） |
+| `auth_time` / `acr` / `amr` | OPTIONAL | subject_token（ID トークンのクレーム、または RT の保存値）に存在する場合のみ同じ値を引き継ぐ（リソース AS の認証コンテキスト評価材料。draft §3.1） |
+| `act` | OPTIONAL | `allowActorTokens` 有効時に actor_token を検証して `{ "sub": "<actor の sub>" }` を発行（RFC 8693 §4.1 / draft §3.1）。actor 無しの発行では含めない |
 
-`sub_id` / `tenant` / `aud_tenant` / `aud_sub` / `email` / `act` / `authorization_details` は発行しない（非目標）。
+`sub_id` / `tenant` / `aud_tenant` / `aud_sub` / `email` / `authorization_details` は発行しない（非目標）。
 
 ### 受領側リクエスト（リソース AS、draft §4.4）
 
@@ -190,6 +208,7 @@ assertion の検証（RFC 7521 §5.2 / RFC 7523 §3 / draft §4.4.1）:
 9. `jti` が非空文字列であること（draft REQUIRED。リプレイ拒否には使わないが構造要件として検証する）
 10. `sub` が非空文字列であること
 11. `client_id` が**リクエストを認証したクライアントの client_id と一致する**こと（draft §4.4.1 の MUST。ID-JAG の横流しを防ぐクライアント継続性）
+12. `act` が存在する場合、RFC 8693 §4.1 の構造（`sub` 必須の非空文字列、ネストは同形）であること。malformed は `invalid_grant`。検証通過した `act` は発行するアクセストークンの payload と store metadata へ引き継ぐ（黙って落とすと委譲の記録が消えるため）
 
 ### 受領側レスポンス（draft §4.4.2）
 
@@ -227,7 +246,9 @@ assertion の検証（RFC 7521 §5.2 / RFC 7523 §3 / draft §4.4.1）:
 | `subject_token_type` が id_token 以外 | 400 | `invalid_request`（error_description で id_token のみ対応と明示） |
 | `actor_token` / `authorization_details` の存在 | 400 | `invalid_request`（未対応を明示） |
 | `resource` が絶対 URI でない、または fragment を含む | 400 | `invalid_request` |
-| subject_token（ID トークン）の検証失敗（署名、iss、aud、exp、iat、構造） | 400 | `invalid_request`。**固定文言**（失敗種別を区別しないオラクル排除。token-exchange 機能の方針を踏襲） |
+| subject_token の検証失敗（ID トークン: 署名、iss、aud、exp、iat、構造 / RT: 不存在、rotation 済み、他クライアント、期限切れ、セッション終了、openid 無し） | 400 | `invalid_request`。**固定文言**（失敗種別を区別しないオラクル排除。token-exchange 機能の方針を踏襲） |
+| `actor_token` の検証失敗（`allowActorTokens` 有効時） | 400 | `invalid_request`。**固定文言**（`The provided actor_token is not valid`。subject と同じオラクル排除方針） |
+| `actor_token` と `actor_token_type` の対応規則違反、actor_token_type が id_token 以外 | 400 | `invalid_request` |
 | `audience` が `allowedAudiences` 外 | 400 | `invalid_target`。固定文言（許可リスト内容を露出しない） |
 | `audience` が自 OP の issuer と同一 | 400 | `invalid_target`（クロスドメイン限定違反を error_description で明示。利用者が自力で直せる設定間違いであり、オラクルにはならない） |
 | 要求 scope が `allowedScopes` を超過 | 400 | `invalid_scope` |
@@ -247,6 +268,7 @@ assertion の検証（RFC 7521 §5.2 / RFC 7523 §3 / draft §4.4.1）:
 | `aud` 不一致（複数要素配列を含む） | 400 | `invalid_grant` |
 | `exp` 失効 / `iat` 未来 / `nbf` 未到来 | 400 | `invalid_grant` |
 | `client_id` クレームが認証クライアントと不一致 | 400 | `invalid_grant` |
+| `act` クレームが malformed（`sub` 欠落、非オブジェクト、ネスト不正） | 400 | `invalid_grant` |
 | 要求 scope が ID-JAG の scope を超過 | 400 | `invalid_scope` |
 
 draft §4.3.4.3 のエラー例は `invalid_grant` を示すが、これは非規範の例示である。
@@ -304,6 +326,24 @@ export async function resolveIdJagSubject(options: {
   jwks: JwkSet;            // 自 OP の ID トークン署名鍵
 }): Promise<IdJagSubject>;
 
+/** subject_token（refresh token）を core の refresh grant ステップ関数で検証し、
+ *  RT の保存済み grant 文脈から subject を組み立てる（draft §4.3.3）。RT は消費しない */
+export async function resolveIdJagSubjectFromRefreshToken(options: {
+  refreshToken: string;
+  clientId: string;
+  refreshTokenResolver: RefreshTokenResolver;             // core の型
+  authenticationSessionResolver?: AuthenticationSessionResolver; // online RT 用
+  now?: Date;
+}): Promise<IdJagSubject>;
+
+/** actor_token（ID トークン）を subject と同一の検証にかけ、act 値（{ sub }）を返す */
+export async function resolveIdJagActor(options: {
+  actorToken: string;
+  issuer: string;
+  clientId: string;
+  jwks: JwkSet;
+}): Promise<IdJagActor>;
+
 /** audience を許可リストと自 issuer 除外で検証する */
 export function validateIdJagAudience(options: {
   audience: string;
@@ -335,7 +375,8 @@ export function buildIdJagIssuanceResponse(options: {
 
 /** 合成関数: 検証から応答生成まで */
 export async function processIdJagIssuanceRequest(
-  context: IdJagIssuanceContext,
+  context: IdJagIssuanceContext,  // refreshTokenResolver / authenticationSessionResolver /
+                                  // allowActorTokens を任意で受ける（未指定は従来挙動）
 ): Promise<IdJagIssuanceResponse>;
 
 // ---- 受領側（リソース AS） ----
@@ -395,6 +436,8 @@ export async function processIdJagRedemptionRequest(
 | `allowedAudiences` | `[]` | 発行側: ID-JAG を発行してよいリソース AS の issuer の許可リスト。空のとき発行要求はすべて `invalid_target`（fail-safe） |
 | `idJagLifetimeSeconds` | `300` | ID-JAG の有効期間（秒）。draft の例示値。短命にして再発行で回す運用が前提 |
 | `allowedScopes` | `undefined` | 発行側: 許可する scope の上限リスト。`undefined` は素通し（リソース AS 側ポリシーに委ねる） |
+| `allowRefreshTokenSubjects` | `true`（refresh-token feature 有効時のみ生成） | 発行側: refresh token を subject_token として受けるか（draft §4.3 MAY）。ID トークン経路と同じ主体に同じポリシーが適用されるだけの利便機能なので既定は有効。false で従来どおり id_token のみ |
+| `allowActorTokens` | `false` | 発行側: actor_token を受けて `act` クレームを発行するか。draft に規範的処理が無い拡張なので既定は無効（fail-safe）。有効化は「委譲の記録付き発行」をそのデプロイの方針として認める操作 |
 | `trustedIdentityProviders` | `[]` | 受領側: 信頼する IdP のリスト。`{ issuer, jwksUri?, jwks? }`。空のとき jwt-bearer はすべて `invalid_grant`（fail-safe）。`jwks` はインライン JWK セット、`jwksUri` は生成コードのヘルパが fetch して 300 秒キャッシュする。両方あれば `jwks` を優先 |
 | アクセストークン有効期間（受領側） | `config.accessTokenExpiresIn` | 専用設定は持たない |
 
@@ -447,7 +490,11 @@ export async function processIdJagRedemptionRequest(
 | scope による権限拡大 | 発行側は `allowedScopes`（設定時）の部分集合、受領側は ID-JAG の scope クレームの部分集合のみ許可。`offline_access` は受領側で常に除去し refresh_token も発行しない | 単体＋結合: 超過 scope の拒否、offline_access 除去の固定検証 |
 | 鍵の取り違え | ID-JAG 署名は RS256 固定で `selectSigningKeyByAlg` により RS256 鍵を選ぶ（JARM と同じ契約）。kid をヘッダに含め、JWKS で公開される鍵のみ使う | 単体: ヘッダの alg / typ / kid の固定検証 |
 
-**ログ禁止情報**: `subject_token`（ID トークン）、発行した ID-JAG、受領した `assertion`、発行したアクセストークン、`client_secret`、Authorization ヘッダ。
+| 盗まれた refresh token からの ID-JAG 取得 | RT subject も通常の refresh grant と同一の検証（クライアント束縛、rotation 再利用検知と family 失効、online RT のセッション生存確認）を通す。クライアント認証必須のため RT 単体では交換できない | 単体＋結合: rotation 済み RT の拒否と family 失効、他クライアント RT の拒否、セッション終了後の online RT の拒否 |
+| actor_token による権威の過大表明（draft §9.7） | actor 受理は既定無効の opt-in。有効時も actor_token は本 OP 発行・認証クライアント宛ての ID トークンに限り、subject と同一の検証を通す。act に載せるのは actor の `sub` のみで、`sub`（resource owner）と `act`（actor）の区別は claim 構造が保つ | 単体＋結合: 無効時の拒否、他クライアント宛て actor の拒否、act 内容の固定検証 |
+| act クレームの黙殺による委譲の隠蔽 | 受領側は act を構造検証して発行トークンへ必ず引き継ぐ。malformed は `invalid_grant`（黙って落とすと委譲が impersonation に見える） | 単体＋結合: act の引き継ぎ固定、malformed act の拒否 |
+
+**ログ禁止情報**: `subject_token`（ID トークン / refresh token）、`actor_token`、発行した ID-JAG、受領した `assertion`、発行したアクセストークン、`client_secret`、Authorization ヘッダ。
 ログに出してよいのは client_id、ID-JAG の `jti`、エラーコードのみ。
 
 ## プライバシー考慮
@@ -489,6 +536,8 @@ packages/cli  ─────> @maronn-openid-connect/experimental（生成コ�
 - **発行側 異常系**: 必須欠落 / 非対応 subject_token_type（saml2 / refresh_token / access_token）/ actor_token / authorization_details / resource 構文違反 / 署名不正 / iss 不一致 / aud（クライアント）不一致 / exp 失効の各 ID トークン → 固定文言 `invalid_request` の応答同一性 / audience リスト外と自 issuer → `invalid_target` / allowedScopes 超過 → `invalid_scope` / grantTypes 未登録と public client → `unauthorized_client`
 - **受領側 正常系**: 正しい ID-JAG の検証通過と payload 導出 / kid 一致鍵の選択 / aud が単一要素配列の受理 / scope 継承と縮小 / offline_access 除去 / 複数 IdP 設定時の iss による選択
 - **受領側 異常系**: assertion 欠落 → `invalid_request` / 非 JWS / typ 不一致 / alg none / jku 付き / iss 非信頼 / 署名改ざん（iss 非信頼と同一文言の固定検証）/ iss 自己 / aud 不一致と複数要素配列 / exp 失効 / iat 未来 / nbf 未到来 / jti 欠落 / sub 欠落 / client_id 欠落と不一致 → `invalid_grant` / scope 超過 → `invalid_scope` / grantTypes 未登録と public client → `unauthorized_client`
+- **RT subject**: 正常系（RT の grant 文脈からの subject 組み立て）/ 不存在、rotation 済み（family 失効の発火を含む）、他クライアント、期限切れ、openid 無し、セッション終了後の online RT、resolver 未注入時の online RT → 固定文言 `invalid_request` / RT を消費しないこと（同じ RT で 2 回発行）
+- **actor**: 無効時の存在拒否 / 有効時の対応規則（type 欠落、token 欠落、非 id_token type）/ 他クライアント宛て・改ざん actor の固定文言拒否 / act クレームの固定検証（sub のみ）/ 受領側の act 構造検証（ネスト受理、malformed 拒否）と grant への伝播
 - CLAUDE.md の規約（should + 動詞、合格値一意固定、it 内条件分岐なし）に従う。JWS の生成には Web Crypto でテスト内生成した鍵を使う
 
 ### 結合テスト（conformance.test.ts テンプレート追加、`id-jag` 有効時のみ生成）
@@ -498,12 +547,15 @@ packages/cli  ─────> @maronn-openid-connect/experimental（生成コ�
 - 同じ ID-JAG の再提示で 2 本目のアクセストークンが取れること（draft §4.4.3 の契約固定）
 - 自 OP 発行の ID-JAG を自 OP へ提示 → `invalid_grant`（同一ドメイン拒否）
 - 発行側 / 受領側の主要エラーケース（前節の表を網羅）
+- RT subject: 実フローで取得した RT からの発行、同じ RT での再発行（非消費）、refresh grant で rotation させた後の旧 RT の拒否、`allowRefreshTokenSubjects` を落としたときの拒否
+- actor: `allowActorTokens` 有効時の act 記録（別ユーザーの実 ID トークン）、他クライアント宛て actor の拒否、無効時（既定）の拒否 / 受領側: act 付き ID-JAG の act がアクセストークンへ引き継がれること、malformed act の `invalid_grant`
 - discovery: `grant_types_supported` に両 URN、`identity_chaining_requested_token_types_supported` と `authorization_grant_profiles_supported` の値を固定検証。無効時はいずれも出ず jwt-bearer が `unsupported_grant_type` になること
 
 ### E2Eテスト（tests/e2e）
 
 - `playwright.config.ts` の webServer にサンプル OP の 2 インスタンス目（リソース AS 役、別ポート、別 issuer、別永続化パス）を追加する。1 インスタンス目（IdP 役）には `XAA_ALLOWED_AUDIENCES` で 2 インスタンス目の issuer を許可させ、2 インスタンス目には `XAA_TRUSTED_IDP_ISSUER` / `XAA_TRUSTED_IDP_JWKS_URI` で 1 インスタンス目を信頼させる（サンプルの手書きエントリが env から `idJagConfig` を設定する）
 - spec は実ブラウザで IdP にログインして ID トークンを取得し（既存 `/start` ルートと testid を再利用）、バックチャネルで発行（IdP）と redemption（リソース AS）を行い、リソース AS の UserInfo で subject を固定検証する（token-exchange の delegation spec と同じ「ブラウザ＋バックチャネル」パターン）
+- RT subject: ブラウザフローで得た refresh token を subject にした発行と redemption の成立 / actor: 別ブラウザコンテキストで取得した別ユーザーの ID トークンを actor_token にし、ID-JAG と redemption 後のアクセストークンの両方で `act` が保たれることの検証（IdP 側は `XAA_ALLOW_ACTOR_TOKENS` で有効化）
 - 負の検証: 自 OP（IdP）への redemption 提示 → `invalid_grant` / 別クライアント資格情報での redemption → `invalid_grant` / discovery のメタデータ検証
 - 両 OP が discovery で ID-JAG 対応を広告していない場合は `test.skip`（共有 spec suite を全サンプルで green に保つ）
 
@@ -552,4 +604,4 @@ packages/cli  ─────> @maronn-openid-connect/experimental（生成コ�
 
 - 昇格条件の目安: (1) draft が RFC になる、または WG last call に到達する (2) conformance テストが 2 サイクル以上安定 (3) 信頼設定の形状への変更要望が収束
 - 昇格時の作業: core の grant ディスパッチへの統合、`TokenErrorCode` への `invalid_target` 追加、`ProviderMetadata` への新メタデータ統合
-- 拡張候補: refresh_token subject_token 対応、RAR（authorization_details）、DPoP による sender-constraining（draft §9.8）、client_id 対応表、step-up（RFC 9470）
+- 拡張候補: RAR（authorization_details）、DPoP による sender-constraining（draft §9.8）、client_id 対応表、step-up（RFC 9470）、actor チェーンのネスト発行（現状の発行は 1 段のみ）

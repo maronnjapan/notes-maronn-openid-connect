@@ -45,8 +45,9 @@ XAA はドメインを跨ぐ仕組みなので、動かして確認するとき�
 各認可サーバーは自分のトークンの発行権を手放さず、IdP は「仲介の判断」だけを担う。
 
 ID-JAG が期限切れになったら、アプリ A は手元の ID トークンでステップ 2 からやり直す。
+ID トークン自体も切れていたら、SSO で一緒に受け取っていた **IdP のリフレッシュトークン**をそのまま `subject_token` にして新しい ID-JAG を要求できる（ユーザーを再ログインさせずに済む。draft §4.3.2）。
 アプリ B のアクセストークンが切れたときは、ID-JAG がまだ有効なら同じ ID-JAG を再提示すればよい。
-つまり ID-JAG は、アプリ B のリフレッシュトークンをアプリ A が長期保持する状態の代替になる。
+つまり ID-JAG は、アプリ B のリフレッシュトークンをアプリ A が長期保持する状態の代替になり、長期資格情報は IdP のリフレッシュトークン 1 本に集約される。
 
 ## 本リポジトリで実装すること
 
@@ -55,7 +56,8 @@ ID-JAG が期限切れになったら、アプリ A は手元の ID トークン
 **1. experimental パッケージ（`@maronn-openid-connect/experimental/id-jag`）**
 
 - 発行側: Token Exchange リクエストの検証（ID トークンの署名と宛先の検証を含む）、audience と scope のポリシー検証、ID-JAG の組み立てと RS256 署名、応答生成
-- 受領側: JWT Bearer リクエストの検証、ID-JAG の署名とクレーム（typ / iss / aud / exp / client_id など）の検証、アクセストークン発行素材の導出
+- 発行側の subject には、設定により **IdP のリフレッシュトークン**も使える（検証は通常の refresh grant と同一で、RT は消費しない）。**actor_token**（別の主体の ID トークン）を受けて「誰が subject の代理として動くか」を `act` クレームに記録することもできる（既定は無効の opt-in）
+- 受領側: JWT Bearer リクエストの検証、ID-JAG の署名とクレーム（typ / iss / aud / exp / client_id / act など）の検証、アクセストークン発行素材の導出。act は発行するアクセストークンへそのまま引き継ぐ
 - 既存機能と同じ「合成関数＋ステップ関数」の二層構成で、生成コードから 1 ステップずつ差し替えられる
 
 **2. CLI（`--enable id-jag`）**
@@ -121,7 +123,21 @@ ID-JAG は有効期間内なら何度でも再提示できる。
 両者は同じ固定文言で返す。
 discovery のメタデータにも、対応プロファイルの広告だけを載せ、信頼リストや許可 audience は載せない（draft §9.4 の MUST NOT）。
 
-**7. ユーザー同意が消えることそのものへの注意**
+**7. リフレッシュトークン subject は「同じ主体、同じ関門」**
+
+RT を subject にしても、通れる関門は ID トークン経路と同じである（同じユーザー、同じクライアント束縛、同じ audience / scope ポリシー）。
+増えるのは利便性だけで、権限は増えない。
+その代わり検証は通常の refresh grant と完全に同じにしてある: rotation 済み RT の再提示は盗難シグナルとして token family ごと失効させ、ログインセッションに束縛された online RT はログアウト後に使えない。
+また `openid` を持たない grant の RT は受けない（ID トークンが存在し得ない grant に「Identity Assertion の代替」は成立しない）。
+
+**8. actor_token は明示的な opt-in**
+
+draft は actor_token を「運べる」とだけ定め、処理規則を定義していない（§9.7 が拡張の指針を示すのみ）。
+規則が無いものを黙って受けると、無関係なトークンの持ち込みで委譲の権威を過大表明され得る。
+だから本実装の actor 対応は既定で無効にし、`allowActorTokens` を立てたときだけ、subject と同じ検証（本 OP 発行・自クライアント宛ての ID トークン）を通った actor の `sub` だけを `act` に記録する。
+受領側は act を落とさず自分のアクセストークンへ引き継ぐ。落とすと「誰が代理で動いたか」の記録が消え、委譲がただの impersonation に見えてしまうからだ。
+
+**9. ユーザー同意が消えることそのものへの注意**
 
 これは実装の欠陥ではなく XAA の性質だが、運用上いちばん意識すべき点である。
 ユーザーの画面に「アプリ A がアプリ B のデータにアクセスすることを許可しますか」は二度と出ない。
@@ -156,6 +172,30 @@ curl -s -X POST http://127.0.0.1:3040/token \
   -d "assertion=${ID_JAG}" \
   -d 'client_id=e2e-client' -d 'client_secret=e2e-client-secret'
 # => {"access_token":"...","token_type":"Bearer","expires_in":3600,"scope":"openid profile"}
+
+# (2') ID トークンが切れているとき: リフレッシュトークンを subject にする
+#      subject_token_type を refresh_token に変えるだけで、応答は (2) と同じ形
+curl -s -X POST http://127.0.0.1:3010/token \
+  -d 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+  -d 'requested_token_type=urn:ietf:params:oauth:token-type:id-jag' \
+  -d 'audience=http://127.0.0.1:3040' \
+  -d 'scope=openid profile' \
+  -d "subject_token=${REFRESH_TOKEN}" \
+  -d 'subject_token_type=urn:ietf:params:oauth:token-type:refresh_token' \
+  -d 'client_id=e2e-client' -d 'client_secret=e2e-client-secret'
+
+# (2'') 代理実行を記録するとき: actor_token を追加する（allowActorTokens 有効時のみ）
+#       発行される ID-JAG に act = {"sub":"<actor の sub>"} が入り、
+#       redemption 後のアクセストークンにも同じ act が引き継がれる
+curl -s -X POST http://127.0.0.1:3010/token \
+  -d 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+  -d 'requested_token_type=urn:ietf:params:oauth:token-type:id-jag' \
+  -d 'audience=http://127.0.0.1:3040' \
+  -d "subject_token=${ID_TOKEN}" \
+  -d 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' \
+  -d "actor_token=${ACTOR_ID_TOKEN}" \
+  -d 'actor_token_type=urn:ietf:params:oauth:token-type:id_token' \
+  -d 'client_id=e2e-client' -d 'client_secret=e2e-client-secret'
 ```
 
 ## 参照

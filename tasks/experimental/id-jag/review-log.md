@@ -24,3 +24,25 @@
   - `jwksUri` の fetch を生成コード側に置く判断は、キャッシュ TTL 内の鍵ローテーションで検証失敗が起き得る。PoC 用途の許容範囲としてキャッシュ 300 秒を明記し、理解資料でなくコードコメントで案内する
 - **判定**: Pass with changes（指摘 3 件は同日修正済み）
 - **次回可能日**: 実装後（実装との整合レビュー）
+
+## Review 2
+
+- **日付**: 2026-08-30（対応範囲拡張の改版と同日）
+- **観点**: 対応範囲の拡張（refresh token subject と actor_token）の仕様妥当性とセキュリティ（RT 検証水準の refresh grant との一致 / actor 拡張の draft §9.7 適合 / fail-safe デフォルト / エラー契約の一貫性）
+- **確認資料**:
+  - draft-ietf-oauth-identity-assertion-authz-grant-04 §4.3.2（RT subject の例）、§4.3.3（RT は「通常の refresh_token grant と同じ方法で検証」する MUST と、subject クレームを新規 Identity Assertion 発行時と同様に組み立てる SHOULD）、§4.4.3（RT による ID-JAG 更新の位置づけ）、§9.7（actor 拡張が考慮すべき点: 無関係トークンによる権威の過大表明、act 導出、開示最小化、sub と act の区別）
+  - `packages/core/src/refresh-token-grant.ts` — resolveRefreshToken / validateRefreshTokenUnused（rotation 再利用での family 失効）/ validateRefreshTokenClient / validateRefreshTokenExpiration / validateRefreshTokenSession（online RT の fail-closed）がすべて公開ステップ関数であり、再利用で「同じ方法で検証」を文字どおり満たせることを確認
+  - `packages/core/src/token-request.ts` の RefreshTokenInfo — subject / authTime / acr / amr が保存済みで、ID トークン経路と同じ subject 素材を RT から組み立てられることを確認
+- **指摘**:
+  1. RT subject の検証で rotation 済み RT を単に拒否するだけの案は、refresh grant の再利用検知（family 失効）より弱く、「同じ方法で検証」の draft 要件からも外れる
+  2. actor_token をリクエスト形式の検証だけで受ける案は、draft §9.7 が警告する「無関係な、あるいはより信頼の低いトークンの持ち込みによる権威の過大表明」を防げない
+  3. 受領側が未知の act をそのまま無視する案は、委譲の記録を黙って消して impersonation に見せる劣化（§9.7 の sub / act 区別の要請に反する）
+- **修正**:
+  1. core の refresh grant ステップ関数を再利用し、family 失効を含む同一挙動にした（RT は消費しない点だけが refresh grant と異なり、これは draft §4.4.3 の更新パスの前提）
+  2. actor_token を「本 OP 発行・認証クライアント宛ての ID トークン」に限定し、subject と同一の検証（validateIdTokenHint）を通した actor の sub だけを act に載せる。既定無効の opt-in とした
+  3. 受領側は act を構造検証（sub 必須、ネスト同形）して発行トークンへ必ず引き継ぎ、malformed は invalid_grant で拒否する設計にした
+- **残リスク**:
+  - RT subject の「requested scopes and audience remain within the authorization context of the Refresh Token」（draft §4.3.3）は、ID-JAG の scope がリソース AS ドメインのものである以上、IdP ドメインの RT scope と直接比較できない。本実装は「RT の grant に openid があること」を authorization context の最低要件とし、scope 上限は従来どおり allowedScopes とリソース AS 側ポリシーに委ねる解釈を採った。draft の改版でこの点が具体化されたら追随する
+  - actor の act は 1 段のみ（actor_token 自体が委譲済みであるケースのチェーン発行は未対応）。拡張候補として仕様書に記録済み
+- **判定**: Pass with changes（指摘 3 件は同日修正済み）
+- **次回可能日**: 実装後（実装との整合レビュー）
