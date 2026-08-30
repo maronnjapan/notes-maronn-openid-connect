@@ -56,7 +56,7 @@ ID トークン自体も切れていたら、SSO で一緒に受け取ってい�
 **1. experimental パッケージ（`@maronn-openid-connect/experimental/id-jag`）**
 
 - 発行側: Token Exchange リクエストの検証（ID トークンの署名と宛先の検証を含む）、audience と scope のポリシー検証、ID-JAG の組み立てと RS256 署名、応答生成
-- 発行側の subject には、設定により **IdP のリフレッシュトークン**も使える（検証は通常の refresh grant と同一で、RT は消費しない）。**actor_token**（別の主体のトークン）を受けて「誰が subject の代理として動くか」を `act` クレームに記録することもできる（既定は無効の opt-in）。actor_token の種別は ID トークンを組込みで検証し、それ以外（アクセストークンや独自 URN）は**デプロイ側が書く検証リゾルバ**（`actorTokenResolver`）で受けられる
+- 発行側の subject には、設定により **IdP のリフレッシュトークン**も使える（検証は通常の refresh grant と同一で、RT は消費しない）。**actor_token**（別の主体のトークン）を受けて「誰が subject の代理として動くか」を `act` クレームに記録することもできる（既定は無効の opt-in）。受ける actor_token の種別は仕様（RFC 8693）が定義する 6 種を一律に扱い、中身の検証は**デプロイ側が書く検証リゾルバ**（`actorTokenResolver`）が担う
 - 受領側: JWT Bearer リクエストの検証、ID-JAG の署名とクレーム（typ / iss / aud / exp / client_id / act など）の検証、アクセストークン発行素材の導出。act は発行するアクセストークンへそのまま引き継ぐ
 - 既存機能と同じ「合成関数＋ステップ関数」の二層構成で、生成コードから 1 ステップずつ差し替えられる
 
@@ -134,17 +134,18 @@ RT を subject にしても、通れる関門は ID トークン経路と同じ�
 
 draft は actor_token を「運べる」とだけ定め、処理規則を定義していない（§9.7 が拡張の指針を示すのみ）。
 規則が無いものを黙って受けると、無関係なトークンの持ち込みで委譲の権威を過大表明され得る。
-だから本実装の actor 対応は既定で無効にし、`allowActorTokens` を立てたときだけ、subject と同じ検証（本 OP 発行・自クライアント宛ての ID トークン）を通った actor の `sub` だけを `act` に記録する。
+だから本実装の actor 対応は既定で無効にし、`allowActorTokens` を立てたときだけ actor の `sub` を `act` に記録する。
 受領側は act を落とさず自分のアクセストークンへ引き継ぐ。落とすと「誰が代理で動いたか」の記録が消え、委譲がただの impersonation に見えてしまうからだ。
 
-**8-2. 独自種別の actor_token は「構造はライブラリ、中身はあなた」**
+**8-2. actor_token は「構造はライブラリ、中身はあなた」**
 
-actor_token の種別は RFC 8693 上 ID トークンに限らない（アクセストークン、SAML、独自 URN も正当な値である）。
-本実装で ID トークン以外を受けたいときは、`idJagConfig.actorTokenResolver` に自分の検証ロジックを渡す。
-責務の線引きは固定である: **リクエストの構造がおかしいか**（actor_token と actor_token_type の対応規則、非空、opt-in スイッチ）と**リゾルバが返した値の構造**（`sub` 必須、`sub` / `act` 以外の属性は落とす）はライブラリが検証し、**トークンの中身が本物か**（署名・失効・誰のものか）はリゾルバが検証する。
-リゾルバを書かなければ従来どおり ID トークン以外は拒否され、ID トークンの組込み検証はリゾルバでも差し替えられない。
-つまり検証を「省略」する構成は作れず、作れるのは「自分の検証を足す」構成だけである。
-サンプル（hono-cloudflare の `app.ts`）には、自 OP が発行したアクセストークンを自分のストアで照合するデモリゾルバがある。
+actor_token の種別は RFC 8693 §3（と RFC 7519 §9）が定義する 6 種である: access_token、refresh_token、id_token、jwt、saml1、saml2。
+本実装はこの一覧を**種別で区別せず一律に受け**、一覧に無い識別子だけを拒否する。ID トークンとそれ以外で経路を分けることはしない。
+中身の検証は `idJagConfig.actorTokenResolver` に集約されている。
+責務の線引きは固定である: **リクエストの構造がおかしいか**（actor_token と actor_token_type の対応規則、非空、種別が一覧にあるか、opt-in スイッチ）と**リゾルバが返した値の構造**（`sub` 必須、`sub` / `act` 以外の属性は落とす）はライブラリが検証し、**トークンの中身が本物か**（署名・失効・誰のものか）はリゾルバが検証する。
+生成コードには既定リゾルバが入っていて、自 OP 発行・自クライアント宛ての ID トークンを検証し、それ以外の種別には「無効」を返す。
+受ける種別を増やすなら、この既定を差し替えるか、包んで自分の種別を足す。サンプル（hono-cloudflare の `app.ts`）は後者で、自 OP が発行したアクセストークンを自分のストアで照合し、残りは既定リゾルバへ渡している。
+リゾルバを `undefined` にすると、検証手段が無いので actor_token はすべて拒否される。
 
 **9. ユーザー同意が消えることそのものへの注意**
 
@@ -207,9 +208,9 @@ curl -s -X POST http://127.0.0.1:3010/token \
   -d 'client_id=e2e-client' -d 'client_secret=e2e-client-secret'
 
 # (2''') actor_token が ID トークン以外のとき: actor_token_type を変えるだけ。
-#        ただし通るのは、その種別を検証する actorTokenResolver を
-#        デプロイ側で設定した OP に限る（サンプルはアクセストークンのデモリゾルバ入り。
-#        XAA_ACTOR_TOKEN_RESOLVER=access-token で有効化）
+#        受理は仕様定義の 6 種すべてに開いており、通るかどうかは
+#        actorTokenResolver が「有効」と判断するかで決まる（サンプルは
+#        XAA_ACTOR_TOKEN_RESOLVER=access-token でアクセストークンを足したデモ入り）
 curl -s -X POST http://127.0.0.1:3010/token \
   -d 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
   -d 'requested_token_type=urn:ietf:params:oauth:token-type:id-jag' \
