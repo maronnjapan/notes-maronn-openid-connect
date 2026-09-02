@@ -16,6 +16,7 @@ Each guide explains what the feature does, which use cases it serves, and walks 
 | JARM | JARM (OpenID Foundation Final, 2022-11-09) | [jarm.ja.md](./jarm.ja.md) | [jarm.en.md](./jarm.en.md) |
 | Device Authorization Grant | RFC 8628 | [device-authorization-grant.ja.md](./device-authorization-grant.ja.md) | [device-authorization-grant.en.md](./device-authorization-grant.en.md) |
 | Cross-App Access / ID-JAG | draft-ietf-oauth-identity-assertion-authz-grant-04 | [id-jag.ja.md](./id-jag.ja.md) | [id-jag.en.md](./id-jag.en.md) |
+| CIBA (Client-Initiated Backchannel Authentication) | CIBA Core 1.0 (OpenID Foundation Final, 2021-09-01) | [ciba.ja.md](./ciba.ja.md) | [ciba.en.md](./ciba.en.md) |
 
 ## 各解説が全文を載せる範囲 / What each guide embeds in full
 
