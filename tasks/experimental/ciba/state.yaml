@@ -1,4 +1,4 @@
-status: Approved
+status: In Review
 feature_id: ciba
 created_at: 2026-08-08
 last_reviewed_at: 2026-08-10
@@ -7,3 +7,8 @@ review_count: 3
 implementation_ready: true
 approved_at: 2026-08-10
 blocked_reasons: []
+implementation_started_at: 2026-09-02
+implementation_branch: experimental/ciba
+pull_request: 72
+implemented_at: null
+merge_commit: null
