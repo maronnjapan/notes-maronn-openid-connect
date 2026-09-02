@@ -1,0 +1,14 @@
+status: Implemented
+feature_id: id-jag
+created_at: 2026-08-30
+last_reviewed_at: 2026-08-30
+next_review_on: null
+review_count: 4
+implementation_ready: true
+approved_at: null
+blocked_reasons: []
+implementation_started_at: 2026-08-30
+implementation_branch: claude/xaa-id-jag-implementation-3iew13
+pull_request: 70
+implemented_at: 2026-08-30
+merge_commit: 2d0e90338cbdabcb968afdf5290180f078c67034
