@@ -1,4 +1,4 @@
-status: In Review
+status: Implemented
 feature_id: ciba
 created_at: 2026-08-08
 last_reviewed_at: 2026-08-10
@@ -10,5 +10,5 @@ blocked_reasons: []
 implementation_started_at: 2026-09-02
 implementation_branch: experimental/ciba
 pull_request: 72
-implemented_at: null
-merge_commit: null
+implemented_at: 2026-09-02
+merge_commit: 799135379e61a4f9532001c230d7e815110c3678
