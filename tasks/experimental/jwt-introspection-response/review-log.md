@@ -55,3 +55,31 @@
   - `Accept: application/token-introspection+jwt;q=0` を JWT 要求と解釈する設計判断は残る。メディアタイプを自ら列挙した呼び出し元にのみ影響し、開示範囲は変わらないため、セキュリティ上の残リスクとは扱わない
 - **判定**: **Pass with changes**（誤開示方向の欠陥は見つからず、U1 を確定して仕様書と理解資料へ反映済み。重大な未解決セキュリティ事項はない）
 - **次回可能日**: 2026-08-26
+
+## Review 3
+
+- **日付**: 2026-09-02
+- **観点**: 実装着手可否（追加調査なしで着手できるか / 受け入れ条件の客観性 / 対象ファイルと変更範囲の現物一致 / API・CLI・テスト・Docs・実装解説の一貫性 / 実装順序と検証方法 / Experimental であることの利用者への明示）。Review 2 以後に main へ入った id-jag 実装（PR #70、マージコミット 2d0e903）との差分照合に重点を置いた
+- **確認資料**:
+  - `packages/cli/src/features.ts`（`EXPERIMENTAL_FEATURES` の現在の末尾が `'id-jag'` であること / `resolveFeatures` の本体 213-242 行。enable/disable 反映後・`return features` 直前が cross-feature 検証の挿入位置として素直に成立すること）
+  - `packages/cli/src/frameworks/hono/templates.ts`（`introspectionRouteTemplate(corePkg: string)`: 6634 行へ移動。引数追加の計画は現物と整合 / discovery スプレッドマージ: 5711 行に `${idJagDiscoveryMetadata}` が加わっており追記位置は不変 / JARM conformance ブロックの `inspectJarmJwt`: 13721 行付近。JWKS から kid で鍵を解決し `crypto.subtle.verify` で RS256 検証する self-contained ヘルパーの実物）
+  - `packages/cli/src/frameworks/hono/index.ts:45` / `packages/cli/src/frameworks/web-standard/templates.ts:2469`（呼び出し 2 箇所の現在位置）
+  - `packages/cli/src/index.ts`（`withExperimentalPackage`: 28 行。`features.idJag` まで含む否定条件リストへ 1 行足す形が現物と一致）
+  - ルート `package.json`（`review:experimental` スクリプトが存在しないこと）と OSS コミット `2cbf324`（2026-08-23 の notes 分離で `test:experimental-review` ごと削除された履歴）
+  - `samples/*/package.json`（experimental フル有効は hono-cloudflare のみ。express / fastify / nextjs は `--enable device-authorization-grant` のみという現行の enable 構成）
+  - `tests/e2e/specs/`（jarm.spec.ts / xaa-id-jag.spec.ts の存在。機能別 spec を 1 本足す構成の先例）
+  - `docs/library-document/src/content/docs/experimental/`（既存 5 機能のページと index の機能一覧）/ `packages/experimental/README.md`（「提供機能」表）
+  - `implementation-guides/experimental/`（`<feature-id>.ja.md` / `.en.md` の命名と id-jag までの既存解説）
+- **指摘**:
+  1. **[U3・確定] conformance での JWT 検証手段**: JARM conformance ブロックの `inspectJarmJwt` が JWKS 解決 → kid 一致 → RS256 検証を fetch ベースで完結しており、本機能の conformance ブロックへ同型ヘルパーを機能ローカルに複製すれば足りる。追加調査は不要。未解決事項 U3 を確定へ更新した
+  2. **[完了条件・修正] `pnpm review:experimental` の削除**: 完了条件 5 と実装順序 7 が参照していた昇格レビューパケット生成ツールは、仕様作成日（2026-08-24）の前日 2026-08-23 に notes 分離（OSS コミット 2cbf324）で OSS リポジトリから削除済みで、notes 側にも実行体は存在しない。id-jag 実装もパケットを生成していない。完了条件 5 を typecheck / build / packages テストの成立へ差し替え、実装順序 7 からパケット生成を除いた
+  3. **[実装順序・修正] サンプルの enable 範囲**: 実装順序 6 の「samples/*/package.json へ追加」は現行構成（experimental フル有効は hono-cloudflare のみ）と不整合。JARM / id-jag の先例に合わせ hono-cloudflare のみへ限定し、E2E も同サンプルを対象とするよう修正した
+  4. **[ドキュメント要件・修正] 利用者向けページの所在**: 要件が `packages/experimental/README.md` の節追加のみで、実際の利用者向けドキュメントの置き場である `docs/library-document/src/content/docs/experimental/`（既存 5 機能がページを持つ）を挙げていなかった。ページ追加と index 更新を要件へ追加し、README 側は「提供機能」表への行追加に改めた
+  5. **[現物照合・更新] 行番号アンカーの追随**: id-jag マージで `introspectionRouteTemplate` は 6231→6634 行、discovery マージは 5306→5711 行（`${idJagDiscoveryMetadata}` が末尾に追加）、web-standard 呼び出しは 2459→2469 行へ移動。関数名・構造の変更はなく計画自体は不変のため、仕様書のアンカーのみ更新した。`EXPERIMENTAL_FEATURES` 末尾追加の注意書きも「現在の末尾は id-jag」へ更新した
+  6. **[確認] 受け入れ条件の客観性と一貫性**: 完了条件 1〜7 はすべてコマンド実行またはバイト比較で判定でき、単体テスト計画・conformance 計画・E2E 計画・公開 API 案・CLI オプション案の間で対象名（関数 3 つ・定数 2 つ・discovery キー・Content-Type）が一致している。Experimental の明示は生成コードコメント・CLI 説明・利用者向けページの 3 点で担保される
+- **修正**: 指摘 2〜5 を本日中に specification.md へ反映（完了条件 5 / 実装順序 6・7 / ドキュメント要件 / CLI オプション案のアンカーと末尾注意 / U3）
+- **残リスク**:
+  - 実装順序 5 の「バイト同一確認」は id-jag マージ後の main を基準に取り直す（本レビューで基準がずれる変更は確認していないが、実装時に変更前 CLI での生成をやり直すこと）
+  - `Accept: application/token-introspection+jwt;q=0` を JWT 要求と解釈する設計判断は Review 2 記載のとおり残る（セキュリティ上の残リスクではない）
+- **判定**: **Pass with changes**（指摘はすべて仕様書の追随修正で解消済み。追加調査なしで実装着手できる状態にあり、未解決事項はすべて確定。セキュリティ未解決事項なし）
+- **次回可能日**: —（Approved。以後は実装 Routine が引き継ぐ）

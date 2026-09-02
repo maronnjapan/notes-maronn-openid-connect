@@ -214,14 +214,14 @@ RFC 9701 の JWT は `exp` を含めないため寿命設定が不要で、alg �
 - **組み合わせ検証（新設）**: `resolveFeatures` の解決後に `jwtIntrospectionResponse && !introspection` を検査し、`--enable jwt-introspection-response --disable introspection` の組を「jwt-introspection-response requires the introspection feature」の明示エラーで拒否する。既存の enable/disable 重複検査と同じ throw 方式。cross-feature 依存の検証は本機能が初なので、エラーメッセージに依存の理由（イントロスペクションエンドポイントが生成されない）を含める
 - `packages/cli/src/index.ts` の `withExperimentalPackage` の feature チェックへ `features.jwtIntrospectionResponse` を追加（experimental パッケージをインストールガイダンスに含める条件。既存 4 機能と同じ 1 行）
 - 生成物（hono テンプレート起点・web-standard 変換で全フレームワークへ展開）:
-  - `introspectionRouteTemplate`（`packages/cli/src/frameworks/hono/templates.ts:6231`）に `features` 引数を追加し（`loginRouteTemplate(corePkg, features)` と同じ形）、呼び出し 2 箇所（`packages/cli/src/frameworks/hono/index.ts:45` と `packages/cli/src/frameworks/web-standard/templates.ts:2459`）へ `features` を渡す。テンプレートには次を条件付き補間する:
+  - `introspectionRouteTemplate`（`packages/cli/src/frameworks/hono/templates.ts:6634`。id-jag マージ後の位置）に `features` 引数を追加し（`loginRouteTemplate(corePkg, features)` と同じ形）、呼び出し 2 箇所（`packages/cli/src/frameworks/hono/index.ts:45` と `packages/cli/src/frameworks/web-standard/templates.ts:2469`）へ `features` を渡す。テンプレートには次を条件付き補間する:
     - experimental subpath からの import（`acceptsIntrospectionJwt` / `restrictIntrospectionResponseToCaller` / `createIntrospectionResponseJwt`）と core からの `selectSigningKeyByAlg` / `type SigningKey` の追加 import
     - 応答構築後の分岐: `acceptsIntrospectionJwt(c.req.header('Accept'))` が true なら、`restrictIntrospectionResponseToCaller` → `c.get('signingKeys')` から `selectSigningKeyByAlg(keys, 'RS256')` → `createIntrospectionResponseJwt` → `c.header('Content-Type', 'application/token-introspection+jwt')` を設定して `c.text(jwt)` で返却（hono の `c.text` も web-standard 変換先の `WebContext.text` も、設定済み `Content-Type` を上書きしない実装であることを確認済み）。false なら従来の `c.json(response)`
     - EXPERIMENTAL である旨のコメント（既存機能と同じ形式）
-  - discovery への追記: 最終 `c.json` のスプレッドマージ（`templates.ts:5306` 付近の `${parDiscoveryMetadata}${deviceDiscoveryMetadata}${jarmDiscoveryMetadata}` と同じ場所）へ `introspection_signing_alg_values_supported: ['RS256']` を追加（RFC 9701 §7。introspection と jwt-introspection-response の両方が有効な場合のみ）
+  - discovery への追記: 最終 `c.json` のスプレッドマージ（`templates.ts:5711` 付近の `${parDiscoveryMetadata}${deviceDiscoveryMetadata}${jarmDiscoveryMetadata}${idJagDiscoveryMetadata}` と同じ場所）へ `introspection_signing_alg_values_supported: ['RS256']` を追加（RFC 9701 §7。introspection と jwt-introspection-response の両方が有効な場合のみ）
   - conformance.test.ts への RFC 9701 シナリオ追加（`packages/cli` の生成テンプレートを変更する。sample を直接編集しない）
 - 既存機能との干渉なし: `jwt-introspection-response` 無効時の生成出力は現行とバイト同一であること（完了条件で検証）
-- 実装時の注意: `packages/cli/src/__tests__/par-feature.test.ts:112-114` の unknown-feature テストは期待エラーメッセージに experimental 機能一覧の部分文字列を含む。`toThrow` は部分一致のため、`EXPERIMENTAL_FEATURES` 末尾への追加では壊れないが、追加位置を配列末尾以外にするとメッセージ列挙順が変わり失敗する。末尾に追加すること（CIBA 実装が先に入った場合も同様に末尾へ追加する）
+- 実装時の注意: `packages/cli/src/__tests__/par-feature.test.ts:112-114` の unknown-feature テストは期待エラーメッセージに experimental 機能一覧の部分文字列を含む。`toThrow` は部分一致のため、`EXPERIMENTAL_FEATURES` 末尾への追加では壊れないが、追加位置を配列末尾以外にするとメッセージ列挙順が変わり失敗する。末尾に追加すること（Review 3 時点の末尾は `'id-jag'`。以後さらに別機能が先に入っても同様に末尾へ追加する）
 
 ## 設定値とデフォルト
 
@@ -300,7 +300,8 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 
 ## ドキュメント要件
 
-- `packages/experimental/README.md` に `jwt-introspection-response` の節を追加（Accept 明示のみ・RS256 固定・audience 制限の既定・第三者 RS へ開示するにはその client_id を `audience` 値としてトークンへ入れる運用・JSON 経路は不変・401/400 の相違・TLS と PII の利用者責務、の明記）
+- `docs/library-document/src/content/docs/experimental/jwt-introspection-response.md` に利用者向けページを追加し、`experimental/index.md` の機能一覧を更新する（既存 5 機能のページ構成に倣う。Accept 明示のみ・RS256 固定・audience 制限の既定・第三者 RS へ開示するにはその client_id を `audience` 値としてトークンへ入れる運用・JSON 経路は不変・401/400 の相違・TLS と PII の利用者責務、の明記）
+- `packages/experimental/README.md` の「提供機能」表へ `jwt-introspection-response` の行を追加する（RFC 9701 / subpath import 元）
 - CLI の `--enable` ヘルプ文言（`features.ts` の JSDoc とヘルプ出力）
 - 生成コードコメントに Experimental である旨と API 不安定の警告（既存機能と同じ形式）
 - `docs/implementation-guides/experimental/jwt-introspection-response.ja.md` / `.en.md` を作成する（CLAUDE.md の規約。実装しきった時点で必須。掲載コードは抜粋ではなく全文）
@@ -319,8 +320,8 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 3. `packages/cli/src/features.ts` へ feature 追加（`EXPERIMENTAL_FEATURES` 末尾）と `resolveFeatures` の組み合わせ検証・`packages/cli/src/index.ts` の `withExperimentalPackage` へ `features.jwtIntrospectionResponse` を追加
 4. テンプレート変更（共有 `hono/templates.ts`）: `introspectionRouteTemplate` への `features` 引数追加と条件付き補間 → discovery スプレッドマージ → conformance テンプレート（完了条件 2・6）。続けて呼び出し 2 箇所（`hono/index.ts:45` / `web-standard/templates.ts:2459`）へ `features` を渡す変更（他フレームワークへの展開は既存の `toWebRouteTemplate` 変換で完結する）
 5. `--enable jwt-introspection-response` なし生成のバイト同一確認（完了条件 3。変更前後の CLI で同一設定の生成物を diff する。サンプルが使う既存の `--enable` 組み合わせでも確認する）
-6. `samples/*/package.json` の `generate` スクリプトへ `--enable jwt-introspection-response` を追加してサンプル再生成 → `tests/e2e` に検証シナリオを追加（完了条件 4）
-7. ドキュメント（README 節・ヘルプ・実装解説 ja/en）・changeset（CLI のみ minor を手書き）・`pnpm review:experimental jwt-introspection-response` でパケット生成（完了条件 5・7）
+6. `samples/hono-cloudflare/package.json` の `generate` スクリプトへ `--enable jwt-introspection-response` を追加してサンプル再生成 → `tests/e2e` に検証シナリオを追加（完了条件 4。JARM / id-jag の先例どおり、experimental 機能のフル有効化サンプルは hono-cloudflare のみとし、他サンプルの enable 構成は変えない）
+7. ドキュメント（利用者向けページ・README 節・ヘルプ・実装解説 ja/en）・changeset（CLI のみ minor を手書き）（完了条件 5・7）
 
 ## 完了条件
 
@@ -328,7 +329,7 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 2. `--enable jwt-introspection-response` で生成した OP に対する conformance.test.ts（全フレームワーク）が通る
 3. `jwt-introspection-response` を有効にしない生成出力が変更前とバイト同一である
 4. E2E シナリオ（JWT イントロスペクション全周）が通る
-5. `pnpm review:experimental jwt-introspection-response` でパケットが生成され `--check` が通る
+5. `pnpm typecheck` / `pnpm build` / `pnpm --filter "./packages/*" test` が通る（昇格レビューパケット生成ツール `pnpm review:experimental` は 2026-08-23 の notes 分離（OSS コミット 2cbf324）で OSS リポジトリから削除されており、id-jag 実装の先例どおりパケット生成は完了条件に含めない）
 6. discovery 出力・応答の `Content-Type` / JWT 構造が本仕様の表と一致する
 7. ドキュメント要件（`docs/implementation-guides/experimental/jwt-introspection-response.ja.md` / `.en.md` を含む）・Changeset要件を満たす
 
@@ -338,7 +339,7 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 |---|---|---|
 | U1 | audience 制限の判定に使う `aud` の意味論: 本 OP の `AccessTokenInfo.audience` に client_id 以外（リソース URI 等）が入る運用で、呼び出し元 client_id との単純一致が §3 の意図（RS の識別）と一致するか。既定の一致規則で十分か、識別子の対応表を持つべきか | **確定（Review 2）**: 生成コードの `aud` は UserInfo エンドポイント URL と要求リソース値で構成され、client_id を含まないことを実地確認。単純一致は fail-closed で §3 の MUST を満たし、識別子の対応表は持たない。開示したい RS の client_id を `audience` 値として発行する運用を「audience 制限」の節と README に記載する |
 | U2 | JWT 応答の返却手段 | **確定（Review 1）**: `c.header('Content-Type', ...)` を設定した上で `c.text(jwt)` を使う。hono の `c.text` と web-standard 変換先の `WebContext.text`（`web-standard/templates.ts` 内 `WebContext` クラス）はどちらも設定済み `Content-Type` を上書きしない実装で、既存の `Cache-Control` / `Pragma` ヘッダもそのまま載る |
-| U3 | conformance テストでの JWT 検証の実装手段: 生成アプリの conformance.test.ts が JWKS から公開鍵を組み立てて RS256 検証するユーティリティを既に持つか（ID トークン検証の既存実装を流用できるか） | open（Review 3 で既存 conformance テンプレートを確認して確定する） |
+| U3 | conformance テストでの JWT 検証の実装手段: 生成アプリの conformance.test.ts が JWKS から公開鍵を組み立てて RS256 検証するユーティリティを既に持つか（ID トークン検証の既存実装を流用できるか） | **確定（Review 3）**: JARM の conformance ブロックに `inspectJarmJwt`（`/.well-known/jwks.json` から `kid` で鍵を解決し `crypto.subtle.verify` で RS256 検証する self-contained ヘルパー）が実装済み。本機能の conformance ブロックにも同型のヘルパー（`inspectIntrospectionJwt` 等）を機能ローカルに複製する。機能間でヘルパーを共有しない方針（重複許容）は conformance テンプレート内でも同じ |
 
 ## 将来の昇格考慮
 
