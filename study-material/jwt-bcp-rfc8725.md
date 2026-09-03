@@ -89,6 +89,16 @@ RFC 8725 が扱うトピックを、本リポジトリで「すでに別ファ�
 - 現状: ID Token / Access Token / `id_token_hint` がすべて同じ鍵で署名され、同じ Issuer を主張するため、Cross-JWT confusion の余地がある
   - 特に「ID Token を Access Token として誤って受理してしまう」逆方向もあり得る
 - 差分: 共通検証ヘルパに「`typ` の期待値」を必ず引数で渡す API 設計が望ましいが、現在は未整理
+- 追記（2026-09-03 のコードレビューで判明）: **署名付き UserInfo レスポンス**（`generateUserInfoJwt`、
+  `userinfo.ts`）が上の棚卸しから漏れている。
+  `typ: 'JWT'` で `iss` / `sub` / `aud` / `exp` / `iat` を持ち、ID Token と同じ鍵・`kid` で
+  署名されるため、クレーム構成上 ID Token と区別できない。
+  `validateIdTokenHint` の検証（iss / aud / exp / iat / sub / 署名）をすべて満たすので、
+  同一ユーザー・クライアントの UserInfo JWT が `id_token_hint` として通用し、
+  ID Token の実効寿命を UserInfo JWT の TTL（既定 3600 秒）ぶん延長する。
+  §3.11 の分離（UserInfo JWT の `typ` に専用値を割り当てるか、検証側で期待 `typ` を
+  強制するか。専用値の相互運用性は OIDC Core §5.3.2 が `typ` を規定しないため要調査）を
+  検討する際は、この 4 種類目の JWT を対象に含める。
 
 ### `kid`/`jku`/`x5u`/`jwk` の信頼境界
 - 仕様: 受信した JWT Header の `kid` は「鍵を選ぶインデックス」としてしか使ってはならない。`jku` / `x5u` / `jwk` / `x5c` を信用して外部から鍵を取得することは原則禁止
