@@ -133,7 +133,7 @@ export function extractAlgorithmParamsFromJwk(jwk) {
 
 `Jwk` 型（`packages/core/src/jwks.ts`）は `use: string` / `alg: string` を**必須**として宣言しており、
 発行用（`exportPublicJwk` の戻り値）と受信検証用（`parseRequestObject` / `validateIdTokenHint` の入力）で
-同じ型を使い回している。TypeScript 利用者は実データに無いフィールドを捿造して渡すことになる。
+同じ型を使い回している。TypeScript 利用者は実データに無いフィールドを捏造して渡すことになる。
 
 問題点:
 
