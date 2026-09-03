@@ -37,6 +37,17 @@ Basic OP certification のブロッカーではない（OIDF Conformance Suite �
 
 検討詳細は `study-material/done/inbound-jwks-alg-optional-and-key-selection-parity.md` を参照。
 
+追記（2026-09-03 のコードレビューで判明）:
+`signingKeysToJwkSet()`（`packages/core/src/jwks.ts`）も `extractAlgorithmParamsFromJwk` を
+呼ぶため、`alg` を持たない RSA の `publicJwk` を返す `SigningKeyProvider` では throw する。
+生成コードはこの関数を `id_token_hint` 検証の既定 `jwksProvider` として配線しているので、
+その構成では正当な hint がすべて検証不能になり、`login_required` へ落ちる。
+WebCrypto の `exportKey('jwk')` は RSA 鍵で `alg` を含める（Node 22 で確認済み）ため
+既定の鍵生成経路では発生しないが、PEM 変換や外部保管の JWK など `alg` を落とした
+`publicJwk` を返す実装で顕在化する。修正時は同関数も対象に含め、
+「`SigningKey.publicJwk` は `alg` を含むとは限らない」という同関数の JSDoc と
+実装を一致させること。
+
 > 関連（重複回避）:
 > - `crit` ヘッダ拒否 / 外部鍵ヘッダ拒否などの**危険な入力の拒否**は
 >   `study-material/inbound-jws-verification-crit-and-alg-binding.md`。本タスクは逆に
@@ -51,7 +62,8 @@ Basic OP certification のブロッカーではない（OIDF Conformance Suite �
 - `packages/core/src/crypto-utils.ts`（`extractAlgorithmParamsFromJwk`）
 - `packages/core/src/id-token.ts`（`validateIdTokenHint` の候補鍵選択）
 - `packages/core/src/request-object.ts`（`parseRequestObject` の候補鍵選択・import 失敗の扱い）
-- `packages/core/src/jwks.ts`（`Jwk` 型の `alg` / `use` を optional にするか判断）
+- `packages/core/src/jwks.ts`（`Jwk` 型の `alg` / `use` を optional にするか判断。
+  `signingKeysToJwkSet` の `alg` 無し RSA `publicJwk` での throw 解消を含む）
 - `packages/core/src/id-token.test.ts`
 - `packages/core/src/request-object.test.ts`
 - `packages/core/src/crypto-utils.test.ts`
@@ -121,7 +133,7 @@ export function extractAlgorithmParamsFromJwk(jwk) {
 
 `Jwk` 型（`packages/core/src/jwks.ts`）は `use: string` / `alg: string` を**必須**として宣言しており、
 発行用（`exportPublicJwk` の戻り値）と受信検証用（`parseRequestObject` / `validateIdTokenHint` の入力）で
-同じ型を使い回している。TypeScript 利用者は実データに無いフィールドを捏造して渡すことになる。
+同じ型を使い回している。TypeScript 利用者は実データに無いフィールドを捿造して渡すことになる。
 
 問題点:
 
