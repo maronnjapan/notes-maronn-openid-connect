@@ -1,4 +1,4 @@
-status: Approved
+status: In Review
 feature_id: jwt-introspection-response
 created_at: 2026-08-24
 last_reviewed_at: 2026-09-02
@@ -6,4 +6,7 @@ next_review_on: null
 review_count: 3
 implementation_ready: true
 approved_at: 2026-09-02
+implementation_started_at: 2026-09-09
+implementation_branch: claude/confident-edison-pwzdhp
+pull_request: https://github.com/maronnjapan/maronn-openid-connect/pull/83
 blocked_reasons: []
