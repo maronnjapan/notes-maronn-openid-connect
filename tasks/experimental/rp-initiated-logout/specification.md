@@ -181,7 +181,7 @@ export function resolvePostLogoutRedirect(options: {
 - 組み合わせ検証は不要（セッション基盤・JWKS・ログイン画面は常に生成されるため、他機能への依存がない）。`--disable` との干渉もない
 - `packages/cli/src/index.ts` の `withExperimentalPackage` の feature チェックへ `features.rpInitiatedLogout` を追加
 - 生成物（hono テンプレート起点。web-standard 変換で全フレームワークへ展開):
-  - 新規 `endSessionRouteTemplate(corePkg)`: `GET|POST /logout` と `POST /logout/confirm`。Device の `deviceVerificationRouteTemplate`（`packages/cli/src/frameworks/hono/templates.ts:3700`）と同じ構造。確認画面の approve POST は Device / CIBA の approve と同じ per-flow CSRF cookie（HttpOnly / Secure / SameSite）で保護する
+  - 新規 `endSessionRouteTemplate(corePkg)`: `GET|POST /logout` と `POST /logout/confirm`。Device の `deviceVerificationRouteTemplate`（`packages/cli/src/frameworks/hono/templates.ts:3700`）と同じ構造。確認画面の approve POST は、確認画面の描画時に発行する cookie（HttpOnly / Secure / SameSite）と hidden `csrf_token` の対で保護する（セキュリティ要件の CSRF 行。Device の binding cookie / `buildDeviceBindingCookie` と同じモデル）
   - views インターフェースへ `logoutConfirmationPage` / `logoutCompletedPage` を追加（`deviceVerificationPage` と同じ差し替え可能パターン。機能有効時のみ型・既定実装を補間）
   - discovery への追記: 既存スプレッドマージ（`templates.ts:6981` の `${parDiscoveryMetadata}...` の並び）へ `end_session_endpoint: config.issuer + '/logout'` を追加
   - 設定への追記: 生成される設定モジュールへ `rpInitiatedLogoutConfig`（`postLogoutRedirectUris: Record<string, string[]>`、既定は空）を機能有効時のみ追加
@@ -213,10 +213,10 @@ export function resolvePostLogoutRedirect(options: {
 |---|---|
 | 未認証ログアウトによる DoS（§7: 有効な id_token_hint のない要求で被害者のセッションを勝手に終了させる） | 有効なヒントが現在セッションに一致する場合以外は必ず確認画面を挟む（§2 MUST）。GET リンクを踏ませるだけではセッションは消えない |
 | オープンリダイレクト | リダイレクトは「検証済みクライアント」かつ「登録値と完全一致」の場合のみ（§3 MUST NOT）。ヒントが無効な要求は一致してもリダイレクトしない。完全一致は文字列比較で、正規化・前方一致・クエリ無視をしない |
-| 確認画面への CSRF（攻撃者が被害者のブラウザで approve POST を偽造） | Device / CIBA の approve と同じ per-flow CSRF cookie を確認画面発行時に設定し、POST で照合する |
+| 確認画面への CSRF（攻撃者が被害者のブラウザで approve POST を偽造） | Device の binding cookie と同じモデルで守る。確認画面を描画するときに HttpOnly / Secure / SameSite の cookie を発行し、画面の hidden `csrf_token` と対で照合する。攻撃者は自分のブラウザで有効な（cookie, token）対を取得できるが、その cookie を被害者のブラウザに設定できないため、クロスサイトの POST は照合で落ちる。hidden token 単独・cookie 単独のどちらでも通さない（Device 先例の「record 保存の CSRF トークン単独は防御にならない」という判断に従う） |
 | `state` を介した反射（XSS・ヘッダインジェクション） | `state` は解釈せず URL API のクエリ付加でのみ出力する（URL エンコードされる）。画面へは出力しない |
 | セッション存在のオラクル | 確認画面・完了画面の文言をセッションの有無で変えない。応答時間差も、削除操作の有無以外の分岐を作らないことで最小化する |
-| 他人の ID Token を使ったログアウト強要 | ヒントの `sub` が現在セッションの subject と一致しない場合は即時ログアウトしない（確認画面に落ちる）。ヒント自体の真正性は署名検証（iss / aud / exp）で担保する |
+| 他人の ID Token を使ったログアウト強要 | ヒントの `sub` が現在セッションの subject と一致しない場合は即時ログアウトしない（確認画面に落ちる）。ヒント自体の真正性は署名検証（iss / aud / exp）で担保する。残る攻撃面は「被害者本人の有効な ID Token を盗んだ攻撃者が、被害者のブラウザにトップレベル遷移のリンクを踏ませて即時ログアウトさせる」経路だが、これは仕様が定める信頼モデル（有効なヒントの提示をログアウト権限の証拠とする。§2）の帰結であり、受容する。ID Token の窃取自体が前提であり、その時点でログアウト強要より重大な被害が成立している |
 | トークン値の漏洩 | `id_token_hint` は ID Token そのものであり、値をログ・画面に出さない |
 
 ## プライバシー考慮
@@ -303,8 +303,8 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 
 | ID | 内容 | 状態 |
 |---|---|---|
-| U1 | 確認画面から approve したとき、`post_logout_redirect_uri` へのリダイレクトを許すか。本仕様の判定規則 6 は「有効なヒントがあれば確認経由でも許す」とするが、確認画面を挟んだ時点でヒントとセッションの不一致が確定しているケース（別ユーザーのセッション）では、リダイレクトが RP へ「誰かがログアウトした」ことを伝える面がある。許容範囲か、確認経由は常に完了画面とすべきか | 未確定。Review 2 で §3 の文言と突き合わせて確定する |
-| U2 | `extractIdTokenHintAudience` の azp フォールバック（aud 配列時）: 本 OP の ID Token の aud は client_id 単一文字列のはずで、配列ケースは自 OP 発行トークンでは生じない。防御的分岐を持つか、単純化するか | 未確定。Review 2 で core の ID Token 発行実装（`buildIdTokenAudience` 相当）を確認して確定する |
+| U1 | 確認画面から approve したとき、`post_logout_redirect_uri` へのリダイレクトを許すか。確認画面を挟んだ時点でヒントとセッションの不一致が確定しているケース（別ユーザーのセッション）では、リダイレクトが RP へ「誰かがログアウトした」ことを伝える面がある | **確定（Review 2、2026-09-16）**: 判定規則 6 のまま許す。§3 はリダイレクトの正当性を「`post_logout_redirect_uri` とともに `id_token_hint` が供給されていること（供給がなければ MUST NOT）」と「登録値との完全一致（不一致なら MUST NOT）」に置き、確認画面の経由有無を条件にしていない。リダイレクト先は検証済み RP 自身の登録 URI に限られ、遷移が起きるのは End-User が確認画面で明示的に承認した後だけなので、「誰かがログアウトした」という信号も End-User の承認済み操作の結果である |
+| U2 | `extractIdTokenHintAudience` の azp フォールバック（aud 配列時）を防御的分岐として持つか、単純化するか | **確定（Review 2、2026-09-16）**: 判定規則 1 のまま azp フォールバックを持つ。Review 1 時点の「配列ケースは自 OP 発行トークンでは生じない」という想定は誤りだった。core の `buildIdTokenAudience`（`packages/core/src/token-response.ts:239`）は、追加 audience が構成された場合に `aud` を配列にし `azp = clientId` を必ず付与するため、自 OP 発行の ID Token でも配列 + azp の組は生じる。azp フォールバックは防御的分岐ではなく必須の経路である。なお同関数は audience が clientId のみに重複解決される場合 `aud` を単一文字列にするため、「配列（要素 1、azp なし）」は自 OP 発行では生じないが、抽出は署名検証前の入力に対する処理なので要素 1 フォールバックも許容として残す（信頼は後段の `validateIdTokenHint` が与える） |
 | U3 | 確認画面 POST 先のパス（`/logout/confirm` か `/logout` への POST 相乗りか）。`/logout` は end_session の POST 受理（§2 MUST）に使うため別パスとしたが、Device / CIBA の approve パス命名（`/device/approve` / `/ciba/approve`）に合わせて `/logout/approve` とする案もある | 未確定。Review 3 で生成テンプレートの一貫性から確定する |
 
 ## 将来の昇格考慮
