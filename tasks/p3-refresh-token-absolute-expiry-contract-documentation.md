@@ -50,7 +50,7 @@ RT の `exp`（= 絶対失効時刻）を返しており、
 - `packages/core/src/token-request.ts`（`RefreshTokenInfo` の JSDoc）
 - `packages/core/src/introspection.ts`（`buildRefreshTokenResponse` の JSDoc）
 - `packages/cli/src/frameworks/hono/templates.ts`（生成 `config.ts` のコメント、生成 README）
-- `packages/cli/src/__tests__/hono-generator.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - `samples/*/src/oidc-provider/config.ts`（生成物。直接編集しない）
 
 ## 仕様参照
@@ -140,13 +140,11 @@ Introspection へ配線済みである（`samples/hono-cloudflare/src/oidc-provi
   - [ ] `should report a rotated refresh token as inactive`
         — `used: true` の RT が `{ active: false }` になることを `toEqual` で固定する
         （既存挙動の回帰防止。「observation 経路が壊れていない」ことの担保）
-- [ ] `packages/cli/src/__tests__/hono-generator.test.ts`
-  - [ ] `should document that the refresh token lifetime is absolute in the generated config`
-        — 生成された `config.ts` に該当コメント文言が含まれることを固定する
-  - [ ] `should document how to observe the refresh token expiry in the generated README`
-        — 生成された README に introspection の案内が含まれることを固定する
-  - [ ] `should wire the refresh token resolver into the generated introspection route`
-        — Introspection から RT を解決できる配線が外れていないことを固定する
+- [ ] 生成物の確認（`packages/cli` の単体テストは廃止したので、テンプレート変更後に `check:generated` で更新した生成物の差分で確認する）
+  - [ ] 生成された `config.ts` に、refresh token の有効期限が absolute であるコメント文言が入っている
+  - [ ] 生成された README に introspection で期限を観測する案内が入っている
+  - [ ] `samples/*` の `conformance.test.ts`：`should wire the refresh token resolver into the generated introspection route`
+        — Introspection から RT を解決できる配線が外れていないことを契約テストで固定する
         （外れると `exp` の観測経路が黙って死ぬため）
 
 ## 完了条件

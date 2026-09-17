@@ -18,7 +18,7 @@
 ## 対象ファイル
 
 - `packages/cli/src/index.ts`（`parseArgs`）
-- `packages/cli/src/__tests__/cli.test.ts`
+- `packages/cli` には単体テストを置かない（README「packages/cli には単体テストを置かない」）。検証はビルド済み CLI を実行して行う
 
 ## 仕様参照
 
@@ -40,15 +40,20 @@ OIDC / OAuth の条文には関わらない。準拠先は CLI 自身の既存�
 
 ## テスト要件
 
-- [ ] `should error when --scope is given without a value`
-- [ ] `should error when --scope swallows the next option`（`--scope --output ./dir` で `--output` が scope にならないこと）
-- [ ] `should not write any file when the scope option is malformed`
+`packages/cli` の単体テストは廃止したので、ビルド済み CLI（`packages/cli/dist/index.js`）を実行して次を確認する。
+自動化する場合は、CLI を子プロセスとして起動する検証を `tests/` 配下に置く。
+
+- [ ] `--scope` に値が無いとき、非ゼロ終了する
+- [ ] `--scope --output ./dir` のとき、`--output` が scope として扱われず、非ゼロ終了する
+- [ ] scope オプションが不正なとき、ファイルを 1 つも書き出さない
 
 ## 完了条件
 
 ```bash
-pnpm --filter @maronn-openid-connect/cli test
+pnpm --filter @maronn-openid-connect/cli build
+node packages/cli/dist/index.js generate hono --output /tmp/oidc-scope-check --scope
+node packages/cli/dist/index.js generate hono --scope --output /tmp/oidc-scope-check
 pnpm typecheck
 ```
 
-- 値欠落の 2 経路がどちらも非ゼロ終了し、何も生成しないことをテストで固定する
+- 値欠落の 2 経路がどちらも非ゼロ終了し、`/tmp/oidc-scope-check` に何も生成されないことを確認する

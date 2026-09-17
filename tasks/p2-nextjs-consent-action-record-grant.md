@@ -16,7 +16,7 @@ Next.js の conformance テストは共通ルート（`routes/consent.ts`）を�
 ## 対象ファイル
 
 - `packages/cli/src/frameworks/web-standard/templates.ts`（`nextJsConsentActionTemplate`。1847 行付近の `recordConsent` 呼び出しの直後）
-- `packages/cli/src/__tests__/web-framework-generators.test.ts`（生成物の固定）
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - 生成物（直接編集しない・確認用）: `samples/nextjs-vercel/src/app/consent/actions.ts:97` 付近
 - 可能なら `tests/e2e`（nextjs-vercel ターゲットの撤回フロー）
 

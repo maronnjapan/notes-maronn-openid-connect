@@ -15,7 +15,7 @@
 ## 対象ファイル
 
 - `packages/cli/src/frameworks/hono/templates.ts`（scopes.ts テンプレートのルックアップと、conformance テスト内の `RESTRICTED_SCOPE_SUBJECTS` 書き込み箇所）
-- `packages/cli/src/__tests__/custom-scope-feature.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 
 ## 仕様参照
 

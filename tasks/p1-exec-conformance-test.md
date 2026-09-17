@@ -65,8 +65,8 @@ test:ci-gate && test:supply-chain && test:release-contract
   - `webConformanceTestTemplate` に `authorizationCodeConformanceHelper` 相当を差し込む
 - `packages/cli/src/frameworks/hono/templates.ts`
   - `authorizationCodeConformanceHelper` は現在 module-private。web-standard から使うため export する
-- `packages/cli/src/__tests__/web-framework-generators.test.ts` / `hono-generator.test.ts`
-  - 再発防止の generator テスト
+- `samples/*` の `conformance.test.ts` と `check:generated`
+  - 再発防止は生成物の契約テストで行う（`packages/cli` の単体テストは廃止した）
 - `samples/express-flyio/package.json` / `samples/fastify-flyio/package.json` / `samples/nextjs-vercel/package.json`
   - `vitest` を devDependency に追加し、`test:conformance` と `test` を hono に揃える
 - `package.json`（root）

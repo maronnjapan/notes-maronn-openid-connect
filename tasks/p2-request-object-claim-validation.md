@@ -38,7 +38,7 @@
 - `packages/core/src/authorization-request.ts`（OP issuer / 検証済み client_id を `parseRequestObject` へ渡す経路）
 - `packages/core/src/authorization-request.test.ts`
 - `packages/cli/src/frameworks/hono/templates.ts` / `packages/cli/src/frameworks/web-standard/templates.ts`
-- `packages/cli/src/__tests__/*`（generator テスト）
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - `samples/*/src/oidc-provider/conformance.test.ts`（CLI 生成物。修正元は必ず `packages/cli`）
 
 `samples/*/src/oidc-provider` は CLI 生成物なので、修正元は必ず `packages/cli` に置く。

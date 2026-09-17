@@ -4,6 +4,11 @@
 
 🟡 Medium / 未着手
 
+**前提の変更**：`packages/cli` の単体テスト（本文で「現在のガード」と呼んでいる `web-framework-generators.test.ts` を含む）は廃止した。
+そのため、回帰ガードはテストではなく生成処理側に置く。
+`toWebRouteTemplate` が hono 由来の import や router 構築式を検出できなかった出力を拒否する実行時検証を実装し、その検証が全ルートに掛かることを `samples/*` の `check:generated` と契約テストで確認する。
+以下の「対象ファイル」「テスト要件」は、この方針で読み替える。
+
 ## 背景
 
 CLI は hono / express / fastify / nextjs の 4 ターゲットを生成するが、**ルートテンプレートの実体は Hono 用の 1 系統しかない**。express / fastify / nextjs は `web-standard` ジェネレータへ委譲し、`web-standard` は Hono テンプレートの出力文字列に次の変換を掛けて再利用している。
@@ -27,7 +32,7 @@ function toWebRouteTemplate(content: string): string {
 ## 対象ファイル
 
 - `packages/cli/src/frameworks/web-standard/templates.ts`（`toWebRouteTemplate`）
-- `packages/cli/src/__tests__/web-framework-generators.test.ts`（回帰テスト）
+- `samples/*` の `conformance.test.ts` と `check:generated`（回帰の検出。`packages/cli` の単体テストは廃止した）
 - `packages/cli/src/frameworks/hono/templates.ts`（変換前提であることを示すコメントの追加）
 
 ## 仕様参照

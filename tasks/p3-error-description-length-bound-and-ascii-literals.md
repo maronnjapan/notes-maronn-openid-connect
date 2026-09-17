@@ -85,7 +85,7 @@ RFC 6749 §5.2 が `error_description` の目的を
 - `packages/core/src/error-utils.test.ts`
 - `packages/core/src/authorization-request.ts`（:437 の非 ASCII リテラル）
 - `packages/cli/src/frameworks/hono/templates.ts`（生成 `views.ts` の `Views` JSDoc）
-- `packages/cli/src/__tests__/hono-generator.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - `samples/*/conformance.test.ts`（生成物。生成元は `packages/cli`）
 
 ## 仕様参照

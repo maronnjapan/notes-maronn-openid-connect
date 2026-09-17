@@ -24,7 +24,7 @@ core には Refresh Token のアイドル（無操作）タイムアウト判定
 
 - `packages/cli/src/frameworks/hono/templates.ts`（`configTemplate` の `ProviderConfig` / `tokenRouteTemplate` の `refreshTokenPersistenceBlock`）
   — **単一の修正点**。`web-standard/templates.ts` が `configTemplate` / `tokenRouteTemplate` を再エクスポートし、express / fastify / nextjs はいずれも `webGeneratedFiles` 経由で同じ生成物を使うため、ここを直せば全フレームワークに反映される
-- `packages/cli/src/__tests__/hono-generator.test.ts` / `web-framework-generators.test.ts`（生成コードのテスト）
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - `packages/cli` 内の `conformance.test.ts` 生成コード（`samples/*/conformance.test.ts` の生成元）
 - `study-material/resolver-and-store-contract.md`（`lastUsedAt` の保存契約）
 

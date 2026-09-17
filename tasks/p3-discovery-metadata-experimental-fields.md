@@ -83,8 +83,7 @@ RFC 8693 は専用の AS メタデータフィールドを定義せず、
 - `packages/core/src/discovery.ts`（`ProviderMetadataConfig` / `ProviderMetadata` / `buildProviderMetadata`）
 - `packages/core/src/discovery.test.ts`
 - `packages/cli/src/frameworks/hono/templates.ts`（discovery ルートの後付けマージを引数へ移す）
-- `packages/cli/src/__tests__/par-feature.test.ts`
-- `packages/cli/src/__tests__/jarm-feature.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 
 ## 仕様参照
 
