@@ -17,7 +17,7 @@ Phase 2 では `sessionResolver` が複数セッションを返せるように�
 ## 対象ファイル
 
 - `packages/cli/src/frameworks/hono/templates.ts`（`authorizeRouteTemplate`・`loginRouteTemplate`）
-- `packages/cli/src/__tests__/hono-generator.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 
 ## 仕様参照
 

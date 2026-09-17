@@ -17,7 +17,7 @@ RFC 9126 §2.1（認可リクエストと同様に検証する MUST）と、生�
 
 - `packages/cli/src/frameworks/hono/templates.ts`（`parRouteTemplate` に scopes を渡し、チェックを注入。コメントの整合も取る）
 - `packages/cli/src/frameworks/hono/index.ts` / `packages/cli/src/frameworks/web-standard/templates.ts`（呼び出し側）
-- `packages/cli/src/__tests__/custom-scope-feature.test.ts` / `par-feature.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - 生成 conformance テストテンプレート
 
 ## 仕様参照

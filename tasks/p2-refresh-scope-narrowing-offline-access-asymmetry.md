@@ -44,7 +44,7 @@
 - `packages/core/src/refresh-token-grant.ts`（`buildValidatedRefreshTokenRequest` の `hadOfflineAccess` 導出）
 - `packages/cli/src/frameworks/hono/templates.ts`（`tokenRouteTemplate` の `refreshTokenPersistenceBlock`。`web-standard/templates.ts` が再エクスポートするため、ここを直せば express / fastify / nextjs にも反映される）
 - `packages/cli` 内の `conformance.test.ts` 生成コード（`samples/*/conformance.test.ts` の生成元。**生成物を直接編集しないこと**）
-- `packages/cli/src/__tests__/hono-generator.test.ts` / `web-framework-generators.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - `study-material/resolver-and-store-contract.md`（refresh token store の保存契約）
 - `samples/*/src/oidc-provider/routes/token.ts`（再生成される生成物）
 

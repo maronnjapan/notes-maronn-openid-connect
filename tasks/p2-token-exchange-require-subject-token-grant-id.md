@@ -65,7 +65,7 @@ RFC 7009 §2.1（access token 失効時の連鎖は MAY）としては正しい�
 - `packages/experimental/src/token-exchange/token-exchange-request.ts`
 - `packages/experimental/src/token-exchange/token-exchange-request.test.ts`
 - `packages/cli/src/frameworks/hono/templates.ts`（生成コードの token-exchange 分岐コメント）
-- `packages/cli/src/__tests__/hono-generator.test.ts`
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - `samples/*/src/oidc-provider/routes/token.ts`（生成物。直接編集しない）
 - `samples/*/conformance.test.ts`（生成物。生成元は `packages/cli`）
 

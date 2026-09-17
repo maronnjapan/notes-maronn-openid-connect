@@ -22,7 +22,7 @@
 
 - `packages/cli/src/frameworks/hono/templates.ts`（introspection ルートテンプレート。web-standard 変換で 4 フレームワークへ展開される）
 - 必要なら `packages/core/src/introspection.ts` または `client-auth.ts`（confidential 必須の検証ステップを core に置く場合）
-- `packages/cli/src/__tests__/`（generator テスト）
+- `samples/*` の `conformance.test.ts` と `tests/e2e`（生成 OP の契約テストと E2E。`packages/cli` の単体テストは廃止したので、生成処理の変更はこの 2 つで固定する）
 - 生成 conformance テストテンプレート（public client_id のみのケース追加）
 - `tasks/experimental/done/jwt-introspection-response/specification.md` と `study-material/done/introspection-caller-authorization-and-disclosure.md` の前提記述の訂正
 
