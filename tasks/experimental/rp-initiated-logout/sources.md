@@ -35,8 +35,8 @@
 | `packages/core/src/id-token.ts`（`validateIdTokenHint`、276 行〜） | ヒント検証の既存 core 公開 API。exp 超過拒否の確認（非目標「期限切れヒント」の根拠） |
 | `packages/core/src/authentication-session.ts` | セッション契約と online refresh token の失効機構（非目標「トークン後始末」の境界根拠） |
 | `packages/core/src/token-response.ts`（`buildIdTokenAudience`、239 行〜） | ID Token の aud / azp 合成ポリシー。追加 audience 構成時に aud 配列 + azp を発行することの確認（U2 確定の根拠。確認日 2026-09-16） |
-| `packages/cli/src/frameworks/hono/templates.ts`（Device verification の binding cookie 設計コメント、3745 行〜） | 確認画面 POST の CSRF 防御モデル（cookie + hidden token の対）の先例（Review 2 で参照） |
-| `packages/cli/src/frameworks/hono/templates.ts` | `SESSION_COOKIE_NAME` / browser session store の `delete`（1429・1447 行）、Device verification UI（3700 行〜）、CIBA UI、CSRF cookie 精度、discovery スプレッドマージ（6981 行）、views インターフェース（8313 行〜） |
+| `packages/cli/src/frameworks/hono/templates.ts`（`buildDeviceBindingCookie`（1065 行〜）と Device verification ルートの設計コメント（3984 行〜）） | 確認画面 POST の CSRF 防御モデル（cookie + hidden token の対）の先例（Review 2 で参照。行番号は Review 3（2026-09-23）で現状へ更新） |
+| `packages/cli/src/frameworks/hono/templates.ts` | `SESSION_COOKIE_NAME` / browser session store の `delete`（1660・1678 行）、Device verification UI（`deviceVerificationRouteTemplate`、3931 行〜）、CIBA UI、CSRF cookie 精度、discovery スプレッドマージ（7225 行）、views インターフェース（`interface Views`、9231 行〜）。行番号は Review 3（2026-09-23）で現状へ更新 |
 | `packages/cli/src/features.ts` | `EXPERIMENTAL_FEATURES` の追加先と unknown-feature メッセージの列挙順依存 |
 | `tasks/experimental/done/device-authorization-grant/` `tasks/experimental/done/ciba/` | 新規エンドポイント + UI 画面パターンの先例仕様 |
 | `tasks/experimental/jwt-introspection-response/specification.md` | 仕様書構成の直近先例 |
