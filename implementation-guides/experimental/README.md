@@ -18,6 +18,7 @@ Each guide explains what the feature does, which use cases it serves, and walks 
 | Cross-App Access / ID-JAG | draft-ietf-oauth-identity-assertion-authz-grant-04 | [id-jag.ja.md](./id-jag.ja.md) | [id-jag.en.md](./id-jag.en.md) |
 | CIBA (Client-Initiated Backchannel Authentication) | CIBA Core 1.0 (OpenID Foundation Final, 2021-09-01) | [ciba.ja.md](./ciba.ja.md) | [ciba.en.md](./ciba.en.md) |
 | JWT Introspection Response | RFC 9701 | [jwt-introspection-response.ja.md](./jwt-introspection-response.ja.md) | [jwt-introspection-response.en.md](./jwt-introspection-response.en.md) |
+| RP-Initiated Logout | OpenID Connect RP-Initiated Logout 1.0 (Final, 2022-09-12) | [rp-initiated-logout.ja.md](./rp-initiated-logout.ja.md) | [rp-initiated-logout.en.md](./rp-initiated-logout.en.md) |
 
 ## 各解説が全文を載せる範囲 / What each guide embeds in full
 
