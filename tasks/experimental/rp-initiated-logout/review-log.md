@@ -51,3 +51,29 @@
   - 応答時間差によるセッション存在オラクルは「削除操作の有無以外の分岐を作らない」方針で最小化するが、完全一定時間は保証しない（確認画面の文言統一が主対策）
 - **判定**: Pass with changes
 - **次回可能日**: 2026-09-17
+
+## Review 3
+
+- **日付**: 2026-09-23
+- **観点**: 実装着手可否（追加調査なしで着手できるか、受け入れ条件の客観性、対象ファイルと変更範囲の特定、API・CLI・テスト・Docs・実装解説の一貫性、実装順序と検証方法、Experimental であることの利用者への明示）。Review 1・2 で確定済みの完全性・セキュリティ観点は繰り返さず、U3 の確定と、仕様書が参照するリポジトリ実装の現状照合（Review 2 以降のコード変化の吸収）に絞った
+- **確認資料**:
+  - `packages/core/src/index.ts:141`（`validateIdTokenHint` / `IdTokenHintError` のエクスポート。仕様書の記載どおり現存）
+  - `packages/core/src/id-token.ts:276`（`validateIdTokenHint` の実引数契約 `(hint, { expectedIss, expectedAud, jwks }, verifyOptions?)`。公開 API 案の呼び出し想定と一致。exp 超過拒否と clockSkew leeway も Review 1 時点から変化なし）
+  - `packages/core/src/token-response.ts:239`（`buildIdTokenAudience`。U2 確定根拠の行番号が現在も正確であることを確認）
+  - `packages/cli/src/features.ts`（`EXPERIMENTAL_FEATURES` は 7 機能。末尾は `'jwt-introspection-response'` で、仕様書の「末尾に追加」の前提が現状と一致）
+  - `packages/cli/src/index.ts:32`（`withExperimentalPackage` の feature チェック列挙。仕様書の実装順序 3 が指す追加先として現存）
+  - `packages/cli/src/frameworks/hono/templates.ts`（ルート表の `/device/approve`（40 行）・`/ciba/approve`（49 行）、`deviceVerificationRouteTemplate`（3931 行）、`buildDeviceBindingCookie`（1065 行）、`tokenExchangeConfig.allowedTargets`（5221〜5270 行）、discovery スプレッドマージ（7225 行）、views インターフェース（9231 行）、`SESSION_COOKIE_NAME` / store `delete`（1660・1678 行））
+  - `packages/experimental/package.json`（7 機能の subpath export 構成。`"./rp-initiated-logout"` 追加が既存パターンどおりであること）
+  - `samples/hono-cloudflare/package.json`（`generate` スクリプトの `--enable` 列挙。実装順序 6 の追加先）、`tests/e2e/specs/`・`tests/e2e/apps/`（E2E 計画の配置先と client.mjs の存在）
+- **指摘**:
+  1. U3（確認 POST のパス名）が未確定のまま残っていた。生成テンプレートの既存 approve 系は `/device/approve` / `/ciba/approve` で統一されており、仕様書ドラフトの `/logout/confirm` はこの命名系から外れる
+  2. 仕様書と sources.md の `templates.ts` 行番号（discovery 6981・Device UI 3700・views 8313・store 1429/1447・binding cookie コメント 3745）が Review 2 以降のコード変化で現状とずれていた。構造自体の変化はなく、実装時の参照先特定を誤らせるだけの軽微なずれ
+- **修正**:
+  1. U3 を確定: `/logout/approve` とする。`/logout` への相乗りは end_session の POST 受理（§2 MUST）と衝突するため別パスが必須で、命名は既存 approve 系に揃える。仕様書の応答の表・CLI オプション案・設定値の表を `/logout/approve` へ統一
+  2. 仕様書と sources.md の行番号を現状（discovery 7225・Device ルート 3931・views 9231・store 1660/1678・binding cookie 1065/3984）へ更新
+- **確認して問題なしとした項目**: 公開 API 案 4 関数は core の実在 API（`validateIdTokenHint` の引数契約）とだけ接続し、追加調査なしで着手できる。完了条件 7 項目はすべて客観的に判定可能（テスト通過・バイト同一・discovery 出力の具体値）。実装順序 1〜7 は対象ファイルまで特定済みで、conformance テンプレート・E2E・Docs・実装解説（ja/en）・changeset（CLI のみ minor 手書き、experimental は CI 自動生成）の一貫性に矛盾なし。Experimental の明示は CLI ヘルプ・生成コードコメント・利用者向けページの 3 面で計画済み。未解決事項は U1〜U3 すべて確定済みで、残るのは受容済みリスク（盗難 ID Token による本人ブラウザの強制ログアウト、応答時間差の完全一定は保証しない）のみ
+- **残リスク**:
+  - 受容済み 2 件（Review 2 の残リスクと同じ。仕様の信頼モデルの帰結と、文言統一を主対策とするオラクル最小化）
+  - `templates.ts` の行番号は今後も変動し得るが、関数名・識別子での特定を併記済みのため実装時に追跡可能
+- **判定**: Pass with changes（修正は本レビュー内で反映済み。実装着手可）
+- **次回可能日**: -（3 回完了。status: Approved へ更新）
