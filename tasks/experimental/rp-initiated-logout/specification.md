@@ -120,9 +120,9 @@ POST は `application/x-www-form-urlencoded` のボディからパラメータ�
 |---|---|
 | 即時ログアウト + 登録 URI 完全一致 | `302 Found`、`Location: <post_logout_redirect_uri>[?state=...]` |
 | 即時ログアウト + URI 不一致または未指定 | `200 OK`、ログアウト完了画面（HTML） |
-| 確認画面 | `200 OK`、確認画面（HTML。approve フォームは POST `/logout/confirm`） |
+| 確認画面 | `200 OK`、確認画面（HTML。approve フォームは POST `/logout/approve`） |
 | 確認画面からの approve POST | セッション削除後、リダイレクト条件を再評価して `302` または完了画面 |
-| `/logout/confirm` への不正 POST（CSRF トークン不一致・期限切れ） | `400 Bad Request`（画面にエラー表示。何も削除しない） |
+| `/logout/approve` への不正 POST（CSRF トークン不一致・期限切れ） | `400 Bad Request`（画面にエラー表示。何も削除しない） |
 
 エラーを OAuth 形式の JSON（`error` / `error_description`）で返す経路はない。
 ログアウトエンドポイントはユーザーエージェントが直接開く画面であり、機械可読エラーの契約を持たない（Device の verification UI と同じ扱い）。
@@ -181,9 +181,9 @@ export function resolvePostLogoutRedirect(options: {
 - 組み合わせ検証は不要（セッション基盤・JWKS・ログイン画面は常に生成されるため、他機能への依存がない）。`--disable` との干渉もない
 - `packages/cli/src/index.ts` の `withExperimentalPackage` の feature チェックへ `features.rpInitiatedLogout` を追加
 - 生成物（hono テンプレート起点。web-standard 変換で全フレームワークへ展開):
-  - 新規 `endSessionRouteTemplate(corePkg)`: `GET|POST /logout` と `POST /logout/confirm`。Device の `deviceVerificationRouteTemplate`（`packages/cli/src/frameworks/hono/templates.ts:3700`）と同じ構造。確認画面の approve POST は、確認画面の描画時に発行する cookie（HttpOnly / Secure / SameSite）と hidden `csrf_token` の対で保護する（セキュリティ要件の CSRF 行。Device の binding cookie / `buildDeviceBindingCookie` と同じモデル）
+  - 新規 `endSessionRouteTemplate(corePkg)`: `GET|POST /logout` と `POST /logout/approve`。Device の `deviceVerificationRouteTemplate`（`packages/cli/src/frameworks/hono/templates.ts:3931`）と同じ構造。確認画面の approve POST は、確認画面の描画時に発行する cookie（HttpOnly / Secure / SameSite）と hidden `csrf_token` の対で保護する（セキュリティ要件の CSRF 行。Device の binding cookie / `buildDeviceBindingCookie` と同じモデル）
   - views インターフェースへ `logoutConfirmationPage` / `logoutCompletedPage` を追加（`deviceVerificationPage` と同じ差し替え可能パターン。機能有効時のみ型・既定実装を補間）
-  - discovery への追記: 既存スプレッドマージ（`templates.ts:6981` の `${parDiscoveryMetadata}...` の並び）へ `end_session_endpoint: config.issuer + '/logout'` を追加
+  - discovery への追記: 既存スプレッドマージ（`templates.ts:7225` の `${parDiscoveryMetadata}...` の並び）へ `end_session_endpoint: config.issuer + '/logout'` を追加
   - 設定への追記: 生成される設定モジュールへ `rpInitiatedLogoutConfig`（`postLogoutRedirectUris: Record<string, string[]>`、既定は空）を機能有効時のみ追加
   - conformance.test.ts への RP-Initiated Logout シナリオ追加（CLI の生成テンプレートを変更する。sample を直接編集しない）
 - 既存機能との干渉なし: `rp-initiated-logout` 無効時の生成出力は現行とバイト同一であること（完了条件で検証）
@@ -194,7 +194,7 @@ export function resolvePostLogoutRedirect(options: {
 | 項目 | 値 | 根拠 |
 |---|---|---|
 | `rpInitiatedLogoutConfig.postLogoutRedirectUris` | `Record<string, string[]>`、既定は空 | §3 の「事前登録された値との完全一致」の登録簿。空ならすべてのリダイレクト要求が完了画面に落ちる（fail-closed） |
-| エンドポイントパス | `/logout`（確認 POST は `/logout/confirm`）固定 | Device の `/device` 系と同じくパス構成値は持たない |
+| エンドポイントパス | `/logout`（確認 POST は `/logout/approve`）固定 | Device の `/device` 系と同じくパス構成値は持たない |
 | 確認画面の要否 | 判定規則で固定（構成値なし） | 非目標の節 |
 
 ## バリデーション / エラー処理
@@ -305,7 +305,7 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 |---|---|---|
 | U1 | 確認画面から approve したとき、`post_logout_redirect_uri` へのリダイレクトを許すか。確認画面を挟んだ時点でヒントとセッションの不一致が確定しているケース（別ユーザーのセッション）では、リダイレクトが RP へ「誰かがログアウトした」ことを伝える面がある | **確定（Review 2、2026-09-16）**: 判定規則 6 のまま許す。§3 はリダイレクトの正当性を「`post_logout_redirect_uri` とともに `id_token_hint` が供給されていること（供給がなければ MUST NOT）」と「登録値との完全一致（不一致なら MUST NOT）」に置き、確認画面の経由有無を条件にしていない。リダイレクト先は検証済み RP 自身の登録 URI に限られ、遷移が起きるのは End-User が確認画面で明示的に承認した後だけなので、「誰かがログアウトした」という信号も End-User の承認済み操作の結果である |
 | U2 | `extractIdTokenHintAudience` の azp フォールバック（aud 配列時）を防御的分岐として持つか、単純化するか | **確定（Review 2、2026-09-16）**: 判定規則 1 のまま azp フォールバックを持つ。Review 1 時点の「配列ケースは自 OP 発行トークンでは生じない」という想定は誤りだった。core の `buildIdTokenAudience`（`packages/core/src/token-response.ts:239`）は、追加 audience が構成された場合に `aud` を配列にし `azp = clientId` を必ず付与するため、自 OP 発行の ID Token でも配列 + azp の組は生じる。azp フォールバックは防御的分岐ではなく必須の経路である。なお同関数は audience が clientId のみに重複解決される場合 `aud` を単一文字列にするため、「配列（要素 1、azp なし）」は自 OP 発行では生じないが、抽出は署名検証前の入力に対する処理なので要素 1 フォールバックも許容として残す（信頼は後段の `validateIdTokenHint` が与える） |
-| U3 | 確認画面 POST 先のパス（`/logout/confirm` か `/logout` への POST 相乗りか）。`/logout` は end_session の POST 受理（§2 MUST）に使うため別パスとしたが、Device / CIBA の approve パス命名（`/device/approve` / `/ciba/approve`）に合わせて `/logout/approve` とする案もある | 未確定。Review 3 で生成テンプレートの一貫性から確定する |
+| U3 | 確認画面 POST 先のパス（`/logout/confirm` か `/logout` への POST 相乗りか）。`/logout` は end_session の POST 受理（§2 MUST）に使うため別パスとしたが、Device / CIBA の approve パス命名（`/device/approve` / `/ciba/approve`）に合わせて `/logout/approve` とする案もある | **確定（Review 3、2026-09-23）**: `/logout/approve` とする。`/logout` への相乗りは end_session の POST 受理（§2 MUST）と衝突するため別パスが必須で、別パスの命名は生成テンプレートの既存 approve 系（`/device/approve`（`templates.ts` のルート表 40 行）と `/ciba/approve`（同 49 行））に揃える。仕様書内の該当箇所（応答の表・CLI オプション案・設定値の表）を `/logout/approve` へ統一済み |
 
 ## 将来の昇格考慮
 
