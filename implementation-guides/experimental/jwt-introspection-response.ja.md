@@ -768,6 +768,7 @@ import {
   verifyClientSecret,
   requireIntrospectionToken,
   requireIntrospectionClient,
+  requireConfidentialIntrospectionCaller,
   resolveIntrospectionToken,
   isIntrospectionTokenActive,
   buildIntrospectionResponse,
@@ -788,6 +789,11 @@ import {
   restrictIntrospectionResponseToCaller,
 } from '@maronn-openid-connect/experimental/jwt-introspection-response';
 ```
+
+import 一覧に見える `requireConfidentialIntrospectionCaller` は本機能の追加ではなく、introspection ルート共通のステップである（`tasks/done/p1-introspection-reject-public-client-caller.md`）。
+クライアント認証パイプラインの直後で `token_endpoint_auth_method: 'none'` の呼び出し元を `invalid_client`（401）で拒否する。
+public client の client_id は公開情報であり、その提示だけでは認証にならないためである（RFC 7662 §2.1 / RFC 9701 §5）。
+JWT 分岐はこの拒否より後ろにあるので、`Accept` ヘッダで迂回できない。
 
 ハンドラ本体では、応答オブジェクト `response` を構築した直後、従来の `return c.json(response)` の直前に次の分岐が入る。
 
@@ -1104,6 +1110,24 @@ JWKS から `kid` で鍵を解決して RS256 検証するヘルパーは JARM �
         expect(res.status).toBe(401);
         expect(res.headers.get('Content-Type')).toBe('application/json');
         expect(await res.json()).toMatchObject({ error: 'invalid_client' });
+      });
+
+      // RFC 9701 §5: an unauthenticated request must be refused, and a public
+      // client_id alone is not authentication. Without this rejection the
+      // signed assertion would vouch for a caller identity that was never
+      // verified.
+      it('should reject a public client introspection request even when it asks for the JWT response', async () => {
+        const res = await introspectWith(
+          { client_id: 'c-public', token: 'rfc9701-active' },
+          INTROSPECTION_JWT_MEDIA_TYPE,
+        );
+
+        expect(res.status).toBe(401);
+        expect(res.headers.get('Content-Type')).toBe('application/json');
+        expect(await res.json()).toEqual({
+          error: 'invalid_client',
+          error_description: 'Introspection requires an authenticated confidential client',
+        });
       });
     });
 
