@@ -9,7 +9,7 @@
 RP-Initiated Logout の確認画面は、描画時に CSRF シークレットを発行し、OP が解決したリダイレクト先とともに `oidc_logout_confirm` Cookie の値へ載せる。
 `POST /logout/approve` は「Cookie 内のシークレット」と「フォームの hidden `csrf_token`」の一致だけを確認し、サーバー側には照合先を持たない。
 
-同じ生成 OP のデバイス検証束縛（`oidc_device_<user_code>`）は逆の形を採っている。
+同じ生成 OP のデバイス検証束縛（`oidc_device_<user_code>`）と CIBA ログイン束縛（`oidc_ciba_login_<transactionId>`）は逆の形を採っている。
 秘密の SHA-256 ハッシュをサーバー側レコードに保存し、Cookie の生値をハッシュ化して突き合わせるため、Cookie を書き込めた攻撃者でも承認を偽造できない。
 
 ログアウト確認がクライアント側比較だけである結果、兄弟ホストから Cookie を書き込める環境（RFC 6265 §8.6）では、攻撃者が自分で選んだシークレットとリダイレクト先を注入し、確認画面を経ずに被害者のセッション削除（強制ログアウト）と、OP オリジンから攻撃者 URL への 302（登録チェックを通らないオープンリダイレクト）を同時に成立させられる。
@@ -35,7 +35,7 @@ RP-Initiated Logout の確認画面は、描画時に CSRF シークレットを
 - **OpenID Connect RP-Initiated Logout 1.0 §3**：`post_logout_redirect_uri` は登録値と一致しない限り使用してはならない（MUST NOT）。リダイレクト先の決定はサーバー側の解決結果だけを信頼する
 - **OpenID Connect RP-Initiated Logout 1.0 §7**：確認画面は有効なヒントのないログアウト要求による DoS への防御であり、承認 POST の偽造はその防御の迂回になる
 - **RFC 6265 §8.6 Weak Integrity**：Cookie は兄弟ホストからの書き込みを防がない
-- 設計の先例：デバイス検証束縛 Cookie（RFC 8628 §5.4 / §3.3 の考察に基づく実装。`samples/hono-cloudflare/src/oidc-provider/store.ts:1061-1135`）
+- 設計の先例：デバイス検証束縛 Cookie（RFC 8628 §5.4 / §3.3 の考察に基づく実装。ハッシュ手順は `packages/experimental/src/device-authorization-grant/verification.ts`、生成物は `samples/hono-cloudflare/src/oidc-provider/store.ts:1061-1135`）
 
 ## 現状の実装
 
@@ -56,7 +56,7 @@ export function buildLogoutConfirmationCookie(confirmation: LogoutConfirmation):
 
 ## 修正方針
 
-- [ ] 生成 store にログアウト確認レコードのストアを追加する（キー：シークレットの SHA-256 ハッシュ。値：`redirectTo` と期限。TTL 600 秒。デバイス検証束縛の `hashDeviceBindingSecret` と同じハッシュ手順を使う）
+- [ ] 生成 store にログアウト確認レコードのストアを追加する（キー：シークレットの SHA-256 ハッシュ。値：`redirectTo` と期限。TTL 600 秒。ハッシュは `packages/experimental/src/device-authorization-grant/verification.ts` と同じ `crypto.subtle.digest('SHA-256', ...)` + Base64URL の手順を使う）
 - [ ] 確認画面の描画時に、シークレットのハッシュと `redirectTo` をストアへ保存し、Cookie の値はシークレットだけにする（`.` 区切りの base64url 部分を廃止）
 - [ ] `POST /logout/approve` は、フォームの `csrf_token` と Cookie のシークレットの一致に加え、シークレットのハッシュでストアを引き、レコードが無ければ 400 で何も削除しない
 - [ ] レコードは承認時に消費（削除）し、同じ確認画面の承認 POST を再送しても 2 度目は 400 になるようにする
