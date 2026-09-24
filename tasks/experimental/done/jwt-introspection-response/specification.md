@@ -167,7 +167,9 @@ RFC 9701 はエラー応答の JWT 化を定めておらず、§5 が JWT を定
 
 **仕様間の相違の記録**: RFC 9701 §5 の Note は「本仕様に準拠する AS は、呼び出し元を認証しないイントロスペクションリクエストの処理を拒否し HTTP 400 を返さなければならない（MUST）」とする。
 一方、既存実装（core の共有クライアント認証パイプライン）は RFC 7662 §2.3 が参照する RFC 6749 §5.2 に従い、認証失敗を `invalid_client` の **401** で拒否する。
-この MUST の実質は「認証なしにトークンデータを一切開示しない（§8.2 のダウングレード防止）」であり、本 OP は認証必須の既存挙動でこれを満たしている。
+この MUST の実質は「認証なしにトークンデータを一切開示しない（§8.2 のダウングレード防止）」である。
+**訂正（2026-09-24）**: 当初この段落は「本 OP は認証必須の既存挙動でこれを満たしている」としていたが、共有クライアント認証パイプラインは `token_endpoint_auth_method: 'none'` で登録されたクライアントを client_id（公開情報）の提示だけで通すため、public client の呼び出しに対してはこの MUST を満たしていなかった。
+`tasks/done/p1-introspection-reject-public-client-caller.md` の実装で、introspection ルートは認証パイプラインの直後に core の `requireConfidentialIntrospectionCaller` を呼び、登録方式 `'none'` の呼び出し元を `invalid_client`（401 + WWW-Authenticate）で拒否する。JWT 経路はこの拒否より後ろにあるため、`Accept` ヘッダで迂回できない。
 ステータスコードは既存の 401 を維持する（設計判断: 共有パイプラインの挙動を JWT 要求の有無で分岐させると、`Accept` ヘッダの値で認証エラーの形が変わる不自然な API になる。RFC 7662 系の 401 と RFC 9701 の 400 の相違として understanding-guide にも記録し、README に明記する）。
 
 ## 公開API案（`@maronn-openid-connect/experimental/jwt-introspection-response`）
