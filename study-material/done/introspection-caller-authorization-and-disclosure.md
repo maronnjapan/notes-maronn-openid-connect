@@ -71,6 +71,7 @@ Token Introspection エンドポイント（RFC 7662）が、**「認証済み�
 
 - **満たしていること**:
   - RFC 7662 §2.1 の「authorization を MUST」: confidential client 認証で満たす。
+    **訂正（2026-09-24）**: この記述は public client を見落としていた。共有クライアント認証パイプラインは `token_endpoint_auth_method: 'none'` で登録されたクライアントを client_id（公開情報）の提示だけで通すため、当時の実装は「confidential client 認証で満たす」状態になかった。`tasks/done/p1-introspection-reject-public-client-caller.md` の実装で、introspection ルートは core の `requireConfidentialIntrospectionCaller` により登録方式 `'none'` の呼び出し元を `invalid_client`（401）で拒否するようになり、この前提が実挙動として成立した。
   - レスポンスのキャッシュ抑止（`no-store`）: 実装済み。
   - active=false 時は `{ active: false }` のみで、存在情報以上を漏らさない設計。
 - **不足している可能性があること（§4 の観点）**:
