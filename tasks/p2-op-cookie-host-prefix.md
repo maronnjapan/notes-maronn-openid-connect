@@ -6,12 +6,16 @@
 
 ## 背景
 
-生成 OP がブラウザへ発行する 2 種類の Cookie が、いずれも名前プレフィックスを持たない。
+生成 OP がブラウザへ発行する 5 系統の Cookie が、いずれも名前プレフィックスを持たない。
 
 - OP セッション Cookie: `session_id`
 - トランザクション束縛 Cookie: `oidc_txn_<transactionId>`
+- デバイス検証束縛 Cookie: `oidc_device_<user_code>`（`--enable device-authorization-grant` の生成物）
+- CIBA ログイン束縛 Cookie: `oidc_ciba_login_<transactionId>`（`--enable ciba` の生成物）
+- ログアウト確認 Cookie: `oidc_logout_confirm`（`--enable rp-initiated-logout` の生成物）
 
-属性は `HttpOnly; Secure; SameSite=Lax; Path=/`（トランザクション側は `Max-Age` 付き）で、
+後の 3 系統は、このタスクの作成後に追加された機能の生成物である（本タスクの旧版は先頭の 2 系統だけを挙げていた）。
+属性はいずれも `HttpOnly; Secure; SameSite=Lax; Path=/`（セッション以外は `Max-Age` 付き）で、
 `Domain` 属性を付けていないため**実際には host-only で動いている**。
 不足しているのは、その条件が満たされていることをブラウザに検証させ、
 **別ホストからの書き込みを拒否させる** `__Host-` プレフィックスだけである。
@@ -29,6 +33,12 @@ OP を `auth.example.com` のようなサブドメインで運用する構成は
 被害者は自分のアカウントだと思ったまま攻撃者のアカウントを使い続けることになり、
 RP 側に個人情報や決済情報を入力させる文脈で実害が出る（セッション固定 → 同一性の取り違え）。
 
+注入で成立する攻撃の強さは Cookie ごとに異なる。
+束縛系の 3 つ（トランザクション、デバイス検証、CIBA ログイン）はサーバー側に SHA-256 ハッシュの照合先を持つため、注入で偽造できるのはフローの妨害までにとどまる。
+一方ログアウト確認 Cookie は照合先をサーバー側に持たず、注入が強制ログアウトとオープンリダイレクトに直結する
+（`study-material/done/logout-confirmation-cookie-client-side-trust-and-host-prefix-scope-drift.md`。
+照合先をサーバー側へ移す多層防御は `tasks/p3-logout-confirmation-server-side-anchor.md` が扱う）。
+
 さらに、この `__Host-` は**本リポジトリのタスク文書が一度は明示的に規定していた**要素である。
 `tasks/done/p1-auth-transaction-user-agent-binding.md:159` と
 `study-material/done/auth-transaction-user-agent-binding.md:211` はいずれも
@@ -40,19 +50,20 @@ RP 側に個人情報や決済情報を入力させる文脈で実害が出る�
 
 > 関連（重複しない）: 束縛の仕組みそのもの（束縛シークレット・ハッシュ保存・検証位置）は
 > `tasks/done/p1-auth-transaction-user-agent-binding.md`、
-> セッション寿命は `tasks/p2-op-session-absolute-lifetime.md` が扱う。
+> セッション寿命は `tasks/p2-op-session-absolute-lifetime.md`、
+> ログアウト確認の照合先の移設は `tasks/p3-logout-confirmation-server-side-anchor.md` が扱う。
 > 本タスクは **Cookie の名前空間をホスト単位に隔離する**ことだけを対象とする。
 
 ## 対象ファイル
 
 - `packages/cli/src/frameworks/*/templates.ts`
-  - Cookie 名定数（`SESSION_COOKIE_NAME`、トランザクション Cookie 名の組み立て）
-  - `Set-Cookie` 組み立て（`buildSessionCookie` / `buildTransactionBindingCookie` / クリア用）
-  - Cookie 読み取り（`parseSessionId` / トランザクション Cookie パーサ）
+  - Cookie 名定数（`SESSION_COOKIE_NAME`、`TRANSACTION_BINDING_COOKIE_PREFIX`、`DEVICE_BINDING_COOKIE_PREFIX`、`CIBA_LOGIN_BINDING_COOKIE_PREFIX`、`LOGOUT_CONFIRMATION_COOKIE`）
+  - `Set-Cookie` 組み立て（`buildSessionCookie` / `buildTransactionBindingCookie` / `buildDeviceBindingCookie` / `buildCibaLoginBindingCookie` / `buildLogoutConfirmationCookie` / 各クリア用）
+  - Cookie 読み取り（`parseSessionId` / トランザクション Cookie パーサ / `parseDeviceBindingSecret` / CIBA ログイン束縛パーサ / `parseLogoutConfirmation`）
 - 各 sample の `conformance.test.ts` を生成する `packages/cli` 側コード
   （Cookie 文字列を `endsWith` / 完全一致で固定しているため期待値更新が必要）
-- `tests/e2e`（実測ステップと回帰確認）
-- 生成物（直接編集しない・確認用）: `samples/hono-cloudflare/src/oidc-provider/store.ts:222, 249-260, 269-270, 1002, 1013`
+- `tests/e2e`（実測ステップと回帰確認。device / ciba / rp-initiated-logout のスペックを含む）
+- 生成物（直接編集しない・確認用）: `samples/hono-cloudflare/src/oidc-provider/store.ts:234, 269-282, 303, 378, 1088, 1238`
 
 ## 仕様参照
 
@@ -73,15 +84,15 @@ RP 側に個人情報や決済情報を入力させる文脈で実害が出る�
 ## 現状の実装
 
 ```ts
-// samples/hono-cloudflare/src/oidc-provider/store.ts:222
+// samples/hono-cloudflare/src/oidc-provider/store.ts:234
 export const SESSION_COOKIE_NAME = 'session_id';
 
-// :269-270
+// :281-282
 export function buildSessionCookie(sessionId: string): string {
   return SESSION_COOKIE_NAME + '=' + sessionId + '; HttpOnly; Secure; SameSite=Lax; Path=/';
 }
 
-// :249-260  同名 Cookie が複数届いた場合、最初の一致を返す
+// :249-260 相当  同名 Cookie が複数届いた場合、最初の一致を返す
 export function parseSessionId(cookieHeader: string | null): string | undefined {
   if (!cookieHeader) return undefined;
   for (const part of cookieHeader.split(';')) {
@@ -97,7 +108,9 @@ export function parseSessionId(cookieHeader: string | null): string | undefined 
 ```
 
 トランザクション束縛 Cookie も同様に `oidc_txn_<transactionId>` という名前で、
-`conformance.test.ts:924` が `'; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600'` で終わることを固定している。
+`conformance.test.ts` が `'; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600'` で終わることを固定している。
+デバイス検証束縛（`oidc_device_<user_code>`）、CIBA ログイン束縛（`oidc_ciba_login_<transactionId>`）、
+ログアウト確認（`oidc_logout_confirm`）も同じ属性で発行され、いずれもプレフィックスを持たない。
 
 ## 修正方針
 
@@ -111,8 +124,8 @@ http でも `Secure` Cookie の設定を許容する実装になっているが�
 - [ ] 実測結果に基づき方針を決定する
   - 方針 A（受理される場合）: 環境によらず常に `__Host-` を付ける
   - 方針 B（受理されない場合）: `config.issuer` の scheme が `https:` のときだけ `__Host-` を付ける
-- [ ] Cookie 名定数と `Set-Cookie` 組み立て（セッション用・トランザクション用・クリア用）を更新する
-- [ ] Cookie 読み取り側（`parseSessionId` / トランザクション Cookie パーサ）を新しい名前に追随させる
+- [ ] Cookie 名定数と `Set-Cookie` 組み立てを 5 系統すべて（セッション用・トランザクション用・デバイス検証用・CIBA ログイン用・ログアウト確認用・各クリア用）で更新する
+- [ ] Cookie 読み取り側（`parseSessionId` / トランザクション Cookie パーサ / `parseDeviceBindingSecret` / CIBA ログイン束縛パーサ / `parseLogoutConfirmation`）を新しい名前に追随させる
 - [ ] 読み取り側で**同名 Cookie の重複を検知**し、2 件以上ある場合はセッション無しとして扱う（多層防御）
 - [ ] `study-material/done/auth-transaction-user-agent-binding.md` と
       `tasks/done/p1-auth-transaction-user-agent-binding.md` の記述と実装が一致した状態にする
@@ -149,8 +162,14 @@ export function sessionCookieName(issuer: string): string {
 - [ ] `should set the transaction binding cookie with the __Host- prefix over https`
       — `GET /authorize` の `Set-Cookie` が
       `__Host-oidc_txn_<id>=<secret>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600` と完全一致すること
+- [ ] `should set the device binding cookie with the __Host- prefix over https`
+      — user_code 一致後の `Set-Cookie` の名前が `__Host-oidc_device_<user_code>` になること
+- [ ] `should set the ciba login binding cookie with the __Host- prefix over https`
+      — CIBA ログインフォーム応答の `Set-Cookie` の名前が `__Host-oidc_ciba_login_<id>` になること
+- [ ] `should set the logout confirmation cookie with the __Host- prefix over https`
+      — ログアウト確認画面応答の `Set-Cookie` の名前が `__Host-oidc_logout_confirm` になること
 - [ ] `should clear the transaction binding cookie with the same prefixed name`
-      — クリア用 `Set-Cookie` の名前が設定時と一致し、`Max-Age=0` であること
+      — クリア用 `Set-Cookie` の名前が設定時と一致し、`Max-Age=0` であること（他の 4 系統のクリア用も同様）
 - [ ] `should never emit a Domain attribute on OP cookies`
       — すべての `Set-Cookie` に `Domain=` が含まれないこと（`__Host-` の前提条件）
 - [ ] `should ignore the session cookie when the same name appears more than once`
@@ -158,8 +177,8 @@ export function sessionCookieName(issuer: string): string {
 - [ ]（方針 B を採る場合）`should fall back to the unprefixed cookie name over http`
       — `issuer` が http の OP で Cookie 名が `session_id` になること
 - [ ] `samples/*/conformance.test.ts` の Cookie 期待値（`endsWith` / 完全一致）をすべて更新する
-- [ ] `tests/e2e` の既存 Playwright フロー（ログイン → 同意 → コールバック、SSO、`prompt=none`、`max_age`）が
-      4 サンプルすべてで回帰しないこと
+- [ ] `tests/e2e` の既存 Playwright フロー（ログイン → 同意 → コールバック、SSO、`prompt=none`、`max_age`、
+      device / ciba / rp-initiated-logout）が 4 サンプルすべてで回帰しないこと
 
 ## 完了条件
 
