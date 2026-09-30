@@ -2,7 +2,7 @@
 
 ## ステータス
 
-🟠 High / 未着手
+🟠 High / 対応済み（2026-09-30 に PR #95 を main へマージ）
 
 ## 背景
 
@@ -74,3 +74,9 @@ pnpm run test:e2e
 - CLI の introspection ルートテンプレートへ組み込み、4 サンプルを再生成
 - core minor に伴い experimental / google-login の core peer range 下限を 0.4.0 へ引き上げ
 - 全テスト緑: core 1175 / cli 1343 / experimental 622 / google-login 130 / hono conformance 315 / E2E 4 サンプル
+
+## マージ記録（2026-09-30）
+
+- 実装は PR #95（2026-09-24 作成）に載ったまま未マージで残っていた。Phase 2 ルーティーン（2026-09-30）の実装レビューが未マージを検出した
+- PR の CI（test / dependency-audit / changeset-coverage）成功を確認し、PR ヘッドで hono conformance 315 件と release contract をローカル再検証したうえで main へマージした
+- マージコミット: `88c2601ca95b6145103af684c05526e4cb7112e4`
