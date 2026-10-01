@@ -2,7 +2,7 @@
 
 ## ステータス
 
-🟡 Medium / タスク化済み（`tasks/p2-client-auth-empty-client-secret-as-absent.md`）
+✅ 実装済み（`tasks/done/p2-client-auth-empty-client-secret-as-absent.md`、2026-10-01）
 
 ## 1. このトピックで確認したいこと
 
@@ -106,4 +106,5 @@ if (!presented.clientSecret) {
 
 ## 8. タスク案
 
-方針 1 で `tasks/p2-client-auth-empty-client-secret-as-absent.md` としてタスク化済み。
+方針 1 で `tasks/done/p2-client-auth-empty-client-secret-as-absent.md` として実装済み。
+実装の詳細は `implementation-guides/empty-client-secret-as-absent.ja.md` を参照。
