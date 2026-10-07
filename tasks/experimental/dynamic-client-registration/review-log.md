@@ -32,3 +32,40 @@
   - RFC 7591 の原文は rfc-editor.org がネットワークポリシーで遮断されたため datatracker.ietf.org のミラーで確認した（内容は同一の公式ミラー）
 - **判定**: Pass with changes（修正は本レビュー内で反映済み）
 - **次回可能日**: 2026-10-01
+
+## Review 2
+
+- **日付**: 2026-10-07
+- **観点**: セキュリティと適合性（認証認可上の脅威、鍵・トークン・シークレットの扱い、ログ禁止情報、有効期限、エラー情報の露出、package 境界との整合、CLI 後方互換、明示的有効化、生成コードの安全性、切り出し可能な構造、セキュリティ要件のテスト検証可能性）。Review 1 と重複する完全性の確認は繰り返さず、脅威面と応答契約の穴に絞った
+- **確認資料**:
+  - RFC 7591 §3.1（`application/json` での POST）・§3.2.2（エラー語彙の射程が「メタデータの不備」であること）・§5（DoS と TLS）
+  - RFC 6750 §3.1（`WWW-Authenticate` のエラーコード。認証情報を伴わないリクエストにエラーコードを含めない SHOULD NOT）
+  - RFC 6585 §4（429 Too Many Requests）
+  - `packages/core/src/index.ts`（公開エクスポートの実測: `validateRegisteredRedirectUris` は 11 行・`generateRandomString` は 219 行で公開、`timingSafeEqual` は非公開。仕様の package 境界の主張どおり）
+  - `packages/core/src/crypto-utils.ts`（`generateRandomString` が base64url を返すこと（32 バイト → 43 文字の主張と一致）、`timingSafeEqual` の HMAC 方式（本機能が複製する方式の実体））
+  - `packages/core/src/authorization-request.ts` 353〜415 行（`validateRegisteredRedirectUris` の検査規則の実測: フラグメント禁止・危険スキーム `javascript:` `data:` `file:` `vbscript:` `blob:` の拒否・スキーム必須・非ループバック平文 http 拒否。全経路が違反 URI をメッセージへ埋め込んだ `server_error` の `AuthorizationError` を投げることを確認し、エラー変換設計（Review 1 指摘 1 の修正）が必要かつ十分であることを裏取り）
+  - `packages/core/src/discovery.ts` 36・95・205-206 行（`registration_endpoint` の条件付き出力が実装済みで、フィールド名が一致）
+  - `packages/cli/src/features.ts`（`EXPERIMENTAL_FEATURES` 末尾が `'rp-initiated-logout'` のままで、末尾追加の後方互換が成立すること）
+  - `packages/experimental/src`（8 機能のいずれも `timingSafeEqual` を複製していないことの実測。本機能が最初の複製になるため、将来の core 公開 API 昇格の記録（仕様書の将来の昇格考慮）が妥当）
+  - `samples/hono-cloudflare/src/oidc-provider/config.ts` 141 行（静的 client_id `example-client` が人間の命名であることの確認。U2 の判断材料）
+  - `tasks/p3-generated-scope-policy-prototype-key-guard.md`（プロトタイプ経路キーの懸念が既出であることの確認）
+- **指摘**:
+  1. **`Content-Type` 検査が未規定**: RFC 7591 §3.1 は `application/json` での POST を定めるが、仕様はボディの中身しか検査していなかった。`text/plain` の HTML フォーム投稿は `name` / `value` の組で有効な JSON ボディを合成でき、CORS プリフライトなしのクロスオリジン POST が通る。オープン登録では攻撃者が直接叩けるため CSRF としての実害はないが、§3.1 適合と面の最小化のため生成ルートで `Content-Type` を検査すべき
+  2. **401 応答が RFC 6750 §3.1 と不整合**: ヘッダ欠落時にも `error="invalid_token"` を返す設計は「認証情報を伴わないリクエストにエラーコードを含めない SHOULD NOT」に反する。また「欠落と不一致を区別しない」という要件自体にセキュリティ上の価値がない（要求者は自分が何を送ったかを知っており、区別しても攻撃者への追加情報はゼロ）。守るべき本質は「期待トークンの情報（長さ・部分一致）を応答へ反映しない」ことである
+  3. **ボディ長上限の単位が未定義**: 「文字列の最大長」のままでは UTF-16 コード単位数とバイト長のどちらとも読め、多バイト文字を含む境界値テストが非決定的になる
+  4. **未知フィールド除去の実装方式が未指定**: パース結果のスプレッドや `Object.assign` でのコピーを許すと、`__proto__` キーを持つ入力の扱いが実装任せになる
+- **修正**（いずれも本レビュー内で仕様書へ反映済み）:
+  1. 生成ルートの検証順序へ `Content-Type` 検査（`application/json`、パラメータ付き許容。違反は `invalid_client_metadata`）を挿入し、入出力・セキュリティ要件・conformance テスト計画へ追記
+  2. 401 応答を「ヘッダ欠落 → `WWW-Authenticate: Bearer`（コードなし）/ 提示して失敗 → `error="invalid_token"`」の 2 形に確定し、「区別しない」要件を「期待トークンの情報を応答へ反映しない」へ置換。単体テスト計画へ分岐の検証を追加
+  3. `maxBodyBytes` / `maxRegistrationBodyBytes` を UTF-8 バイト長（TextEncoder 基準）と定義し、多バイト境界のテストを追加
+  4. 未知フィールド除去を allowlist-pick 方式（理解する 5 フィールドだけを新オブジェクトへ選び取る）と明記し、`__proto__` / `constructor` キーのテストを追加
+- **未解決事項の確定**:
+  - **U1 → `429 Too Many Requests` + 固定 JSON ボディ**。`invalid_client_metadata`（400）はメタデータの不備を表す語彙であり、流用するとクライアントに「メタデータを直せば通る」と誤認させ、変更再試行ループが DoS 対策を逆に増幅する。`Retry-After` は付けない（在庫の天井であり回復時期を約束できない）。上限値・現在数は応答へ反映しない
+  - **U2 → `dcr-` + `generateRandomString(16)`**（128 ビット乱数、乱数部 22 文字）。静的 client_id は人間の命名（実測: `example-client`）のため、固定プレフィックスで名前空間が分かれ、上書き脅威が構造的に消える。`client_id` は秘密情報ではなく、由来の露出に失うものはない
+- **確認して問題なしとした項目**: リプレイ（オープン登録では登録の複製しか起きず総数上限で抑止。initial access token は単一静的シークレットで PoC 範囲として文書化済み）/ SSRF（受理 5 フィールドに URL 参照先がなく、`redirect_uris` は保存のみで取得しない）/ シークレット強度（256 ビット・`crypto.getRandomValues`・`Cache-Control: no-store`・ログ禁止が明文化されテストで固定可能）/ 有効期限（`client_secret_expires_at: 0` は in-memory ストアのプロセス寿命で実質的に上限づけられ、誤解しやすい点の節で説明済み）/ package 境界（core の公開 API のみ使用・`timingSafeEqual` 複製の判断は実測と整合）/ CLI 後方互換（末尾追加・既定無効・未指定時バイト同一が完了条件 3 で固定）/ 明示的有効化（`--enable` のみ）/ grant_types 制限による experimental 機能間結合の遮断 / 切り出し可能な構造（純関数群 + 生成コード責務の分離は昇格方針 A と同型）
+- **残リスク**:
+  - initial access token が生成コード設定内の単一静的文字列であること（ローテーション・複数発行なし）は PoC 向け割り切りとして仕様書に明示済み。本番運用ギャップとして Docs の「本番非推奨」警告に含める
+  - 動的登録クライアントはプロセス内で無期限（失効手段が再起動のみ）。RFC 7592 を非目標とする以上は構造上の帰結であり、Docs の既知の制約へ記載する
+  - U3（パス名）が Review 3 へ残る（テンプレート一貫性の確認時に確定。セキュリティへの影響なし）
+- **判定**: Pass with changes（修正は本レビュー内で反映済み）
+- **次回可能日**: 2026-10-08

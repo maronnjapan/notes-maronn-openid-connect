@@ -7,14 +7,14 @@
 | RFC 7591: OAuth 2.0 Dynamic Client Registration Protocol | IETF | https://datatracker.ietf.org/doc/html/rfc7591 | Normative | §2, §2.1, §3.1, §3.2.1, §3.2.2, §5 | メタデータ語彙と既定値（token_endpoint_auth_method=client_secret_basic / grant_types=["authorization_code"] / response_types=["code"]）、未知メタデータの MUST ignore、POST + application/json の MUST、オープン登録の SHOULD、201 応答と登録済み全メタデータ返却の MUST、client_secret_expires_at=0 の意味、エラーコード（invalid_redirect_uri / invalid_client_metadata）、grant/response 整合の SHOULD、DoS の rate-limit MAY、リダイレクト系 grant の redirect_uris 登録 MUST | 2026-09-30 | Proposed Standard (2015-07) |
 | OpenID Connect Dynamic Client Registration 1.0 | OpenID Foundation | https://openid.net/specs/openid-connect-registration-1_0.html | Normative | §2, §3.1, §3.2, §3.3 | redirect_uris REQUIRED、initial access token の MAY と「アクセストークンなしの登録を受けるべき（SHOULD）」、未知フィールドの MUST ignore、201 SHOULD、registration_access_token / registration_client_uri の「両方か両方なし」MUST、400 エラーとエラーコード、TLS 要求 | 2026-09-30 | incorporating errata set 2 |
 | OpenID Connect Discovery 1.0 | OpenID Foundation | https://openid.net/specs/openid-connect-discovery-1_0.html | Normative | §3 | `registration_endpoint` メタデータの定義（有効時のみ広告する根拠） | 2026-09-30 | incorporating errata set 2 |
-| RFC 6750: Bearer Token Usage | IETF | https://datatracker.ietf.org/doc/html/rfc6750 | Normative | §2.1, §3 | initial access token 構成時の Authorization: Bearer の読み取りと 401 + WWW-Authenticate 応答 | 2026-09-30 | - |
+| RFC 6750: Bearer Token Usage | IETF | https://datatracker.ietf.org/doc/html/rfc6750 | Normative | §2.1, §3, §3.1 | initial access token 構成時の Authorization: Bearer の読み取りと 401 + WWW-Authenticate 応答。§3.1 の「認証情報を伴わないリクエストにエラーコードを含めない SHOULD NOT」（Review 2 で 401 応答を欠落＝コードなし / 提示失敗＝invalid_token の 2 形に確定した根拠） | 2026-10-07 | - |
 
 ## Informative 一次資料
 
 | タイトル | 発行元 | URL | 種別 | 参照セクション | 使用内容 | 確認日 | 仕様バージョン |
 |---|---|---|---|---|---|---|---|
 | RFC 7592: OAuth 2.0 Dynamic Client Registration Management Protocol | IETF | https://datatracker.ietf.org/doc/html/rfc7592 | Informative | 全体 | 非目標の確認（登録後の参照・更新・削除と registration_access_token を実装しない判断の根拠） | 2026-09-30 | Experimental (2015-07) |
-| RFC 6585: Additional HTTP Status Codes | IETF | https://datatracker.ietf.org/doc/html/rfc6585 | Informative | §4 | U1（登録上限超過時の 429 案）の検討材料 | 2026-09-30 | - |
+| RFC 6585: Additional HTTP Status Codes | IETF | https://datatracker.ietf.org/doc/html/rfc6585 | Informative | §4 | 登録上限超過時の 429 応答の根拠（Review 2 で U1 を 429 に確定） | 2026-10-07 | - |
 | RFC 9700: Best Current Practice for OAuth 2.0 Security | IETF | https://datatracker.ietf.org/doc/html/rfc9700 | Informative | §4 | 登録クライアントへの制約面（redirect_uri 検証・PKCE）を狭く保つ判断の背景 | 2026-09-30 | BCP 240 |
 
 ## セキュリティガイダンス
@@ -51,6 +51,8 @@
 | `samples/hono-cloudflare/package.json`（generate スクリプト、8 行） | 全機能有効サンプルへの `--enable dynamic-client-registration` 追加先 |
 | `tasks/experimental/done/par/` | 「機械可読 JSON を受ける新規エンドポイント」の先例（実装規模とテンプレート構造の見積り根拠） |
 | `tasks/T-019-dpop.md` | DPoP が core 変更前提の別タスクであることの確認（候補評価） |
+| `tasks/p3-generated-scope-policy-prototype-key-guard.md` | プロトタイプ経路キーの入力を不活性に保つ懸念がプロジェクト内で既出であることの確認（未知フィールド除去を allowlist-pick 方式と定めた背景。Review 2） |
+| `samples/hono-cloudflare/src/oidc-provider/config.ts`（`defaultRegisteredClients` の `clientId: 'example-client'`、141 行） | 静的 client_id が人間の命名であることの確認（U2 の `dcr-` プレフィックスで名前空間を分ける判断の根拠。Review 2） |
 | `study-material/ext-rich-authorization-requests-rfc9396.md` | RAR の隔離性評価（候補評価で見送る根拠） |
 
 ## 二次資料
