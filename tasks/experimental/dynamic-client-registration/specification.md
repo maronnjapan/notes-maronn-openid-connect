@@ -80,7 +80,7 @@ Client                                 OP (生成コード + experimental/dynami
  |                                       |
  |-- POST /register -------------------->| (1) （設定時のみ）Authorization: Bearer を initial access token と
  |   Content-Type: application/json      |     定数時間比較。不一致・欠落は 401（何も登録しない）
- |   {                                   | (2) ボディ長と JSON 形式の検査（上限超過・非オブジェクトは 400）
+ |   {                                   | (2) Content-Type・ボディ長・JSON 形式の検査（違反は 400）
  |     "redirect_uris": [...],           | (3) メタデータ検証: 未知フィールドを無視し、理解するフィールドの
  |     "token_endpoint_auth_method":...  |     値を検証（invalid_redirect_uri / invalid_client_metadata）
  |     ...                               | (4) 既定値の適用（grant_types=["authorization_code"] など）
@@ -102,6 +102,8 @@ Client                                 OP (生成コード + experimental/dynami
 ### リクエスト（RFC 7591 §3.1） — `POST /register`
 
 `application/json` のボディで登録メタデータを受ける（§3.1 MUST）。
+生成コードのルートは `Content-Type` ヘッダが `application/json`（`charset` などのパラメータ付きを含む）であることを検査し、それ以外は `invalid_client_metadata` で拒否する。
+この検査は §3.1 への適合に加え、`text/plain` の HTML フォーム投稿で有効な JSON ボディを組み立てる手口（CORS プリフライトが発生しないクロスオリジン POST）を塞ぐ（セキュリティ要件の節）。
 本機能が理解する（= 検証して登録に使う）フィールドは次の 5 つで、それ以外のフィールドは黙って無視する（§2「The authorization server MUST ignore any client metadata sent by the client that it does not understand」）。
 
 | フィールド | 位置づけ | 本機能の扱い |
@@ -123,7 +125,7 @@ RFC 7591 §3.1 は「オープンな登録を許すべき（SHOULD allow registr
 
 | フィールド | 値 |
 |---|---|
-| `client_id` | 乱数生成した一意識別子（未解決事項 U2 の形式） |
+| `client_id` | `dcr-` + `generateRandomString(16)`（128 ビット乱数。Review 2 で確定。確定済み事項の節） |
 | `client_secret` | `token_endpoint_auth_method` が `client_secret_basic` / `client_secret_post` の場合のみ。32 バイト乱数の base64url（43 文字） |
 | `client_id_issued_at` | 発行時刻（UNIX 秒） |
 | `client_secret_expires_at` | `client_secret` を発行した場合のみ `0`（無期限。§3.2.1「REQUIRED if client_secret is issued」） |
@@ -140,11 +142,24 @@ RFC 7591 §3.1 は「オープンな登録を許すべき（SHOULD allow registr
 | error | 条件 |
 |---|---|
 | `invalid_redirect_uri` | `redirect_uris` の欠落・空配列・非文字列要素・URI 規則違反 |
-| `invalid_client_metadata` | 上記以外の検証失敗（非 JSON ボディ・非オブジェクト・ボディ長超過・理解するフィールドの不正値・grant/response の不整合） |
+| `invalid_client_metadata` | 上記以外の検証失敗（`Content-Type` 不正・非 JSON ボディ・非オブジェクト・ボディ長超過・理解するフィールドの不正値・grant/response の不整合） |
 
 `error_description` は ASCII の固定文言に上限を課し、リクエストのメタデータ値（URI 文字列を含む）を反映しない（セキュリティ要件の節）。
-initial access token を要求する構成でトークンが欠落・不一致の場合は `401 Unauthorized` と `WWW-Authenticate: Bearer error="invalid_token"` を返し（RFC 6750 §3）、ボディの検証には進まない。
-登録上限超過時の応答は未解決事項 U1。
+
+initial access token を要求する構成では、`401 Unauthorized` を RFC 6750 §3.1 に沿って 2 形に分ける（Review 2 で確定）。
+
+- `Authorization` ヘッダが無い場合: `WWW-Authenticate: Bearer`（エラーコードなし。認証情報を伴わないリクエストにエラーコードを含めない §3.1 の SHOULD NOT に従う）
+- ヘッダはあるが Bearer 形式でない・トークンが一致しない場合: `WWW-Authenticate: Bearer error="invalid_token"`
+
+どちらもボディの検証には進まず、期待トークンに関する情報（長さ・部分一致の有無）は応答に反映しない。
+要求者は自分が何を送ったかを知っているため、この区別が攻撃者へ与える追加情報はない。
+
+#### 登録上限超過（Review 2 で確定） — `429 Too Many Requests`
+
+`maxRegisteredClients` 超過時は `429 Too Many Requests`（RFC 6585 §4）と固定 JSON ボディ `{"error":"too_many_registrations","error_description":"registration limit reached"}` を返す。
+RFC 7591 §3.2.2 のエラー語彙はメタデータの不備を表すものであり、`invalid_client_metadata` を流用するとクライアントに「メタデータを直せば通る」と誤認させ、変更再試行のループで上限対策が守るはずの DoS 面を逆に増幅する。
+`Retry-After` は付けない（上限は流量ではなく在庫の天井であり、回復時期を約束できない）。
+設定値（上限数）と現在の登録数は応答に反映しない。
 
 ## 公開API案（`@maronn-openid-connect/experimental/dynamic-client-registration`）
 
@@ -168,7 +183,9 @@ export interface ValidatedClientRegistration {
 }
 
 export interface ValidateClientRegistrationOptions {
-  /** ボディ（パース前の文字列）の最大長。既定 16384 */
+  /** ボディ（パース前の文字列）の UTF-8 バイト長の上限。既定 16384。
+   *  文字列長（UTF-16 コード単位数）ではなく TextEncoder で得たバイト長で判定し、
+   *  多バイト文字を含む境界値テストを決定的にする */
   maxBodyBytes?: number;
 }
 
@@ -196,7 +213,9 @@ export interface DynamicallyRegisteredClient {
 }
 
 export interface BuildRegisteredClientOptions {
-  /** テスト用の注入点。省略時は core generateRandomString による乱数生成 */
+  /** テスト用の注入点。省略時の既定は
+   *  generateClientId: () => `dcr-${generateRandomString(16)}`（128 ビット乱数）、
+   *  generateClientSecret: () => generateRandomString(32)（256 ビット乱数、43 文字） */
   generateClientId?: () => string;
   generateClientSecret?: () => string;
   now?: () => number;
@@ -243,8 +262,8 @@ export function verifyInitialAccessToken(
 | 設定 | 既定値 | 意味 |
 |---|---|---|
 | `initialAccessToken` | `undefined` | 設定すると `POST /register` に `Authorization: Bearer` での提示を要求する。未設定ならオープン登録（RFC 7591 §3.1 SHOULD） |
-| `maxRegisteredClients` | `100` | 動的登録クライアントの総数上限。超過時の応答は U1 |
-| `maxRegistrationBodyBytes` | `16384` | リクエストボディの最大長（DoS 対策） |
+| `maxRegisteredClients` | `100` | 動的登録クライアントの総数上限。超過時は `429`（応答の節） |
+| `maxRegistrationBodyBytes` | `16384` | リクエストボディの最大長（UTF-8 バイト長。DoS 対策） |
 
 エンドポイントのパスは `/register` 固定とする（最終確定は U3）。
 
@@ -252,31 +271,34 @@ export function verifyInitialAccessToken(
 
 検証は次の順序で行い、最初に失敗した段階のエラーを返す。
 
-1. （設定時のみ）initial access token の検証。失敗は 401（ボディを読む前に返す）
-2. ボディ長の上限検査。超過は `invalid_client_metadata`
-3. JSON パースとオブジェクト形式の検査。非 JSON と非オブジェクト（配列・プリミティブ）は `invalid_client_metadata`
-4. 未知フィールドの除去（エラーにしない。RFC 7591 §2 MUST ignore）
-5. `redirect_uris` の検査（欠落・空・非文字列要素・URI 規則違反は `invalid_redirect_uri`）
-6. `token_endpoint_auth_method` / `grant_types` / `response_types` / `client_name` の値検査と整合検査（違反は `invalid_client_metadata`）
-7. 既定値の適用と登録レコードの構築
-8. 登録上限の検査とストア保存（生成コード側。超過時の応答は U1）
+1. （設定時のみ）initial access token の検証。失敗は 401（ボディを読む前に返す。ヘッダ欠落と不一致の応答形は応答の節）
+2. `Content-Type` が `application/json` であることの検査（生成コード側）。違反は `invalid_client_metadata`
+3. ボディ長（UTF-8 バイト長）の上限検査。超過は `invalid_client_metadata`
+4. JSON パースとオブジェクト形式の検査。非 JSON と非オブジェクト（配列・プリミティブ）は `invalid_client_metadata`
+5. 未知フィールドの除去（エラーにしない。RFC 7591 §2 MUST ignore）。実装は「理解する 5 フィールドだけを新しいオブジェクトへ選び取る」allowlist-pick 方式とし、パース結果のスプレッドや `Object.assign` によるコピーをしない。`__proto__` などプロトタイプ経路のキーを持つ入力を不活性に保つ（`tasks/p3-generated-scope-policy-prototype-key-guard.md` と同じ懸念への先回り）
+6. `redirect_uris` の検査（欠落・空・非文字列要素・URI 規則違反は `invalid_redirect_uri`）
+7. `token_endpoint_auth_method` / `grant_types` / `response_types` / `client_name` の値検査と整合検査（違反は `invalid_client_metadata`）
+8. 既定値の適用と登録レコードの構築
+9. 登録上限の検査とストア保存（生成コード側。超過時は `429`。応答の節）
 
 エラー処理の原則:
 
 - `error_description` は固定の ASCII 文言とし、リクエスト由来の値（URI・メタデータ値）を埋め込まない。どのフィールドが不正かはフィールド名だけで示す（例: `redirect_uris must be a non-empty array of strings`）
 - core の `validateRegisteredRedirectUris` は設定ミス検知用の関数であり、違反 URI をメッセージへ埋め込んだ `server_error` の `AuthorizationError` を投げる（`authorization-request.ts:426` ほか）。本機能はこの例外を捕捉し、コードを `invalid_redirect_uri`（RFC 7591 §3.2.2）へ、文言を URI を含まない固定 ASCII へ差し替えた `ClientRegistrationError` として投げ直す。検査規則そのもの（フラグメント禁止、危険スキーム拒否、非ループバック平文 http 拒否）は core と同一に保たれ、エラー表現だけを登録エンドポイントの契約へ合わせる
 - 検証途中で例外を握りつぶさない。`ClientRegistrationError` 以外の例外は生成コードのルートで 500 に落とす（他ルートと同じ扱い）
-- 401 経路（initial access token 不一致）では、トークンが「欠落」か「不一致」かを応答で区別しない
+- 401 経路では、期待トークンに関する情報（長さ・部分一致）を応答へ反映しない。ヘッダ欠落時にエラーコードを付けない・提示時に `error="invalid_token"` を返すという応答の分岐は RFC 6750 §3.1 への適合であり、要求者が自分の送信内容を知っている以上、この分岐が攻撃者へ与える追加情報はない
 
 ## セキュリティ要件
 
 | 脅威 / 論点 | 対策 |
 |---|---|
-| 無制限登録による DoS（RFC 7591 §5） | 総数上限 `maxRegisteredClients`（既定 100）とボディ長上限 `maxRegistrationBodyBytes`（既定 16384）。IP 単位の流量制御はデプロイ環境の責務と README に明記する |
+| 無制限登録による DoS（RFC 7591 §5） | 総数上限 `maxRegisteredClients`（既定 100）とボディ長上限 `maxRegistrationBodyBytes`（既定 16384、UTF-8 バイト長）。上限超過は `429` の固定文言で返し、`invalid_client_metadata` による「メタデータ変更での再試行」誘発を避ける。IP 単位の流量制御はデプロイ環境の責務と README に明記する |
+| クロスオリジンのフォーム投稿（`text/plain` で JSON 形のボディを組む手口） | `Content-Type: application/json` 以外を拒否する。登録は未認証で直接叩けるため CSRF としての実害はないが、§3.1 適合と面の最小化のため閉じる |
+| プロトタイプ汚染キーを含む入力 | 未知フィールド除去は allowlist-pick 方式（バリデーションの節）。パース結果のオブジェクトをコピー・スプレッドしない |
 | 不正な redirect_uri の登録（オープンリダイレクタの持ち込み） | 静的クライアントと同一の core `validateRegisteredRedirectUris` 規則を登録時に適用する。フラグメント付き・`javascript:` 等の危険スキーム・非ループバック平文 http は登録段階で `invalid_redirect_uri` になる |
 | `client_secret` の強度と露出 | 32 バイト（256 ビット）を `crypto.getRandomValues` で生成する。応答は `Cache-Control: no-store` を付け、シークレットをログに出さない。エラー応答にメタデータ値を反映しないため、シークレットが応答以外の経路に乗ることはない |
-| initial access token の照合 | 定数時間比較（Web Crypto HMAC 方式）。欠落と不一致を応答で区別せず、トークン値をログに出さない |
-| 既存クライアントの上書き | `client_id` は乱数生成のみで、リクエストから指定させない。ストア保存は「既存キーが無いこと」を前提とし、静的 Map の client_id と衝突しない形式（U2）にする |
+| initial access token の照合 | 定数時間比較（Web Crypto HMAC 方式）。期待トークンの情報（長さ・部分一致）を応答へ反映せず、トークン値をログに出さない |
+| 既存クライアントの上書き | `client_id` は乱数生成のみで、リクエストから指定させない。`dcr-` プレフィックスにより人間が命名する静的 client_id（例: `example-client`）と名前空間が分かれ、衝突が構造的に起きない。`client_id` は秘密情報ではないため、プレフィックスが動的登録由来であることを明かしても失うものはなく、ログの調査性はむしろ上がる |
 | SSRF | v1 は URL 参照系メタデータ（`jwks_uri` / `sector_identifier_uri` / `logo_uri` など）を受理しないため、登録処理が外部へリクエストを発行する経路がない |
 | エラー情報の露出 | `error_description` は固定 ASCII 文言。検証失敗の詳細（どの URI が・なぜ）を攻撃者の探索に使わせない |
 | 生成コードの安全性 | 機能無効時は `/register` ルートもストアも resolver 合成も生成されず、生成物はバイト同一（完了条件） |
@@ -325,9 +347,11 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 
 - 正常系: 最小リクエスト（`redirect_uris` のみ）で既定値が適用される / 全フィールド指定 / `none` で public client になり secret が出ない / 未知フィールドが黙って落ちる / 応答 JSON のフィールドと具体値（`client_secret_expires_at: 0` を含む）
 - 異常系: 非 JSON / 非オブジェクト / ボディ長超過 / `redirect_uris` の欠落・空配列・非文字列要素・フラグメント付き・`javascript:`・非ループバック http / `token_endpoint_auth_method` の未対応値 / `grant_types` の未対応値と `refresh_token` 単独 / `response_types` の `code` 以外 / `client_name` の非文字列・長さ超過・制御文字
-- 境界値: ボディ長ちょうど / `client_name` 128 文字ちょうど / `redirect_uris` がループバック http と https の混在
-- initial access token: 一致 / 不一致 / ヘッダ形式不正 / Bearer 以外のスキーム
+- 境界値: ボディの UTF-8 バイト長ちょうど・超過 1 バイト（多バイト文字を含むボディで判定基準を固定） / `client_name` 128 文字ちょうど / `redirect_uris` がループバック http と https の混在
+- initial access token: 一致 / 不一致 / ヘッダ形式不正 / Bearer 以外のスキーム / ヘッダ欠落時は `WWW-Authenticate: Bearer`（エラーコードなし）・提示時の失敗は `error="invalid_token"` という応答の分岐
 - エラー内容: `error` コードの対応（`invalid_redirect_uri` と `invalid_client_metadata` の区別）と `error_description` にリクエスト値が含まれないこと
+- プロトタイプ汚染: `__proto__` / `constructor` をキーに持つボディが登録を汚染せず、未知フィールドとして落ちること
+- `client_id` の形式: `dcr-` プレフィックスと乱数部 22 文字（16 バイトの base64url）
 
 ### CLIテスト（`packages/cli/src/__tests__`）
 
@@ -341,6 +365,8 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 - 発行された `client_id` / `client_secret` で Authorization Code Flow（PKCE 付き）が完了し、トークンが取れる
 - `token_endpoint_auth_method: "none"` で登録した public client がシークレットなしでフローを完了できる
 - 不正メタデータの 400（`invalid_redirect_uri` / `invalid_client_metadata` の使い分け）
+- `Content-Type: application/json` 以外（`text/plain` など）の POST が 400 になる
+- `maxRegisteredClients` 到達後の登録が 429 と固定ボディになる（上限を小さく設定して検証）
 - discovery に `registration_endpoint` が含まれる
 - 未知フィールドを含む登録が成功し、応答に未知フィールドが現れない
 
@@ -383,9 +409,12 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 
 | ID | 論点 | 選択肢 | 確定に使う資料 | 確定予定 |
 |---|---|---|---|---|
-| U1 | 登録上限（`maxRegisteredClients`）超過時の応答 | (a) `429 Too Many Requests` + 素の JSON（RFC 6585。ただし RFC 7591 のエラー語彙の外） / (b) `400` + `invalid_client_metadata`（語彙内だが意味がずれる） | RFC 7591 §3.2.2 の「unless otherwise specified」の射程、RFC 6585、生成ルートの既存エラー実装パターン | Review 2（セキュリティ観点） |
-| U2 | `client_id` の形式（`dcr-` プレフィックスの有無と乱数長） | (a) `dcr-` + `generateRandomString(16)`（由来が判別でき静的 ID と衝突しない） / (b) 素の `generateRandomString(16)` | 生成コードの既存ストアのキー形式、静的クライアント ID の命名、`generateRandomString` の既存利用箇所 | Review 2 |
 | U3 | エンドポイントのパス名（`/register` か `/registration`） | 本仕様書は `/register` を仮置き | OIDC Discovery の `registration_endpoint` の一般的な対応パス、生成テンプレートの既存ルート命名（`/par` など短い動詞・名詞） | Review 3（テンプレート一貫性確認時） |
+
+### 確定済み事項（Review 2、2026-10-07）
+
+- **U1（登録上限超過時の応答）**: `429 Too Many Requests` + 固定 JSON ボディに確定。`invalid_client_metadata`（400）はメタデータの不備を表す語彙であり、流用するとクライアントへ「メタデータを直せば通る」と誤認させ、変更再試行のループが DoS 対策を逆に増幅するため退けた。詳細は応答の節
+- **U2（`client_id` の形式）**: `dcr-` + `generateRandomString(16)`（128 ビット乱数、乱数部 22 文字）に確定。静的 client_id は人間が命名する（サンプルでは `example-client`）ため、固定プレフィックスで名前空間が分かれ、衝突と上書きが構造的に起きない。`client_id` は秘密情報ではないためプレフィックスによる由来の露出に失うものはない
 
 ## 将来の昇格考慮
 
