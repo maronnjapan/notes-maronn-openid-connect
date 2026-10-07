@@ -305,7 +305,7 @@ export function createInMemoryCibaLoginTransactionStore(): CibaLoginTransactionS
 ### errors.ts（エラー型）
 
 エラー型は応答面ごとに 3 つに分ける。
-`BackchannelAuthenticationError` はバックチャネル認証エンドポイントの §13 語彙、`CibaGrantError` はトークンエンドポイントの §11 語彙で、どちらも RFC 6749 §5.2 の JSON 形・常に 400 で返る（401 はクライアント認証を担う core の `TokenError` だけが返す）。
+`BackchannelAuthenticationError` はバックチャネル認証エンドポイントの §13 語彙、`CibaGrantError` はトークンエンドポイントの §11 語彙（`unauthorized_client` など RFC 6749 §5.2 の既存値を含む）で、どちらも RFC 6749 §5.2 の JSON 形・常に 400 で返る（401 はクライアント認証を担う core の `TokenError` だけが返す）。
 `CibaVerificationError` は HTML ページで応答する UI 層専用の型である。
 
 `BackchannelAuthenticationError` の語彙に `access_denied` を含めていないのは意図的である。
@@ -392,7 +392,7 @@ export class CibaVerificationError extends Error {
  *
  * - `authorization_pending` / `slow_down` / `access_denied` / `expired_token`:
  *   §11 が Poll モードのポーリング応答用に定める値。
- * - `invalid_grant` / `invalid_request`: RFC 6749 §5.2 の既存値。
+ * - `invalid_grant` / `invalid_request` / `unauthorized_client`: RFC 6749 §5.2 の既存値。
  */
 export type CibaGrantErrorCode =
   | 'authorization_pending'
@@ -400,7 +400,8 @@ export type CibaGrantErrorCode =
   | 'expired_token'
   | 'access_denied'
   | 'invalid_grant'
-  | 'invalid_request';
+  | 'invalid_request'
+  | 'unauthorized_client';
 
 /**
  * トークンエンドポイントの CIBA grant 分岐のエラー。
@@ -1068,6 +1069,9 @@ async function resolveApprovableRecord(input: {
 ### ciba-grant.ts（トークンエンドポイントの状態機械）
 
 `processCibaGrant` はトークンエンドポイントの CIBA 分岐で、§11 の状態機械を評価する。
+評価に入る前に、`validateCibaGrantAllowed` がクライアントの登録 `grant_types` に CIBA の URN が含まれることを検証する（RFC 6749 §5.2 の `unauthorized_client`）。
+バックチャネルエンドポイントは受付時に同じ検査を行うが、`auth_req_id` の発行から償還までの間に登録から CIBA が外れる場合を受付時の検査だけでは塞げない。
+Device Flow が `validateDeviceCodeGrantAllowed` で償還時にも検査しているのと同じ位置づけである。
 判定順序は Device Flow の実装と同じで、期限切れをポーリング過速より先に評価する。期限切れレコードの interval を増やしても意味がなく、クライアントへはフロー終了を伝えるべきだからである。
 
 `lastPolledAt` の更新は `slow_down` と `authorization_pending` の 2 経路だけで行う。
@@ -1087,6 +1091,7 @@ async function resolveApprovableRecord(input: {
  */
 import type { TokenClientInfo } from '@maronn-openid-connect/core';
 import { CibaGrantError } from './errors.js';
+import { CIBA_GRANT_TYPE } from './store.js';
 import type {
   CibaAuthenticationRequestRecord,
   CibaAuthenticationRequestStore,
@@ -1119,13 +1124,16 @@ export interface CibaGrantResult {
  *
  * 状態機械の判定順序（上から評価し、最初に該当したものを返す）:
  *
- * 1. `auth_req_id` 欠落 → `invalid_request`
- * 2. レコード不存在・クライアント不一致 → `invalid_grant`（同一文言・レコードは残す）
- * 3. 期限切れ → `expired_token`（レコード削除）
- * 4. ポーリング過速 → `slow_down`（interval を +5 して保存）
- * 5. pending → `authorization_pending`（lastPolledAt 更新）
- * 6. denied → `access_denied`（レコード削除。再ポーリングは invalid_grant）
- * 7. approved → 結果を返す（レコードは consume で単回使用にする）
+ * 1. CIBA grant 未登録クライアント → `unauthorized_client`（RFC 6749 §5.2。
+ *    バックチャネル受付後に登録から CIBA が外れたクライアントの償還を拒否する。
+ *    device-authorization-grant の `validateDeviceCodeGrantAllowed` と同順）
+ * 2. `auth_req_id` 欠落 → `invalid_request`
+ * 3. レコード不存在・クライアント不一致 → `invalid_grant`（同一文言・レコードは残す）
+ * 4. 期限切れ → `expired_token`（レコード削除）
+ * 5. ポーリング過速 → `slow_down`（interval を +5 して保存）
+ * 6. pending → `authorization_pending`（lastPolledAt 更新）
+ * 7. denied → `access_denied`（レコード削除。再ポーリングは invalid_grant）
+ * 8. approved → 結果を返す（レコードは consume で単回使用にする）
  *
  * 期限切れをポーリング過速より先に評価するのは、期限切れレコードの interval を
  * 増やしても意味がなく、クライアントへはフロー終了を伝えるべきだから。
@@ -1144,8 +1152,28 @@ export async function processCibaGrant(input: {
   store: CibaAuthenticationRequestStore;
   now?: Date;
 }): Promise<CibaGrantResult> {
+  validateCibaGrantAllowed(input.client);
   const record = await resolveCibaRecord(input.params, input.client, input.store);
   return evaluateCibaState(record, input.store, input.now ?? new Date());
+}
+
+/**
+ * クライアントが CIBA grant を許可されているかを償還時にも検証する。
+ *
+ * バックチャネルエンドポイントは受付時に同じ検査を行うが、auth_req_id の発行から
+ * 償還までの間に登録から CIBA が外れることがある（RFC 6749 §5.2 の
+ * unauthorized_client）。device-authorization-grant の
+ * `validateDeviceCodeGrantAllowed` と同じ位置づけの検査。
+ *
+ * @throws {CibaGrantError} unauthorized_client
+ */
+export function validateCibaGrantAllowed(client: TokenClientInfo): void {
+  if (!(client.grantTypes ?? []).includes(CIBA_GRANT_TYPE)) {
+    throw new CibaGrantError(
+      'unauthorized_client',
+      'The client is not authorized to use the CIBA grant',
+    );
+  }
 }
 
 /**
@@ -1301,7 +1329,11 @@ export {
   validateCibaLoginSubmission,
 } from './verification.js';
 
-export { SLOW_DOWN_INTERVAL_INCREMENT, processCibaGrant } from './ciba-grant.js';
+export {
+  SLOW_DOWN_INTERVAL_INCREMENT,
+  processCibaGrant,
+  validateCibaGrantAllowed,
+} from './ciba-grant.js';
 export type { CibaGrantResult } from './ciba-grant.js';
 ```
 
@@ -2475,12 +2507,13 @@ function future(): Date {
 
 ### ciba-grant.test.ts
 
-トークンエンドポイントの状態機械の 16 ケース。
+トークンエンドポイントの状態機械の 20 ケース。
 全遷移（pending → `authorization_pending`、interval 内再ポーリング → `slow_down` と +5 の永続化、denied → `access_denied` と削除、期限切れ → `expired_token` と削除、approved → 発行データ返却）と、consume 後の再要求・別クライアント提示・欠落フィールドの `invalid_grant` を固定する。
+加えて `validateCibaGrantAllowed` の受理・拒否と、CIBA grant の登録が外れたクライアントの償還が状態機械の評価前に `unauthorized_client` で止まり、レコードに状態遷移を残さないことを固定する。
 
 ```typescript
 import { describe, expect, it } from 'vitest';
-import { processCibaGrant } from './ciba-grant.js';
+import { processCibaGrant, validateCibaGrantAllowed } from './ciba-grant.js';
 import { CibaGrantError } from './errors.js';
 import { createInMemoryCibaAuthenticationRequestStore } from './store.js';
 import { NOW, makeClient, makeRecord } from './test-helpers.js';
@@ -2513,8 +2546,48 @@ async function expectGrantError(
   throw new Error('expected processCibaGrant to throw');
 }
 
+describe('validateCibaGrantAllowed', () => {
+  it('should accept a client registered for the CIBA grant', () => {
+    expect(() => validateCibaGrantAllowed(makeClient())).not.toThrow();
+  });
+
+  // RFC 6749 §5.2: the authenticated client must be registered for the grant
+  // type it presents. The backchannel endpoint already enforces this at
+  // request time; the token endpoint must enforce it again at redemption time
+  // (the registration can change between the two).
+  it('should reject a client whose grantTypes omit the CIBA URN', () => {
+    expect(() =>
+      validateCibaGrantAllowed(makeClient({ grantTypes: ['authorization_code'] })),
+    ).toThrowError(
+      new CibaGrantError('unauthorized_client', 'The client is not authorized to use the CIBA grant'),
+    );
+  });
+
+  it('should reject a client without grantTypes', () => {
+    expect(() => validateCibaGrantAllowed(makeClient({ grantTypes: undefined }))).toThrowError(
+      new CibaGrantError('unauthorized_client', 'The client is not authorized to use the CIBA grant'),
+    );
+  });
+});
+
 describe('processCibaGrant', () => {
   describe('Request validation (CIBA Section 10.1)', () => {
+    it('should reject a client no longer registered for the CIBA grant before evaluating the record', async () => {
+      const store = createInMemoryCibaAuthenticationRequestStore();
+      await store.save(makeRecord());
+
+      const error = await expectGrantError(
+        makeInput({ store, client: makeClient({ grantTypes: ['authorization_code'] }) }),
+        'unauthorized_client',
+      );
+
+      expect(error.errorDescription).toBe('The client is not authorized to use the CIBA grant');
+      // The record is untouched: no state transition happened for the
+      // deauthorized caller.
+      const record = await store.findByAuthReqId('auth-req-id-value');
+      expect(record).toMatchObject({ status: 'pending', lastPolledAt: null });
+    });
+
     it('should reject a missing auth_req_id with invalid_request', async () => {
       const error = await expectGrantError(makeInput({ params: {} }), 'invalid_request');
 

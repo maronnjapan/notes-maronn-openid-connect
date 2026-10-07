@@ -166,16 +166,23 @@ It deliberately carries no redirect target, because the PAR endpoint is back-cha
 The step functions follow the spec's processing order:
 
 1. `rejectForbiddenParParams` rejects `request_uri` in the body (a MUST NOT in §2.1) and `request` (JAR combination is a non-goal)
-2. `authenticateParClient` authenticates the client (with a subtlety described below)
+2. `authenticateParClient` authenticates the client (under exactly the token endpoint's rules, described below)
 3. `validatePushedAuthorizationParams` validates the pushed parameters under exactly the rules of the authorization endpoint (core's `validateAuthorizationRequest`)
 4. `createPushedAuthorizationRecord` generates the reference value from 256 bits of cryptographic randomness and stores the record
 5. `buildPushedAuthorizationResponse` assembles the 201 response body (`request_uri` and `expires_in`)
 
-Step 2 cannot reuse core's authentication helper as-is.
-RFC 9126 §2.1 states that `client_id` is required in the pushed request because it is required in authorization requests, which means the body carries `client_id` even when the client authenticates with `client_secret_basic` (the Authorization header).
-Core's `extractClientCredentials`, however, treats the mere presence of `client_id` in the body as use of `client_secret_post`, so combining it with the header would be rejected as "multiple authentication methods."
-`authenticateParClient` therefore feeds only the header to the credential extraction when a header is present, and separately verifies afterwards that the body's `client_id` matches the authenticated client, keeping core unchanged.
-A body `client_secret` combined with the header is a genuine case of multiple methods and is rejected per OAuth 2.1 §2.3.
+Step 2 delegates credential extraction and the multiple-method check entirely to core's `extractClientCredentials` and the steps that follow it.
+What RFC 9126 §2.1 demands of the PAR endpoint is client authentication "in the same way as at the token endpoint", and core carries all of those rules:
+
+- Header authentication is keyed on the `Basic` scheme alone; a header in any other scheme (say, a `Bearer` token injected by a gateway) is ignored and the body credentials authenticate the client
+- An empty-string `client_secret` is normalized to "not presented" (RFC 6749 §3.2: parameters sent without a value MUST be treated as omitted)
+- A `Basic` header combined with a non-empty body `client_secret` is rejected as multiple authentication methods per OAuth 2.1 §2.3 (`invalid_request`)
+- The `client_id` that §2.1 requires in the body is checked by core for consistency with the `Basic` credentials, which is what ties the request_uri to the client that pushed it (RFC 9126 §2.2)
+
+This function used to be a hand-rolled implementation that branched on the mere presence of an Authorization header.
+Core at the time treated a body `client_id` by itself as use of `client_secret_post`, so combining it with the header was rejected as multiple methods, and PAR had to pre-sort the credentials.
+Once core gained the Basic-scheme keying and the empty-secret normalization, that premise disappeared, and what remained of the hand-rolled version was only a §2.1 violation: the same credentials passed at `/token` and drew a 4xx at `/par`.
+The full delegation removes that divergence.
 
 On lifetimes, `assertParExpiresInSeconds` validates the §2.2 recommended range (an integer between 5 and 600).
 Generated code calls it while loading configuration, at startup, so an out-of-range setting fails before any request is processed.
@@ -189,7 +196,7 @@ Interaction-class authorization codes (`login_required` and the like) cannot occ
  *
  * Experimental: このモジュールの API は安定していない。破壊的変更があり得る。
  *
- * PAR エンドポイントの処理。core と同じく「合成関数＋ステップ関数」の二層構成とし、
+ * PAR エンドポイントの処理。「合成関数＋ステップ関数」の二層構成とし、
  * CLI 生成コードはステップ関数を順に呼び出して処理を組み立てられるようにする。
  */
 import {
@@ -199,15 +206,24 @@ import {
   TokenErrorCode,
   extractClientCredentials,
   generateRandomString,
+  parseClaimsRequestParameter,
+  rejectUnsupportedRequestParams,
   resolveAuthenticatedTokenClient,
+  resolveAuthorizationRedirectUri,
+  resolveClientForAuthorization,
+  resolveMaxAge,
   sanitizeErrorDescription,
-  validateAuthorizationRequest,
+  validateAuthorizationCodePkce,
+  validateAuthorizationScope,
   validateClientAuthMethod,
+  validateDisplayParameter,
+  validatePromptParameter,
+  validateRegisteredRedirectUris,
+  validateResponseType,
   verifyClientSecret,
   type AuthorizationRequestParams,
   type ClientResolver,
   type TokenClientResolver,
-  type ValidateAuthorizationRequestOptions,
 } from '@maronn-openid-connect/core';
 import { PAR_REQUEST_URI_PREFIX } from './store.js';
 import type {
@@ -264,6 +280,20 @@ export interface PushedAuthorizationResponse {
   expiresIn: number;
 }
 
+/** {@link validatePushedAuthorizationParams} のオプション。 */
+export interface PushedAuthorizationValidationOptions {
+  /**
+   * OIDF Basic OP static-client conformance 互換。true かつ confidential client が
+   * PKCE を完全に省略した場合だけ省略を許容する。認可エンドポイントと同じ値を渡すこと。
+   */
+  allowNonPkceAuthorizationCodeFlow?: boolean;
+  /**
+   * `claims` パラメータ（OIDC Core 1.0 §5.5）を `JSON.parse` する前に課す最大長。
+   * 未指定なら core の `DEFAULT_MAX_CLAIMS_PARAMETER_LENGTH`。
+   */
+  maxClaimsParameterLength?: number;
+}
+
 /** PAR エンドポイント処理のコンテキスト。 */
 export interface PushedAuthorizationRequestContext {
   /** フォームボディのパラメータ（application/x-www-form-urlencoded） */
@@ -273,8 +303,8 @@ export interface PushedAuthorizationRequestContext {
   /** クライアント解決。認可リクエスト検証とクライアント認証の両方に使う */
   clientResolver: ClientResolver & TokenClientResolver;
   store: PushedAuthorizationRequestStore;
-  /** core の認可リクエスト検証へそのまま渡すオプション */
-  validationOptions: ValidateAuthorizationRequestOptions;
+  /** {@link validatePushedAuthorizationParams} へ渡すオプション */
+  validationOptions: PushedAuthorizationValidationOptions;
   /** request_uri の有効期間（秒）。既定 60、許容範囲 5〜600 */
   expiresInSeconds?: number;
   /** 現在時刻。テストと決定的な期限計算のために注入できる */
@@ -335,17 +365,18 @@ export function rejectForbiddenParParams(params: Record<string, string>): void {
 /**
  * ステップ 2: クライアントを認証する（RFC 9126 §2.1: token endpoint と同一規則）。
  *
- * RFC 9126 §2.1 は「`client_id` は認可リクエストの必須パラメータなので pushed request にも
- * 必須」と定めており、`client_secret_basic` を使う場合でもボディに `client_id` が入る。
- * 一方 core の {@link extractClientCredentials} はボディの `client_id` の存在自体を
- * client_secret_post の使用と見なすため、Authorization ヘッダと併用すると
- * 「複数の認証方式」として拒否される。そこで PAR では、
+ * 資格情報の抽出・多重方式の判定・検証はすべて core の
+ * {@link extractClientCredentials} 以降のステップへ委譲し、token endpoint と
+ * 同一の規則を適用する:
  *
- * - Authorization ヘッダがある場合はヘッダのみを資格情報として扱い（ボディの
- *   `client_secret` があれば OAuth 2.1 §2.3 違反として invalid_request）、
- * - 認証後にボディの `client_id` が認証済みクライアントと一致することを検証する
- *
- * という順序で処理する。core は変更しない。
+ * - ヘッダ認証は `Basic` スキームだけが対象で、他スキームのヘッダ（ゲートウェイが
+ *   注入する `Bearer` など）は無視してボディの資格情報で認証する
+ * - 空文字列の `client_secret` は「未提示」に正規化される（RFC 6749 §3.2）
+ * - `Basic` とボディの `client_secret`（非空）の併用は OAuth 2.1 §2.3 の
+ *   多重方式として invalid_request
+ * - RFC 9126 §2.1 で必須の認可パラメータとしてボディに入る `client_id` は、
+ *   `Basic` 併用時に core が Basic 側の client_id との一致を検証する
+ *   （RFC 9126 §2.2: request_uri は pushed request を送ったクライアントに紐付く）
  *
  * @returns 認証されたクライアントID
  * @throws {ParError} invalid_client / invalid_request
@@ -356,38 +387,11 @@ export async function authenticateParClient(context: {
   clientResolver: TokenClientResolver;
 }): Promise<string> {
   const { params, clientResolver } = context;
-  const authorizationHeader = context.authorizationHeader ?? '';
-  const usesAuthorizationHeader = authorizationHeader.trim().length > 0;
-
-  // OAuth 2.1 §2.3: 1リクエストにつき認証方式は 1 つ。ボディの client_secret と
-  // Authorization ヘッダの併用は本当に「複数方式」なので拒否する。
-  if (usesAuthorizationHeader && params['client_secret'] !== undefined) {
-    throw new ParError(
-      'invalid_request',
-      'Multiple client authentication methods provided. Use either the Authorization header or the request body, not both.',
-    );
-  }
-
-  // client_id は認可リクエストのパラメータとしてボディに存在しうるので、資格情報の
-  // 抽出には Authorization ヘッダ使用時はボディを渡さない。
-  const credentialParams: Record<string, string | undefined> = usesAuthorizationHeader
-    ? {}
-    : { client_id: params['client_id'], client_secret: params['client_secret'] };
-
-  const authenticatedClientId = await runClientAuthentication({
-    params: credentialParams,
-    authorizationHeader,
+  return runClientAuthentication({
+    params: { client_id: params['client_id'], client_secret: params['client_secret'] },
+    authorizationHeader: context.authorizationHeader ?? '',
     clientResolver,
   });
-
-  // RFC 9126 §2.2: request_uri は「pushed request を送ったクライアント」に紐付く。
-  // ボディの client_id が別クライアントを名乗る場合はここで拒否する。
-  const bodyClientId = params['client_id'];
-  if (bodyClientId !== undefined && bodyClientId !== authenticatedClientId) {
-    throw new ParError('invalid_request', 'client_id does not match the authenticated client');
-  }
-
-  return authenticatedClientId;
 }
 
 /**
@@ -418,6 +422,12 @@ async function runClientAuthentication(context: {
  * RFC 9126 §2.1: "The authorization server ... MUST validate the request as it would
  * an authorization request sent to the authorization endpoint."
  *
+ * 認可エンドポイントの生成コードと同じ順序で core のステップ関数を呼び、パラメータを
+ * 拒否するものだけを実行する（scope の絞り込みなど値を組み立てる処理は、request_uri を
+ * 展開した認可エンドポイントが行う）。PAR は Request Object（`request`）と併用しない
+ * （{@link rejectForbiddenParParams}）ため、`request` はパースせず request_not_supported
+ * として拒否する。
+ *
  * 失敗は必ず {@link ParError} になり、リダイレクトはしない（RFC 9126 §2.3）。
  *
  * @throws {ParError}
@@ -425,14 +435,26 @@ async function runClientAuthentication(context: {
 export async function validatePushedAuthorizationParams(
   params: Record<string, string>,
   clientResolver: ClientResolver,
-  options: ValidateAuthorizationRequestOptions = {},
-): Promise<Awaited<ReturnType<typeof validateAuthorizationRequest>>> {
+  options: PushedAuthorizationValidationOptions = {},
+): Promise<void> {
+  const request = params as unknown as AuthorizationRequestParams;
   try {
-    return await validateAuthorizationRequest(
-      params as unknown as AuthorizationRequestParams,
-      clientResolver,
-      options,
-    );
+    const client = await resolveClientForAuthorization(request, clientResolver);
+    validateRegisteredRedirectUris(client.redirectUris);
+    const redirectUri = resolveAuthorizationRedirectUri(request, client);
+    const state = request.state;
+    rejectUnsupportedRequestParams(request, redirectUri, state, {
+      requestParameterSupported: false,
+    });
+    validateResponseType(request, client, redirectUri, state);
+    validateAuthorizationScope(request, request, redirectUri, state);
+    validateAuthorizationCodePkce(request, client, redirectUri, state, {
+      allowNonPkceAuthorizationCodeFlow: options.allowNonPkceAuthorizationCodeFlow,
+    });
+    validatePromptParameter(request, redirectUri, state);
+    validateDisplayParameter(request, redirectUri, state);
+    resolveMaxAge(request, client, redirectUri, state);
+    parseClaimsRequestParameter(request, redirectUri, state, options.maxClaimsParameterLength);
   } catch (error) {
     throw toParError(error);
   }
@@ -749,7 +771,7 @@ What `par-request.test.ts` pins down, in summary:
 
 - rejection of the forbidden parameters (`request_uri` / `request`) and acceptance of a body carrying neither
 - lifetime boundary values (5 and 600 accepted; out-of-range and non-integers rejected)
-- every client authentication path (Basic with `client_id` in the body, `client_secret_post`, public clients, rejection of multiple methods, `client_id` mismatch, wrong secret, unknown client)
+- every client authentication path (Basic with `client_id` in the body, `client_secret_post`, public clients, an empty-string `client_secret` treated as not presented, body credentials authenticating under a non-Basic header, rejection of multiple methods, `client_id` mismatch, wrong secret, unknown client)
 - `ParError`'s HTTP status and `WWW-Authenticate` challenge, and sanitization of `error_description`
 - the error-code mapping of pushed-parameter validation (`invalid_request` / `invalid_scope` / `unsupported_response_type`) and the fact that thrown errors carry no redirect target
 - record creation: the URN form, the 256-bit reference value, uniqueness per call, default and configured lifetimes, credentials never being persisted, and caller-supplied arguments never being mutated
@@ -930,7 +952,34 @@ describe('authenticateParClient', () => {
     expect(clientId).toBe('spa-app');
   });
 
-  it('should reject a body client_secret combined with an Authorization header', async () => {
+  it('should authenticate with Basic when the body carries an empty client_secret', async () => {
+    // RFC 6749 §3.2: "Parameters sent without a value MUST be treated as if they
+    // were omitted from the request." — the token endpoint normalizes an empty
+    // client_secret to "not presented", and RFC 9126 §2.1 requires the PAR
+    // endpoint to authenticate the client the same way.
+    const clientId = await authenticateParClient({
+      params: validParams({ client_secret: '' }),
+      authorizationHeader: basicHeader('web-app', 'secret'),
+      clientResolver: createClientResolver(),
+    });
+
+    expect(clientId).toBe('web-app');
+  });
+
+  it('should authenticate via body credentials when a non-Basic Authorization header is present', async () => {
+    // The token endpoint keys header authentication on the Basic scheme and
+    // ignores other schemes (e.g. a Bearer header injected by a gateway), so
+    // the PAR endpoint must do the same (RFC 9126 §2.1).
+    const clientId = await authenticateParClient({
+      params: validParams({ client_id: 'post-app', client_secret: 'secret' }),
+      authorizationHeader: 'Bearer gateway-injected-token',
+      clientResolver: createClientResolver(),
+    });
+
+    expect(clientId).toBe('post-app');
+  });
+
+  it('should reject a body client_secret combined with a Basic Authorization header', async () => {
     // OAuth 2.1 §2.3: a client MUST NOT use more than one authentication method.
     await expect(
       authenticateParClient({
@@ -939,7 +988,7 @@ describe('authenticateParClient', () => {
         clientResolver: createClientResolver(),
       }),
     ).rejects.toThrowError(
-      new ParError('invalid_request', 'Multiple client authentication methods provided. Use either the Authorization header or the request body, not both.'),
+      new ParError('invalid_request', 'Multiple client authentication methods provided. Use either Authorization header or request body, not both.'),
     );
   });
 
@@ -951,7 +1000,7 @@ describe('authenticateParClient', () => {
         clientResolver: createClientResolver(),
       }),
     ).rejects.toThrowError(
-      new ParError('invalid_request', 'client_id does not match the authenticated client'),
+      new ParError('invalid_request', 'client_id in request body does not match the Authorization header'),
     );
   });
 
@@ -1003,21 +1052,45 @@ describe('ParError', () => {
 });
 
 describe('validatePushedAuthorizationParams', () => {
-  it('should return the validated request for a well-formed pushed request', async () => {
-    const validated = await validatePushedAuthorizationParams(
-      { ...validParams(), client_id: 'web-app' },
-      createClientResolver(),
-    );
+  it('should resolve for a well-formed pushed request', async () => {
+    await expect(
+      validatePushedAuthorizationParams(
+        { ...validParams(), client_id: 'web-app' },
+        createClientResolver(),
+      ),
+    ).resolves.toBeUndefined();
+  });
 
-    expect(validated).toMatchObject({
-      responseType: 'code',
-      clientId: 'web-app',
-      redirectUri: 'https://client.example/cb',
-      scope: ['openid', 'profile'],
-      state: 'af0ifjsldkj',
-      nonce: 'n-0S6_WzA2Mj',
-      codeChallengeMethod: 'S256',
-    });
+  // RFC 9126 §3: PAR combined with a Request Object is not supported, so the
+  // request parameter is rejected without being parsed, even when this step is
+  // called without rejectForbiddenParParams() in front of it.
+  it('should map a request parameter to invalid_request without parsing it', async () => {
+    await expect(
+      validatePushedAuthorizationParams(
+        { ...validParams(), request: 'not-a-jwt' },
+        createClientResolver(),
+      ),
+    ).rejects.toThrowError(
+      new ParError('invalid_request', 'request parameter (Request Object) is not supported'),
+    );
+  });
+
+  it('should map an invalid prompt value to invalid_request', async () => {
+    await expect(
+      validatePushedAuthorizationParams({ ...validParams(), prompt: 'none login' }, createClientResolver()),
+    ).rejects.toMatchObject({ code: 'invalid_request', statusCode: 400 });
+  });
+
+  it('should allow an omitted PKCE for a confidential client when allowNonPkceAuthorizationCodeFlow is enabled', async () => {
+    const params = validParams();
+    delete params['code_challenge'];
+    delete params['code_challenge_method'];
+
+    await expect(
+      validatePushedAuthorizationParams(params, createClientResolver(), {
+        allowNonPkceAuthorizationCodeFlow: true,
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it('should map an unregistered redirect_uri to invalid_request', async () => {
