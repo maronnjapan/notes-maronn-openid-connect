@@ -62,8 +62,8 @@ RFC 7591 §3.1 は「相互運用性のため、認可なしの登録を許す�
 
 - `redirect_uris` が無い、または `javascript:` スキームやフラグメント付きを含む → `400` + `invalid_redirect_uri`。登録は何も起きない
 - `token_endpoint_auth_method: "private_key_jwt"` のような未対応値 → `400` + `invalid_client_metadata`。「未知フィールドは無視」と「理解するフィールドの不正値は拒否」は別の規則であることに注意（誤解しやすい点の節）
-- initial access token を要求する構成でトークンが無い・違う → `401` + `WWW-Authenticate: Bearer`。ボディは検証されない
-- 登録上限（既定 100 クライアント）超過 → 登録拒否（応答形式は仕様書の未解決事項 U1）
+- initial access token を要求する構成でトークンが無い・違う → `401` + `WWW-Authenticate: Bearer`（ヘッダ欠落時はエラーコードなし、提示して不一致なら `error="invalid_token"`。RFC 6750 §3.1）。ボディは検証されない
+- 登録上限（既定 100 クライアント）超過 → `429 Too Many Requests` + 固定文言の JSON。メタデータの不備ではないため `invalid_client_metadata` は使わない
 
 ## セキュリティモデルと脅威対策
 
@@ -72,7 +72,7 @@ DCR の脅威モデルの中心は「未認証で書き込めるエンドポイ�
 - **在庫を無限に増やされる**（DoS）: 総数上限とボディ長上限で、メモリ消費に天井を付ける。IP 単位の流量制御はリバースプロキシや PaaS の責務とし、OP 本体では持たない
 - **不正な redirect_uri を登録される**: 登録時に静的クライアントと同一の検査（core の `validateRegisteredRedirectUris`）を通す。フローの実行時ではなく登録時に弾くことで、不正 URI のクライアントはそもそも存在できない
 - **client_secret の漏洩**: シークレットは 201 応答の 1 回だけ返り、`Cache-Control: no-store` を付け、ログに出さない
-- **initial access token の突破**: 定数時間比較で照合し、欠落と不一致を応答で区別しない
+- **initial access token の突破**: 定数時間比較で照合し、期待トークンの情報を応答へ反映しない
 - **SSRF**: v1 は URL を参照しにいくメタデータ（`jwks_uri` など）を受理しないため、登録処理から外部へのリクエストは発生しない
 
 逆に、DCR が**守らないもの**も明確にしておく。
