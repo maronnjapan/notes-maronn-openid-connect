@@ -2,7 +2,22 @@
 
 ## ステータス
 
-🟡 Medium / 未着手（着手前に §テスト要件の実測ステップが必要）
+🟡 Medium / 未着手（着手前に §テスト要件の実測ステップが必要 → 追記のとおり実質済み）
+
+## 追記（2026-10-08）：トランザクション Cookie は別方式で対応済み
+
+本文は PR #112（commit 180f662、2026-10-07 マージ）より前の実装を前提に書かれている。
+着手時は次の差分を踏まえて読み替えること。
+
+- ログイン・同意のトランザクション引き継ぎは Cookie + `csrf_token` 方式へ置き換わった。
+  Cookie 名は固定の `__Host-oidc_txn`（値がトランザクション ID）で、本文が挙げる `oidc_txn_<transactionId>` 形式の束縛 Cookie はもう存在しない。
+  したがって本タスクの残対象は、セッション（`session_id`）、デバイス検証（`oidc_device_<user_code>`）、CIBA ログイン（`oidc_ciba_login_<transactionId>`）、ログアウト確認（`oidc_logout_confirm`）の 4 系統である
+- 「先行実測」の問いには答えが出ている。
+  生成コードは `__Host-oidc_txn` を環境によらず無条件で発行する形で main へマージされており、`tests/e2e`（Playwright、既定ホスト `http://127.0.0.1`）を含む CI がこの構成で通っている。
+  方針 A（常にプレフィックスを付ける）が成立するため、方針 B の分岐は不要になる見込みが高い
+- PR #119 で生成契約テスト `conformance.test.ts` は廃止された。
+  本文中の契約テスト更新手順・期待値は読み飛ばし、挙動の固定は `tests/e2e` で行う
+  （`tasks/p2-doc-generated-contract-test-reference-sweep.md` を参照）
 
 ## 背景
 
