@@ -40,6 +40,11 @@
   sample の `resolvers.ts` / `config.ts` に固定登録。
 - `ClientInfo` は `clientId` / `redirectUris` / `clientType` のみ。
   動的登録に必要な `token_endpoint_auth_method` 等のメタデータ表現が薄い。
+- **追記（2026-10-08）**: 表示用メタデータ（`client_name` / `client_uri` / `logo_uri` /
+  `policy_uri` / `tos_uri`）は `tasks/done/p2-consent-screen-client-identification.md` で
+  `ClientInfo` に camelCase（`clientName` 等）で追加済み。フィールドの意味と名前は
+  OIDC Registration 1.0 §2 / RFC 7591 §2 の語彙に 1 対 1 で揃えてあるため、
+  DCR 実装時は登録リクエスト JSON の同名フィールド（snake_case）をそのまま対応させる。
 
 ## 5. 現在の実装との差分
 
