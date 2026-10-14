@@ -69,3 +69,39 @@
   - U3（パス名）が Review 3 へ残る（テンプレート一貫性の確認時に確定。セキュリティへの影響なし）
 - **判定**: Pass with changes（修正は本レビュー内で反映済み）
 - **次回可能日**: 2026-10-08
+
+## Review 3
+
+- **日付**: 2026-10-14
+- **観点**: 実装着手可否（追加調査なしで着手できるか、受け入れ条件の客観性、対象ファイルと変更範囲、API・CLI・テスト・Docs・実装解説の一貫性、実装順序と検証方法、Experimental であることの利用者への明示）。Review 1・2 と重複する完全性・セキュリティの確認は繰り返さず、Review 2（2026-10-07）以降に main へ入った変更との整合と、U3 の確定に絞った
+- **確認資料**:
+  - リポジトリ現状（main = 053e86e、2026-10-14 取得）。Review 2 以降のコミット: cb33342（CLI 生成の契約テスト conformance.test.ts 廃止、2026-10-07）、216b95b（生成コード文字列を検査する CLI テストの削除）、7ebde04（`--db sql` 導入、2026-10-10）、705068e / deb6d96 / 053e86e（`--db kv` 追加と全 sample の `--db` 化、2026-10-11）
+  - `packages/cli/src/features.ts`（`EXPERIMENTAL_FEATURES` 59〜68 行、末尾 `'rp-initiated-logout'` 67 行、キー対応表 197 行周辺）、`packages/cli/src/index.ts`（`withExperimentalPackage` 36〜48 行）— CLI 統合案が現行構造にそのまま載ることの実測
+  - `packages/cli/src/frameworks/hono/templates.ts`（discovery スプレッドマージ 7304〜7371 行、基底 clientResolver 配線 443〜453 行）、`packages/cli/src/frameworks/web-standard/templates.ts`（hono のルートテンプレートを import して配線する構造）、`packages/cli/src/db.ts`（`--db sql` / `--db kv`）
+  - 生成コードの現状（`samples/hono-cloudflare/src/oidc-provider/`）: `db/clients.ts`（`createSqlClientResolver` / `registerClient()` / `hashClientSecret` によるハッシュ保存）、`store.ts`（core ストア群 `ProviderStores` 687 行は `--db` でバックエンド差し替え、experimental ストアは in-memory の globalThis シングルトンのまま。1045〜1097 行の PAR ストアが先例）、`resolvers.ts` / `apply.ts`（`options.clientResolver ?? ストレージ既定` の合成点）、`config.ts`（`RegisteredClient` 133 行・`createInMemoryClientResolver` 179 行・`example-client` 145 行）
+  - `packages/core/src/index.ts`（`validateRegisteredRedirectUris` 11 行・`generateRandomString` 221 行・`hashClientSecret` 333 行のエクスポート実測）、`packages/core/src/authorization-request.ts`（`validateRegisteredRedirectUris` 377 行へ移動）、`packages/core/src/token-request.ts`（`TokenClientInfo` 30 行、`clientSecretHash` 対応）
+  - テスト基盤の現状: `packages/cli/src/__tests__/cli.test.ts`（CLI 自体の入出力のみ検証する現行方針の実測）、`tests/e2e/specs/`（実装済み 8 機能それぞれの spec と、`pushed-authorization-requests.spec.ts` の discovery ベースのスキップガード）、`samples/*/package.json`（`check:generated` と各 sample の `--db` 種別: express / fastify / hono = sql、nextjs = kv）、`samples/hono-cloudflare/src/app.ts` と `tests/e2e/playwright.config.ts`（`XAA_ALLOWED_AUDIENCES` の env 注入配線）
+  - RFC 7591 §3.1（リクエスト例のパスが `POST /register` であること。U3 の確定材料）、OpenID Connect Discovery 1.0 §3（`registration_endpoint` は完全な URL を広告し、パス名に相互運用要件がないこと）
+- **指摘**:
+  1. **テスト計画が廃止済みの conformance.test.ts 層に依存**: 仕様のテスト計画と完了条件 2・4 は「CLI 生成コードに conformance.test.ts を追加する」前提だったが、cb33342（Review 2 と同日）で同層は廃止され、README のテスト方針も「生成 OP の挙動は tests/e2e と OpenID Conformance Suite で確認する」へ改訂済み。HTTP レベルの検証マトリクスの置き場所が消えていた
+  2. **CLI テスト計画が現行方針と矛盾**: 「`/register` ルートが生成され import があること」等の生成コード文字列検査は、216b95b で削除された種類のテストであり追加できない
+  3. **resolver 合成の記述が `--db` 以前の構造**: 「静的 `createInMemoryClientResolver` と合成」とあったが、現行の生成コードは `options.clientResolver ?? ストレージ既定`（`--db sql` は SQL resolver、`--db kv` は KV 版、なしは静的 Map）を基底とするため、合成対象は「apply テンプレートが解決した基底 resolver」と書くべきだった。ストア配置の参照（`ProviderStores` へ追加するとも読める書き方）も、experimental ストアは `ProviderStores` 外の in-memory シングルトンという先例（PAR / Device / CIBA）に合わせて明確化が必要だった
+  4. **429 / 401 系 E2E の実行手段が未記述**: 生成コードの設定オブジェクトは sample 再生成で固定されるため、E2E から上限や initial access token を変える手段（sample 手書き `app.ts` の env 読み取り → `applyOidc` オプション、という XAA の既存配線）を仕様に書く必要があった。またオープン登録の検証と initial access token の検証は同じ OP で両立しない
+  5. **将来の昇格考慮の記述が陳腐化**: 「core の静的クライアント（平文保持）」は、core が `hashClientSecret` / `clientSecretHash` を公開し `--db sql` の `registerClient()` がハッシュ保存する現状と不一致
+  6. **行番号参照の広範なずれ**: 31c20a1（core リファクタ）と `--db` 導入で、仕様書・sources の行番号参照が多数ずれていた（features.ts 85→67、templates.ts 7601→7304〜7371、store.ts 648/985→687/1024 ほか）
+- **修正**（いずれも本レビュー内で仕様書・理解資料・sources へ反映済み）:
+  1. テスト計画を再構成: HTTP 検証マトリクスは `tests/e2e/specs/dynamic-client-registration.spec.ts` へ移し、discovery ベースのスキップガードで全 sample 共通実行とする。完了条件 2・4・5 を E2E 基準へ書き換え
+  2. CLI テストをオプション解析・install 案内（CLI 自身の出力）・生成ファイル数・`check:generated` に限定
+  3. resolver 合成を「apply テンプレートの基底 resolver を包む」に、ストアを「`--db` の有無に関わらず in-memory の globalThis シングルトン（PAR 先例）、`ProviderStores` へは加えない」に確定。理解資料の静的登録比較と再起動時の挙動も `--db` 込みで更新
+  4. `applyOidc` オプションでの設定上書きと env 配線（XAA と同型）を設定値の節へ追記し、オープン登録系は hono-cloudflare・initial access token 系は express-flyio / fastify-flyio のどちらかへ `--enable` を追加して分担する方針を E2E 計画へ明記
+  5. 昇格考慮を「昇格時は `registerClient()` 経由の永続化とハッシュ保存へ寄せる」に更新（v1 の in-memory 平文保持は `defaultRegisteredClients` との対称性として維持。Review 2 で受容済みのモデルから変更なし）
+  6. 行番号参照を 2026-10-14 時点の実測へ一括更新
+- **未解決事項の確定**:
+  - **U3 → `/register`**。テンプレートのルート命名は各仕様の例示パスをそのまま使う慣行（`/par` / `/device_authorization` / `/backchannel_authentication` / `/logout`）であり、RFC 7591 §3.1 のリクエスト例が `POST /register`。discovery が完全な URL を広告するためパス名自体に相互運用要件はない
+- **確認して問題なしとした項目**: 公開 API 案（純関数 4 つ + エラー型 + 2 型）は現行の subpath export 構成（8 機能で実証済み）へそのまま追加できる / 受け入れ条件は 7 項目すべて客観的に判定可能（テスト成否・バイト同一・エクスポート有無） / 依存方向は現行 package.json（peerDependencies `>=0.3.0 <1.0.0`）と整合 / `RegisteredClient` 型は任意フィールドが増えていた（`userinfoSignedResponseAlg` 等）が登録レコードの適合に影響なし / Experimental の明示は features.ts の JSDoc・unknown-feature メッセージ・Docs の警告の 3 点で担保（既存 8 機能と同じ） / 実装順序 7 段階は現行のテンプレート構造（hono 定義 → web-standard 配線）で実行可能 / セキュリティ要件に未解決事項なし（U3 はパス名のみでセキュリティ影響なし、Review 2 の脅威評価は `--db` 変更の影響を受けない: 登録エンドポイントの面・検証規則・応答契約は不変で、動的ストアは従来どおり in-memory）
+- **残リスク**:
+  - 生成テンプレートは行番号が大きく動きやすい（今回 7601→7304）。実装時は行番号ではなく「discovery スプレッドマージの実装済み機能群の末尾」「apply の基底 resolver 解決点」というパターン位置で挿入箇所を特定すること
+  - E2E の 429 検証は上限 env を小さくした sample で行うが、同一 OP 上の他の DCR テストが登録数を消費するため、実行順に依存しない書き方（上限+1 回まで登録して 429 を確認する等）が要る。実装時の注意として記録
+  - initial access token 検証を担う sample（express-flyio / fastify-flyio のどちらか）の最終選択は実装時に決める（どちらでも仕様上の差はない）
+- **判定**: Pass with changes（修正は本レビュー内で反映済み）。3 回のレビューを完了し、`status: Approved` / `implementation_ready: true` へ更新
+- **次回可能日**: —（レビュー完了。次の更新は実装開始時の `Implementing`）
