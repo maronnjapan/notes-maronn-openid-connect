@@ -15,11 +15,11 @@ discovery には `registration_endpoint` を有効時のみ追記する。
 追加されるのは次の 3 面で、いずれも実装済み experimental 機能で実証済みのパターンに載る:
 
 1. **新規エンドポイント**: `POST /register`。PAR の `POST /par` が同型の「機械可読 JSON を受ける未認証(または軽量認証)エンドポイント」を実証済み
-2. **discovery への追記**: `registration_endpoint`。PAR / Device / CIBA / JARM / ID-JAG / jwt-introspection-response / rp-initiated-logout が実証済みのスプレッドマージ 1 箇所（`packages/cli/src/frameworks/hono/templates.ts` の 7601 行周辺）
-3. **生成コード側の専用ストアと resolver 合成**: 動的登録クライアントの in-memory ストアを生成コードに置き、既存の `createInMemoryClientResolver`（静的 Map）と合成した `findClient` を提供する。Token Exchange の `tokenExchangeConfig.allowedTargets` が「experimental 機能専用の設定・状態を生成コードに置く」パターンを、Device / CIBA が「experimental 機能専用ストアを生成コードに置く」パターンを実証済み
+2. **discovery への追記**: `registration_endpoint`。PAR / Device / CIBA / JARM / ID-JAG / jwt-introspection-response / rp-initiated-logout が実証済みのスプレッドマージ 1 箇所（`packages/cli/src/frameworks/hono/templates.ts` の 7304〜7371 行周辺。Review 3 時点）
+3. **生成コード側の専用ストアと resolver 合成**: 動的登録クライアントの in-memory ストアを生成コードに置き、生成コードの基底クライアント解決（`--db` なしは `createInMemoryClientResolver` の静的 Map、`--db sql` / `--db kv` は db/ のクライアント表・キー）を先に引き、無ければ動的ストアを引く `findClient` を提供する。Token Exchange の `tokenExchangeConfig.allowedTargets` が「experimental 機能専用の設定・状態を生成コードに置く」パターンを、PAR / Device / CIBA が「experimental 機能専用の in-memory ストアを `--db` の有無に関わらず生成コードに置く」パターンを実証済み
 
 メタデータの検証と登録レコードの構築は experimental の純関数群に置き、HTTP の受け口とストアへの書き込みは生成コードの責務とする。
-`redirect_uris` の妥当性検査は core 公開の `validateRegisteredRedirectUris`（`packages/core/src/index.ts:12` でエクスポート済み）をそのまま使い、静的クライアントと同じ登録基準を適用する。
+`redirect_uris` の妥当性検査は core 公開の `validateRegisteredRedirectUris`（`packages/core/src/index.ts:11` でエクスポート済み）をそのまま使い、静的クライアントと同じ登録基準を適用する。
 
 ## 採用理由（候補評価）
 
@@ -33,12 +33,12 @@ Back-Channel Logout 1.0 は rp-initiated-logout の非目標として保留中�
 |---|---|
 | プロジェクト関連性 | Fidelity 軸に直結する。OIDF Conformance Suite の多くのテストプランはクライアントの動的登録を前提に組まれており、DCR が無い現状は静的クライアント設定のプランに限定される（`study-material/extension-dynamic-client-registration.md` で確認済み）。また MCP（Model Context Protocol）の authorization 仕様が DCR による接続を推奨しており、「最新仕様を検証できる OP」の入口として需要が再拡大している（`study-material/ext-mcp-authorization-op-readiness.md`） |
 | Experimental隔離の妥当性 | 新規エンドポイントの追加のみで、既存エンドポイントの挙動を一切変えない。機能無効時は `/register` が存在せず（404）、discovery にも `registration_endpoint` が出ない。rp-initiated-logout と同じ最も強い隔離になる |
-| core無変更 | 可能。`redirect_uris` の検査は core 公開の `validateRegisteredRedirectUris` を、乱数生成は core 公開の `generateRandomString`（`index.ts:157`）を使う。登録レコードは生成コードの `RegisteredClient` 型（`ClientInfo & TokenClientInfo`。core の型をそのまま合成した生成コード側の型）に適合する値を experimental が組み立てるだけで、core の型拡張は不要。クライアント解決は resolver 抽象（`ClientResolver.findClient`）の生成コード側実装を合成するだけでよい |
-| CLI `--enable` 提供 | 可能。`EXPERIMENTAL_FEATURES` の末尾（現在の末尾は `'rp-initiated-logout'`、`features.ts:85`）に `'dynamic-client-registration'` を追加する。他機能への依存はない（クライアント解決の基盤は常に生成される） |
+| core無変更 | 可能。`redirect_uris` の検査は core 公開の `validateRegisteredRedirectUris` を、乱数生成は core 公開の `generateRandomString`（`index.ts:221`）を使う。登録レコードは生成コードの `RegisteredClient` 型（`ClientInfo & TokenClientInfo` に任意フィールドを足した生成コード側の型。`config.ts:133`）に適合する値を experimental が組み立てるだけで、core の型拡張は不要。クライアント解決は resolver 抽象（`ClientResolver.findClient`）の生成コード側実装を合成するだけでよい |
+| CLI `--enable` 提供 | 可能。`EXPERIMENTAL_FEATURES` の末尾（現在の末尾は `'rp-initiated-logout'`、`features.ts:67`）に `'dynamic-client-registration'` を追加する。他機能への依存はない（クライアント解決の基盤は常に生成される） |
 | 一次資料の成熟度 | RFC 7591 は 2015 年の Proposed Standard、OIDC Dynamic Client Registration 1.0 は Final（errata set 2）。どちらも 10 年の実装実績があり、主要 IDaaS と Conformance Suite が広く実装済み |
 | セキュリティ影響 | 新規に増える面は「未認証で叩ける登録エンドポイント」の 1 つ。RFC 7591 §5 が名指しする DoS（無制限登録）とリダイレクト URI の不正登録が主脅威で、前者は登録上限とボディ長制限、後者は静的クライアントと同一の `validateRegisteredRedirectUris` 適用で塞ぐ（セキュリティ要件の節）。URL 参照系メタデータ（`jwks_uri` / `logo_uri` など）を v1 で受理しないため、SSRF の面はそもそも開かない |
-| テスト可能性 | HTTP レベルで完結する。検証マトリクス（必須欠落・不正値・未知フィールド無視）は experimental の単体テストで、「登録した client でフローが成立する」ことは conformance.test.ts と E2E で固定できる。外部サービス依存はない |
-| 実装規模 | 小〜中（PAR と同程度）。experimental 新規モジュール 1 + 新規ルートテンプレート 1 + 専用ストア + resolver 合成 + discovery 追記 + conformance。ユーザー向け画面はない |
+| テスト可能性 | HTTP レベルで完結する。検証マトリクス（必須欠落・不正値・未知フィールド無視）は experimental の単体テストで、「登録した client でフローが成立する」ことは `tests/e2e` の E2E で固定できる。外部サービス依存はない |
+| 実装規模 | 小〜中（PAR と同程度）。experimental 新規モジュール 1 + 新規ルートテンプレート 1 + 専用ストア + resolver 合成 + discovery 追記 + E2E スペック。ユーザー向け画面はない |
 | 将来の昇格 | `study-material/ext-dynamic-client-registration.md` の方針 A（core に「メタデータ検証と発行値算出」の純関数を置き、永続化を `ClientRegistrationStore` 注入にする）がそのまま昇格先の形になる。experimental の各関数は純関数として設計するため移植は機械的 |
 | 既存機能との重複 | なし。実装済み 8 機能はいずれもトークン発行系またはセッション終了系で、クライアント管理系は初。`tasks/*.md` の既存タスクにもクライアント登録エンドポイントを作るものはない |
 | 利用者の検証価値 | 「DCR で登録した client がそのままログインまで通るか」「`token_endpoint_auth_method` の既定（client_secret_basic）がどう効くか」「不正な redirect_uri の登録がどのエラーで弾かれるか」を手元で検証できる。Conformance Suite の動的登録プランや MCP クライアントの接続検証をこの OP で試す入口になる |
@@ -94,7 +94,7 @@ Client                                 OP (生成コード + experimental/dynami
  |     ... }                             |
  |                                       |
  |-- GET /authorize?client_id=... ------>| 以降は既存の Authorization Code Flow がそのまま動く
- |                                       | （findClient が静的 Map → 動的ストアの順に解決する）
+ |                                       | （findClient が基底の解決 → 動的ストアの順に引く）
 ```
 
 ## 入出力
@@ -108,7 +108,7 @@ Client                                 OP (生成コード + experimental/dynami
 
 | フィールド | 位置づけ | 本機能の扱い |
 |---|---|---|
-| `redirect_uris` | REQUIRED（OIDC Registration 1.0 §2。RFC 7591 §2 もリダイレクト系 grant を使うクライアントに登録を MUST とする） | 空でない文字列配列であること。各要素を core の `validateRegisteredRedirectUris`（`authorization-request.ts:422`）で検査し、投げられた `AuthorizationError` を捕捉して `invalid_redirect_uri` の `ClientRegistrationError` へ変換する（変換の理由はバリデーションの節） |
+| `redirect_uris` | REQUIRED（OIDC Registration 1.0 §2。RFC 7591 §2 もリダイレクト系 grant を使うクライアントに登録を MUST とする） | 空でない文字列配列であること。各要素を core の `validateRegisteredRedirectUris`（`authorization-request.ts:377`）で検査し、投げられた `AuthorizationError` を捕捉して `invalid_redirect_uri` の `ClientRegistrationError` へ変換する（変換の理由はバリデーションの節） |
 | `token_endpoint_auth_method` | OPTIONAL。既定 `client_secret_basic`（RFC 7591 §2） | `client_secret_basic` / `client_secret_post` / `none` のみ受理。それ以外の値（`private_key_jwt` など）は `invalid_client_metadata` |
 | `grant_types` | OPTIONAL。既定 `["authorization_code"]`（RFC 7591 §2） | `authorization_code` と `refresh_token` の部分集合のみ受理。`refresh_token` 単独（`authorization_code` を含まない）と、それ以外の値は `invalid_client_metadata` |
 | `response_types` | OPTIONAL。既定 `["code"]`（RFC 7591 §2） | `["code"]` のみ受理。それ以外は `invalid_client_metadata`（grant と response の整合は §2.1 の SHOULD「inconsistent state に登録させない」に従う） |
@@ -250,8 +250,8 @@ export function verifyInitialAccessToken(
 ## CLIオプション案
 
 - `maronn-oidc generate <framework> --enable dynamic-client-registration`
-- `EXPERIMENTAL_FEATURES` の末尾（`'rp-initiated-logout'` の後）に `'dynamic-client-registration'` を追加し、`OidcFeatureConfig` に `dynamicClientRegistration: boolean` を追加する（既定 `false`）
-- `packages/cli/src/index.ts:32` の `withExperimentalPackage` の feature チェック列挙に `features.dynamicClientRegistration` を追加し、選択時のみ install コマンド案内に `@maronn-openid-connect/experimental` が入るようにする
+- `EXPERIMENTAL_FEATURES` の末尾（`'rp-initiated-logout'`（`features.ts:67`）の後）に `'dynamic-client-registration'` を追加し、`OidcFeatureConfig` に `dynamicClientRegistration: boolean` を追加する（既定 `false`）。feature 名とキーの対応表（`features.ts:197` 周辺）にも追加する
+- `packages/cli/src/index.ts:36` の `withExperimentalPackage` の feature チェック列挙に `features.dynamicClientRegistration` を追加し、選択時のみ install コマンド案内に `@maronn-openid-connect/experimental` が入るようにする
 - 機能の説明文（`features.ts` の JSDoc と unknown-feature メッセージ）で Experimental であることを明示する
 - 他機能との依存・競合はない（`jwt-introspection-response` の introspection 依存のような検証は不要）
 
@@ -265,7 +265,10 @@ export function verifyInitialAccessToken(
 | `maxRegisteredClients` | `100` | 動的登録クライアントの総数上限。超過時は `429`（応答の節） |
 | `maxRegistrationBodyBytes` | `16384` | リクエストボディの最大長（UTF-8 バイト長。DoS 対策） |
 
-エンドポイントのパスは `/register` 固定とする（最終確定は U3）。
+エンドポイントのパスは `/register` とする（Review 3 で確定。確定済み事項の節）。
+
+`initialAccessToken` と `maxRegisteredClients` は、生成される `applyOidc` のオプションからも上書きできるようにする。
+sample の手書き `src/app.ts` が環境変数を読んでオプションへ渡す既存パターン（`XAA_ALLOWED_AUDIENCES` の配線と同型）に載せ、E2E が `tests/e2e/playwright.config.ts` から小さい上限や initial access token を注入してテストできるようにする。
 
 ## バリデーション / エラー処理
 
@@ -284,7 +287,7 @@ export function verifyInitialAccessToken(
 エラー処理の原則:
 
 - `error_description` は固定の ASCII 文言とし、リクエスト由来の値（URI・メタデータ値）を埋め込まない。どのフィールドが不正かはフィールド名だけで示す（例: `redirect_uris must be a non-empty array of strings`）
-- core の `validateRegisteredRedirectUris` は設定ミス検知用の関数であり、違反 URI をメッセージへ埋め込んだ `server_error` の `AuthorizationError` を投げる（`authorization-request.ts:426` ほか）。本機能はこの例外を捕捉し、コードを `invalid_redirect_uri`（RFC 7591 §3.2.2）へ、文言を URI を含まない固定 ASCII へ差し替えた `ClientRegistrationError` として投げ直す。検査規則そのもの（フラグメント禁止、危険スキーム拒否、非ループバック平文 http 拒否）は core と同一に保たれ、エラー表現だけを登録エンドポイントの契約へ合わせる
+- core の `validateRegisteredRedirectUris` は設定ミス検知用の関数であり、違反 URI をメッセージへ埋め込んだ `server_error` の `AuthorizationError` を投げる（`authorization-request.ts:377` 以降の各検査）。本機能はこの例外を捕捉し、コードを `invalid_redirect_uri`（RFC 7591 §3.2.2）へ、文言を URI を含まない固定 ASCII へ差し替えた `ClientRegistrationError` として投げ直す。検査規則そのもの（フラグメント禁止、危険スキーム拒否、非ループバック平文 http 拒否）は core と同一に保たれ、エラー表現だけを登録エンドポイントの契約へ合わせる
 - 検証途中で例外を握りつぶさない。`ClientRegistrationError` 以外の例外は生成コードのルートで 500 に落とす（他ルートと同じ扱い）
 - 401 経路では、期待トークンに関する情報（長さ・部分一致）を応答へ反映しない。ヘッダ欠落時にエラーコードを付けない・提示時に `error="invalid_token"` を返すという応答の分岐は RFC 6750 §3.1 への適合であり、要求者が自分の送信内容を知っている以上、この分岐が攻撃者へ与える追加情報はない
 
@@ -327,9 +330,9 @@ packages/experimental/
 - `packages/experimental/package.json` の `exports` に `"./dynamic-client-registration"` を追加する（ルート `.` からの再エクスポートはしない）
 - 生成コード（CLI テンプレート）側の責務:
   - `POST /register` ルート: ボディ読み取り → （設定時）`verifyInitialAccessToken` → `validateClientRegistrationRequest` → `buildRegisteredClient` → 上限検査とストア保存 → `buildClientRegistrationResponse` を 201 で返す
-  - 動的登録クライアントの in-memory ストア（既存 `ProviderStores` 群と同じ配置。`samples/hono-cloudflare/src/oidc-provider/store.ts:648` の `ProviderStores` / 985 行の `defaultProviderStores` パターン）
-  - `findClient` の合成: 静的 `createInMemoryClientResolver`（`config.ts:184`）を先に引き、無ければ動的ストアを引く
-  - discovery スプレッドマージへ `registration_endpoint: \`${issuer}/register\`` を追加（`templates.ts:7601` 周辺の既存パターン）
+  - 動的登録クライアントの in-memory ストア: PAR / Device / CIBA の experimental ストアと同じく、`--db` の有無に関わらず in-memory とし、globalThis 登録のシングルトンにする（`samples/hono-cloudflare/src/oidc-provider/store.ts:1057` の `InMemoryPushedAuthorizationRequestStore` と 1097 行のシングルトン登録のパターン）。core ストア群の `ProviderStores`（`store.ts:687`。`--db` では db/ バックエンドへ差し替わる）へは加えない
+  - `findClient` の合成: apply テンプレートがコンテキストへ載せる基底 resolver（`options.clientResolver ?? ストレージ既定`。`--db` なしは `createInMemoryClientResolver`（`config.ts:179`）、`--db sql` は `createSqlClientResolver`（db/clients.ts）、`--db kv` は KV 版。hono `templates.ts` 443〜453 行周辺）を先に引き、無ければ動的ストアを引く resolver で包む
+  - discovery スプレッドマージへ `registration_endpoint: \`${issuer}/register\`` を追加（`templates.ts` 7304〜7371 行周辺の既存パターン）
 - 依存方向は既存どおり:
 
 ```text
@@ -355,25 +358,29 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 
 ### CLIテスト（`packages/cli/src/__tests__`）
 
-- `--enable dynamic-client-registration` で `/register` ルート・ストア・resolver 合成・discovery 追記が生成され、`@maronn-openid-connect/experimental/dynamic-client-registration` からの import があること
-- 未指定時に上記が一切生成されず、install コマンド案内にも experimental package が現れないこと（既存スナップショットのバイト同一）
-- 他機能（全機能有効の hono-cloudflare 構成）との共存で生成物がビルド・型検査を通ること
+生成コードの文字列・ファイル構成を検査するテストは書かない（README のテスト方針。2026-10-07 の cb33342 で CLI が出力していた契約テスト conformance.test.ts も廃止済み）。CLI 単体テストは CLI 自体の入出力に限る。
 
-### conformance.test.ts（CLI 生成コードで追加。`--enable dynamic-client-registration` 生成 OP への結合テスト）
+- `--enable dynamic-client-registration` がオプション解析で受理されること。unknown-feature エラーメッセージの experimental 一覧は `EXPERIMENTAL_FEATURES` から自動生成されるため、列挙の追加で整合する
+- 選択時の install コマンド案内（CLI の標準出力）に `@maronn-openid-connect/experimental` が入ること。未選択時の案内が従来と一字一句同一であること
+- 生成ファイル数を固定している既存テストの期待値を更新する
+- 未指定時の生成物がバイト同一であることは、各 sample の `check:generated`（再生成して差分比較）で担保する（完了条件 3）
 
-- `POST /register`（最小メタデータ）が 201 と必須フィールドを返す
-- 発行された `client_id` / `client_secret` で Authorization Code Flow（PKCE 付き）が完了し、トークンが取れる
+### E2E（`tests/e2e/specs/dynamic-client-registration.spec.ts`、Playwright）
+
+生成 OP の挙動検証は `tests/e2e` と OpenID Conformance Suite（`tests/conformance`）に一本化されている（cb33342 以降）。
+HTTP レベルの検証マトリクスもこのスペックに置き、既存スペック（`pushed-authorization-requests.spec.ts` など）と同じく discovery に `registration_endpoint` が無い sample ではスキップするガードで全 sample 共通実行の形にする。
+
+- 全周: `request` フィクスチャで `POST /register`（最小メタデータ）→ 201 と必須フィールド（`client_id` / `client_secret` / `client_id_issued_at` / `client_secret_expires_at: 0` / 既定値適用後のメタデータ）→ 発行値で実ブラウザのログイン・同意・コールバック・トークン取得まで完了
 - `token_endpoint_auth_method: "none"` で登録した public client がシークレットなしでフローを完了できる
-- 不正メタデータの 400（`invalid_redirect_uri` / `invalid_client_metadata` の使い分け）
-- `Content-Type: application/json` 以外（`text/plain` など）の POST が 400 になる
-- `maxRegisteredClients` 到達後の登録が 429 と固定ボディになる（上限を小さく設定して検証）
-- discovery に `registration_endpoint` が含まれる
-- 未知フィールドを含む登録が成功し、応答に未知フィールドが現れない
-
-### E2E（`tests/e2e`、Playwright）
-
-- fetch で `POST /register` → 発行されたクライアントで実ブラウザのログイン・同意・コールバックまで完了する全周
 - 登録前の `client_id` では `/authorize` が未知クライアントとして拒否されることの対比
+- 不正メタデータの 400（`invalid_redirect_uri` / `invalid_client_metadata` の使い分け）と、`error_description` にリクエスト値が反映されないこと
+- `Content-Type: application/json` 以外（`text/plain` など）の POST が 400 になる
+- 未知フィールドを含む登録が成功し、応答に未知フィールドが現れない
+- discovery の `registration_endpoint` が有効 sample でのみ広告される（有効 sample での具体値固定と、無効 sample に現れないことの両方）
+- `maxRegisteredClients` 到達後の登録が 429 と固定ボディになる（`tests/e2e/playwright.config.ts` から環境変数で小さい上限を注入する。設定値とデフォルトの節の env 配線）
+- initial access token を設定した構成での 401 の 2 形（ヘッダ欠落 = コードなし / 提示して失敗 = `error="invalid_token"`。同じく env で注入する）
+
+オープン登録の検証と initial access token の検証は同じ OP では両立しないため、オープン登録系は全機能有効の hono-cloudflare で、initial access token 系は `--enable dynamic-client-registration` を追加したもう 1 つの sample（express-flyio または fastify-flyio）へ env でトークンを設定して検証する。どの sample がどちらを担うかは、各テストが discovery と設定 env の有無で自らスキップ判定する形にして固定する。
 
 ## ドキュメント要件
 
@@ -388,28 +395,30 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 ## 実装順序
 
 1. experimental 単体: `registration-request.ts` → `registered-client.ts` → `initial-access-token.ts` の順に TDD で実装し、`package.json` の `exports` に subpath を追加する
-2. `packages/cli/src/features.ts` に feature 追加（`EXPERIMENTAL_FEATURES` 末尾、`OidcFeatureConfig`、`EXPERIMENTAL_FEATURE_KEYS`、`DEFAULT_FEATURES`）
+2. `packages/cli/src/features.ts` に feature 追加（`EXPERIMENTAL_FEATURES` 末尾、`OidcFeatureConfig`、feature 名とキーの対応表、`DEFAULT_FEATURES`）
 3. `packages/cli/src/index.ts` の `withExperimentalPackage` に feature チェックを追加
-4. hono テンプレート: ルート・ストア・resolver 合成・discovery 追記・設定オブジェクト
-5. web-standard（express / fastify / nextjs が共有）テンプレートへ同じ変更を展開
-6. CLI テストと conformance テンプレートの更新、`samples/hono-cloudflare/package.json` の generate スクリプトへ `--enable dynamic-client-registration` を追加して再生成
-7. E2E スペック追加、利用者向け Docs、実装解説（ja / en）
+4. hono テンプレート: ルート・ストア・resolver 合成（apply テンプレートの基底 resolver を包む）・discovery 追記・設定オブジェクトと `applyOidc` オプション
+5. web-standard（express / fastify / nextjs が共有。hono のルートテンプレートを import して配線する）テンプレートと各 framework の生成ファイル一覧へ同じ変更を展開
+6. CLI テスト（オプション解析・install 案内・生成ファイル数）の更新、`samples/hono-cloudflare/package.json` と initial access token 検証を担う sample の generate スクリプトへ `--enable dynamic-client-registration` を追加し、全 sample を再生成して `check:generated` を通す
+7. E2E スペック追加（HTTP 検証マトリクスを含む）、sample 手書き `app.ts` と `tests/e2e/playwright.config.ts` の env 配線、利用者向け Docs、実装解説（ja / en）
 
 ## 完了条件
 
 1. experimental / cli の単体テストがすべて通る
-2. `--enable dynamic-client-registration` で生成した OP への conformance テスト（登録 → フロー成立まで）が通る
+2. E2E（`POST /register` → 実ブラウザでのフロー完了までの全周）が通る
 3. 未指定時の生成物がバイト同一（`check:generated` が通る）
-4. discovery の `registration_endpoint` が有効時のみ出力される（conformance テストの具体値で固定）
-5. E2E（登録 → 実ブラウザでのフロー完了）が通る
+4. discovery の `registration_endpoint` が有効 sample でのみ出力される（E2E の具体値で固定）
+5. HTTP レベルの検証マトリクス（400 の使い分け / 401 の 2 形 / 429 / `Content-Type` / 未知フィールド無視）が E2E で通る
 6. 利用者向け Docs と実装解説（ja / en）が作成済み
 7. core への experimental import が無く、experimental の core 依存が peerDependencies のみ
 
 ## 未解決事項
 
-| ID | 論点 | 選択肢 | 確定に使う資料 | 確定予定 |
-|---|---|---|---|---|
-| U3 | エンドポイントのパス名（`/register` か `/registration`） | 本仕様書は `/register` を仮置き | OIDC Discovery の `registration_endpoint` の一般的な対応パス、生成テンプレートの既存ルート命名（`/par` など短い動詞・名詞） | Review 3（テンプレート一貫性確認時） |
+なし（U1〜U3 はすべて確定済み。下記）。
+
+### 確定済み事項（Review 3、2026-10-14）
+
+- **U3（エンドポイントのパス名）**: `/register` に確定。生成テンプレートのルート命名は各仕様の例示パスをそのまま使う慣行であり（`/par`（RFC 9126）、`/device_authorization`（RFC 8628 §3.1 の例示）、`/backchannel_authentication`（CIBA Core）、`/logout`）、RFC 7591 §3.1 のリクエスト例も `POST /register` を用いる。`registration_endpoint` は discovery が完全な URL を広告するためパス名自体に相互運用要件はなく、例示準拠の最短形を採る
 
 ### 確定済み事項（Review 2、2026-10-07）
 
@@ -419,7 +428,7 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 ## 将来の昇格考慮
 
 - core へ「メタデータ検証と発行値算出」の純関数を移し、永続化を `ClientRegistrationStore` インタフェース注入にする（`study-material/ext-dynamic-client-registration.md` の方針 A がそのまま昇格先）
-- `client_secret` のストア保存をハッシュ化（検証時は提示値をハッシュして比較）に切り替えるかを、core の静的クライアント（平文保持）と合わせて再設計する
+- `client_secret` のストア保存をハッシュ化へ切り替える。core は `hashClientSecret` / `TokenClientInfo.clientSecretHash` を公開済みで、`--db sql` の生成コード（db/clients.ts の `registerClient()`）はハッシュ保存を既に行う。v1 の in-memory 動的ストアは `defaultRegisteredClients`（平文 `clientSecret`）と同じ形で保持するが、昇格時は `registerClient()` 経由の永続化とハッシュ保存へ寄せる
 - RFC 7592 の管理（`registration_access_token` / `registration_client_uri` / GET・PUT・DELETE）を足すかは、利用者の要望が出た時点で別提案として起こす
 - OIDC 固有メタデータ（`jwks` / `id_token_signed_response_alg` / `default_max_age` など。生成コードの `RegisteredClient` が既に持つ軸）の受理は、フィールドごとに検証とセキュリティ面（とくに URL 参照系の SSRF）を評価して段階的に広げる
 - 定数時間比較（`timingSafeEqual`）を core の公開 API へ昇格させ、本機能内の重複実装を解消する
