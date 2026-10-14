@@ -1,4 +1,4 @@
-status: In Review
+status: Implemented
 feature_id: dynamic-client-registration
 created_at: 2026-09-30
 last_reviewed_at: 2026-10-14
@@ -9,4 +9,6 @@ approved_at: 2026-10-14
 implementation_started_at: 2026-10-14
 implementation_branch: claude/confident-edison-jur7qf
 pull_request: https://github.com/maronnjapan/maronn-openid-connect/pull/131
+implemented_at: 2026-10-14
+merge_commit: 7b4b3bd433f6ea69de3c5ff21adc39f6af682cea
 blocked_reasons: []
