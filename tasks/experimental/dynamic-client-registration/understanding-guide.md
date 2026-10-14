@@ -6,7 +6,7 @@
 ## 解決する問題
 
 この OP でクライアントを増やす方法は、現状では静的設定の編集しかない。
-生成コードの `config.ts` にある `defaultRegisteredClients`（in-memory の Map）へエントリを書き足し、ビルドと再起動を経てはじめて新しいクライアントが使える。
+生成コードの `config.ts` にある `defaultRegisteredClients`（in-memory の Map）へエントリを書き足すか、`--db` 生成ではクライアント表へ `registerClient()`（db/clients.ts）で投入する起動時処理を書き、いずれもビルドと再起動を経てはじめて新しいクライアントが使える。
 この運用は 2 つの場面で摩擦になる。
 
 1 つめは OIDF Conformance Suite の実行である。
@@ -147,7 +147,7 @@ core の型を拡張する必要がないのは、DCR で登録できるメタ�
 
 ## core機能・類似機能との違い
 
-- **静的登録（現状の `defaultRegisteredClients`）との違い**: 静的登録は設定ファイルの編集と再起動を要し、動的登録は API 呼び出し 1 回で済む。登録後のクライアントに対する検証（PKCE、redirect_uri 照合、client 認証）は完全に同一で、`findClient` が静的 Map の次に動的ストアを引くだけの差である
+- **静的登録（現状の `defaultRegisteredClients` や `--db` のクライアント表）との違い**: 静的登録は設定ファイルの編集や投入スクリプトと再起動を要し、動的登録は API 呼び出し 1 回で済む。登録後のクライアントに対する検証（PKCE、redirect_uri 照合、client 認証）は完全に同一で、`findClient` が基底の解決（静的 Map、または `--db` のクライアント表）の次に動的ストアを引くだけの差である
 - **PAR（実装済み experimental）との類似**: どちらも「未認証または軽量認証で機械可読 JSON を受けるエンドポイント」であり、ルートテンプレートの形が近い。違いは、PAR が認可リクエスト 1 回分の短命な保存であるのに対し、DCR はクライアントという長命なレコードを作ること
 - **google-login（extension）との違い**: google-login はエンドユーザーのログイン手段の追加であり、クライアント管理には触れない
 
@@ -162,7 +162,7 @@ in-memory 限定の永続化も、昇格時に `ClientRegistrationStore` 契約�
 - **「未知フィールドは無視」と「不正値は拒否」は別の規則**: `logo_uri`（理解しないフィールド）は黙って捨てるが、`token_endpoint_auth_method: "private_key_jwt"`（理解するフィールドの未対応値）は `invalid_client_metadata` で拒否する。前者は RFC 7591 §2 の MUST、後者は同 §3.2.2 のエラー定義と §2.1 の整合性 SHOULD に基づく
 - **登録できたことは信頼ではない**: オープン登録の 201 は「メタデータが形式的に妥当」以上の意味を持たない。認可判断はすべて以降のフローの検証が担う
 - **`client_secret_expires_at: 0` は「即時失効」ではない**: 0 は無期限の意味である
-- **プロセス再起動で消える**: 動的登録クライアントは in-memory ストアにしか無いため、再起動後は再登録が要る。Conformance Suite の実行単位では問題にならないが、長期の検証では注意が要る
+- **プロセス再起動で消える**: 動的登録クライアントは in-memory ストアにしか無いため、再起動後は再登録が要る。`--db` 生成でも同じで、クライアント表に入った静的クライアントは再起動を生き残るのに対し、動的登録クライアントは消える（PAR / Device / CIBA の experimental ストアと同じ割り切り）。Conformance Suite の実行単位では問題にならないが、長期の検証では注意が要る
 - **`registration_endpoint` が discovery に出るのは有効時のみ**: 未有効の OP に登録を試みるクライアントは、discovery に `registration_endpoint` が無いことで非対応を判定できる（広告と実装の整合）
 
 ## 実装後の利用方法
