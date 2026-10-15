@@ -2,7 +2,7 @@
 
 ## ステータス
 
-✅ Implemented / 実装済み（OSS リポジトリのブランチ claude/magical-dirac-9zkskl で実装、PR レビュー待ち）
+✅ Implemented / 実装済み（PR #133 レビュー待ち）
 
 ## 背景
 
