@@ -24,7 +24,7 @@ Client                                 OP（生成コード + experimental/dynam
  |-- POST /register -------------------->| (1) （設定時のみ）Authorization: Bearer を initial access token と
  |   Content-Type: application/json      |     定数時間比較。不一致・欠落は 401（何も登録しない）
  |   {"redirect_uris": [...], ...}       | (2) Content-Type・ボディ長・JSON 形式の検査（違反は 400）
- |                                       | (3) 理解する 5 フィールドだけを選び取り、値を検証して既定値を適用
+ |                                       | (3) 理解する 6 フィールドだけを選び取り、値を検証して既定値を適用
  |                                       | (4) client_id と（confidential なら）client_secret を乱数生成
  |                                       | (5) 登録上限を確認してストアへ保存
  |<- 201 Created ------------------------|(6) 発行値 + 登録済み全メタデータを JSON で返す（Cache-Control: no-store）
@@ -48,7 +48,7 @@ Client                                 OP（生成コード + experimental/dynam
 実装したのは次の範囲である。
 
 - `POST /register`（RFC 7591 §3。オープン登録が既定で、任意で initial access token を要求できる）
-- 受理するメタデータ 5 フィールド（`redirect_uris` / `token_endpoint_auth_method` / `grant_types` / `response_types` / `client_name`）の検証と、RFC 7591 §2 の既定値適用
+- 受理するメタデータ 6 フィールド（`redirect_uris` / `token_endpoint_auth_method` / `grant_types` / `response_types` / `client_name` / `scope`）の検証と、RFC 7591 §2 の既定値適用
 - 発行値（`dcr-` プレフィックス付き `client_id`、256 ビットの `client_secret`）の生成と §3.2.1 の 201 応答
 - 動的登録クライアントの in-memory ストアと、設定済みクライアント解決への合成
 - discovery への `registration_endpoint` の広告（OIDC Discovery 1.0 §3）
@@ -76,8 +76,9 @@ core は同関数を公開しておらず、公開 API 以外への依存は作�
 脅威モデルの中心は「未認証で書き込めるエンドポイント」であることに尽きる。
 設計判断の多くはこの一点から導かれている。
 
-- **未知フィールドは allowlist-pick で捨てる**。RFC 7591 §2 の「理解しないメタデータは無視しなければならない（MUST）」は、パース結果をスプレッドでコピーして known フィールドを上書きする実装でも満たせるが、それでは `__proto__` のようなプロトタイプ経路のキーを持つ入力の扱いが実装任せになる。理解する 5 フィールドだけを新しいオブジェクトへ選び取る方式なら、未知のキーはそもそも読まれない
+- **未知フィールドは allowlist-pick で捨てる**。RFC 7591 §2 の「理解しないメタデータは無視しなければならない（MUST）」は、パース結果をスプレッドでコピーして known フィールドを上書きする実装でも満たせるが、それでは `__proto__` のようなプロトタイプ経路のキーを持つ入力の扱いが実装任せになる。理解する 6 フィールドだけを新しいオブジェクトへ選び取る方式なら、未知のキーはそもそも読まれない
 - **`client_id` は `dcr-` プレフィックス付きの乱数で、リクエストから指定させない**。静的クライアントの `client_id` は人間が命名する（サンプルでは `example-client`）ため、固定プレフィックスで名前空間が分かれ、既存クライアントの上書きが構造的に起きない。`client_id` は秘密情報ではないので、動的登録由来だと明かしても失うものはなく、ログの調査性はむしろ上がる
+- **`scope` は登録して、クライアント単位の許可一覧にする**。core の `ClientInfo.scope` を設定したクライアントは一覧外の scope 要求を `invalid_scope` で拒否されるが、当初の実装は登録リクエストの `scope`（RFC 7591 §2）を未知フィールドと同じ扱いで捨てていたため、この制限を動的登録クライアントに掛ける手段が無かった。検証して登録レコードへ積むことで、静的クライアントと同じ最小権限が動的登録にも届く。`--scope` でカスタムスコープを宣言した構成では、OP が広告する一覧（`SUPPORTED_SCOPES`）に無い値の登録を `invalid_client_metadata` で拒否し、201 応答が広告と矛盾する約束をしないようにする。省略時は静的クライアントの省略時と同じく、制限を掛けずに登録する
 - **上限超過は 429 で答え、`invalid_client_metadata` を流用しない**。RFC 7591 §3.2.2 のエラー語彙はメタデータの不備を表すものである。総数上限の超過に 400 を返すとクライアントに「メタデータを直せば通る」と誤認させ、変更再試行のループが、上限が守るはずの DoS の面を逆に増幅する。`Retry-After` も付けない。上限は流量ではなく在庫の天井で、回復時期を約束できないためである
 - **401 は RFC 6750 §3.1 の 2 形に分ける**。`Authorization` ヘッダが無いリクエストにはエラーコードを付けず（§3.1 SHOULD NOT）、提示して失敗したリクエストには `error="invalid_token"` を返す。欠落と不一致を区別しても攻撃者への追加情報は無い（要求者は自分が何を送ったかを知っている）。守るべき本質は、期待トークンの情報（長さ、部分一致）を応答へ反映しないことである
 - **`error_description` は固定の ASCII 文言に限る**。送られた URI やメタデータの値を文言に埋め込まず、検証失敗の詳細を攻撃者の探索に使わせない
@@ -110,6 +111,13 @@ core の `validateRegisteredRedirectUris` は設定ミス検知用の関数で�
 
 `grant_types` は `authorization_code` と `refresh_token` の部分集合だけを受理し、さらに `authorization_code` を含むことを要求する。
 `response_types` を `["code"]` に固定する本機能では、`code` に対応する grant を持たない登録は RFC 7591 §2.1 が避けるべきとする不整合な状態（inconsistent state）に当たるためである。
+
+`scope` はスペース区切り文字列として受け取り、RFC 6749 §3.3 の構文（scope-token の文字集合、スペース 1 つ区切り）で検査する。
+受理可能な一覧はオプション `supportedScopes` の注入で渡し、純関数が生成コード側のスコープポリシーを知らないままで済むようにした。
+未指定なら構文検証だけで受理する。
+scope ポリシーモジュールを生成しない構成では OP 自体が受理一覧を持たず、登録された一覧は「クライアントが自分に課す制限」として機能するためである。
+重複は最初の出現だけを残して 1 つに正規化し、エラー文言は他のフィールドと同じく固定の ASCII に限る。
+省略時は `client_name` と同じくキー自体を出さない。
 
 ```typescript
 /**
@@ -154,6 +162,11 @@ export interface ValidatedClientRegistration {
   grantTypes: string[];
   responseTypes: string[];
   clientName?: string;
+  /**
+   * RFC 7591 §2 `scope`: このクライアントが要求してよい scope 値の一覧。
+   * 省略時はキー自体が無く、クライアント単位の制限を掛けずに登録される。
+   */
+  scope?: string[];
 }
 
 export interface ValidateClientRegistrationOptions {
@@ -163,6 +176,12 @@ export interface ValidateClientRegistrationOptions {
    * 判定し、多バイト文字を含む境界値テストを決定的にする。
    */
   maxBodyBytes?: number;
+  /**
+   * この OP が受理する scope 値の一覧。指定すると、`scope` メタデータに
+   * 一覧外の値を含む登録を invalid_client_metadata で拒否する。未指定なら
+   * 構文検証のみ行う（OP 自体が受理一覧を持たない構成向け）。
+   */
+  supportedScopes?: readonly string[];
 }
 
 const DEFAULT_MAX_BODY_BYTES = 16384;
@@ -184,7 +203,7 @@ const SUPPORTED_GRANT_TYPES = ['authorization_code', 'refresh_token'] as const;
  * 登録リクエストボディ（文字列）を検証し、既定値を適用して返す。
  *
  * 未知フィールドは黙って捨てる（RFC 7591 §2 MUST ignore）。実装は「理解する
- * 5 フィールドだけを新しいオブジェクトへ選び取る」allowlist-pick 方式で、
+ * 6 フィールドだけを新しいオブジェクトへ選び取る」allowlist-pick 方式で、
  * パース結果のスプレッドや Object.assign によるコピーをしない。`__proto__`
  * などプロトタイプ経路のキーを持つ入力は、読まれないまま不活性に落ちる。
  *
@@ -227,6 +246,7 @@ export function validateClientRegistrationRequest(
     grantTypes: validateGrantTypes(metadata['grant_types']),
     responseTypes: validateResponseTypes(metadata['response_types']),
     ...pickClientName(metadata['client_name']),
+    ...pickScope(metadata['scope'], options?.supportedScopes),
   };
 }
 
@@ -324,6 +344,53 @@ function validateResponseTypes(value: unknown): string[] {
   return ['code'];
 }
 
+/**
+ * RFC 6749 §3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E )。
+ * `"`（%x22）と `\`（%x5C）を除く可視 ASCII。
+ */
+const SCOPE_TOKEN = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
+
+/**
+ * scope: OPTIONAL（RFC 7591 §2）。要求時に使ってよい scope 値のスペース
+ * 区切り文字列。登録した値は生成コード側で ClientInfo.scope（クライアント
+ * 単位の許可一覧）になり、一覧外の scope 要求は invalid_scope で拒否される。
+ *
+ * 構文は RFC 6749 §3.3（scope = scope-token *( SP scope-token )）で検査し、
+ * 空文字列・連続スペース・scope-token 外の文字は拒否する。supportedScopes が
+ * 与えられた場合は一覧外の値も拒否する。エラー文言は固定の ASCII に限り、
+ * リクエスト由来の値を埋め込まない（redirect_uris と同じ方針）。
+ * 重複は最初の出現だけを残して 1 つに正規化する。省略時はキー自体を出さない
+ * （exactOptionalPropertyTypes 互換）。
+ */
+function pickScope(
+  value: unknown,
+  supportedScopes: readonly string[] | undefined,
+): { scope?: string[] } {
+  if (value === undefined) {
+    return {};
+  }
+  if (typeof value !== 'string') {
+    throw new ClientRegistrationError('invalid_client_metadata', 'scope must be a string');
+  }
+  const tokens = value.split(' ');
+  if (tokens.some((token) => !SCOPE_TOKEN.test(token))) {
+    throw new ClientRegistrationError(
+      'invalid_client_metadata',
+      'scope must be a space-delimited list of scope values',
+    );
+  }
+  if (
+    supportedScopes !== undefined &&
+    tokens.some((token) => !supportedScopes.includes(token))
+  ) {
+    throw new ClientRegistrationError(
+      'invalid_client_metadata',
+      'scope must only contain scope values this provider supports',
+    );
+  }
+  return { scope: [...new Set(tokens)] };
+}
+
 const CLIENT_NAME_MAX_LENGTH = 128;
 
 /**
@@ -366,6 +433,7 @@ function pickClientName(value: unknown): { clientName?: string } {
 
 返すレコードは生成コードの `RegisteredClient` 型（core の `ClientInfo & TokenClientInfo` を合成した型）へそのまま適合する。
 core の型拡張が要らないのは、受理するメタデータを「core が既に解釈できる軸」に限定しているからで、`clientName` と `clientIdIssuedAt` は core が解釈しない付加情報として応答の組み立てだけに使われる。
+登録された `scope` は配列のまま `RegisteredClient` の `scope`（core の `ClientInfo.scope`、クライアント単位の許可一覧）になり、201 応答ではスペース区切り文字列へ戻す（RFC 6749 §3.3 の表現）。
 
 `buildClientRegistrationResponse` は §3.2.1 の「登録済みの全メタデータを返す MUST」に従い、既定値適用後の値もすべて載せる。
 `client_secret_expires_at` は `client_secret` を発行した場合だけの REQUIRED で、`0` は「無期限」を意味する。
@@ -399,6 +467,12 @@ export interface DynamicallyRegisteredClient {
   responseTypes: string[];
   tokenEndpointAuthMethod: 'client_secret_basic' | 'client_secret_post' | 'none';
   clientName?: string;
+  /**
+   * RFC 7591 §2 `scope`: 登録時に許可した scope 一覧。core の ClientInfo.scope
+   * としてそのまま解釈され、一覧外の scope 要求は invalid_scope で拒否される。
+   * 省略時はクライアント単位の制限を掛けない。
+   */
+  scope?: string[];
   clientIdIssuedAt: number;
 }
 
@@ -450,6 +524,7 @@ export function buildRegisteredClient(
     responseTypes: [...metadata.responseTypes],
     tokenEndpointAuthMethod: metadata.tokenEndpointAuthMethod,
     ...(metadata.clientName === undefined ? {} : { clientName: metadata.clientName }),
+    ...(metadata.scope === undefined ? {} : { scope: [...metadata.scope] }),
     clientIdIssuedAt: Math.floor(now() / 1000),
   };
 }
@@ -478,6 +553,8 @@ export function buildClientRegistrationResponse(
     grant_types: [...client.grantTypes],
     response_types: [...client.responseTypes],
     ...(client.clientName === undefined ? {} : { client_name: client.clientName }),
+    // scope は RFC 6749 §3.3 の表現（スペース区切り文字列）へ戻して返す。
+    ...(client.scope === undefined ? {} : { scope: client.scope.join(' ') }),
   };
 }
 ```
@@ -979,6 +1056,92 @@ describe('validateClientRegistrationRequest', () => {
     });
   });
 
+  // scope (RFC 7591 Section 2): space-delimited list of scope values the client
+  // may use. Registered values become the client's per-client scope allow list.
+  describe('scope', () => {
+    it('should register the scope values from a space-delimited scope string', () => {
+      const validated = validateClientRegistrationRequest(
+        body({ ...MINIMAL, scope: 'openid profile' }),
+      );
+      expect(validated.scope).toEqual(['openid', 'profile']);
+    });
+
+    it('should omit the scope key when scope is not provided', () => {
+      const validated = validateClientRegistrationRequest(body(MINIMAL));
+      expect(Object.hasOwn(validated, 'scope')).toBe(false);
+    });
+
+    it('should reject a non-string scope with invalid_client_metadata', () => {
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, scope: ['openid'] })),
+      ).toThrowError(
+        new ClientRegistrationError('invalid_client_metadata', 'scope must be a string'),
+      );
+    });
+
+    it('should reject an empty scope string with invalid_client_metadata', () => {
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, scope: '' })),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'scope must be a space-delimited list of scope values',
+        ),
+      );
+    });
+
+    it('should reject a scope string with consecutive spaces with invalid_client_metadata', () => {
+      // RFC 6749 §3.3: scope = scope-token *( SP scope-token ) — one SP between tokens.
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, scope: 'openid  profile' })),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'scope must be a space-delimited list of scope values',
+        ),
+      );
+    });
+
+    it('should reject a scope value with a character outside the scope-token set', () => {
+      // RFC 6749 §3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E ) — no '"' or '\'.
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, scope: 'open"id' })),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'scope must be a space-delimited list of scope values',
+        ),
+      );
+    });
+
+    it('should reject a scope value outside supportedScopes with invalid_client_metadata', () => {
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, scope: 'openid reports.read' }), {
+          supportedScopes: ['openid', 'profile'],
+        }),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'scope must only contain scope values this provider supports',
+        ),
+      );
+    });
+
+    it('should accept any syntactically valid scope when supportedScopes is not provided', () => {
+      const validated = validateClientRegistrationRequest(
+        body({ ...MINIMAL, scope: 'reports.read reports.write' }),
+      );
+      expect(validated.scope).toEqual(['reports.read', 'reports.write']);
+    });
+
+    it('should deduplicate repeated scope values', () => {
+      const validated = validateClientRegistrationRequest(
+        body({ ...MINIMAL, scope: 'openid openid profile' }),
+      );
+      expect(validated.scope).toEqual(['openid', 'profile']);
+    });
+  });
+
   describe('client_name', () => {
     it('should accept a client_name of exactly 128 characters', () => {
       const name = 'a'.repeat(128);
@@ -1133,6 +1296,30 @@ describe('buildRegisteredClient', () => {
       );
       expect(client.clientName).toBe('My Test App');
     });
+
+    // scope (RFC 7591 Section 2): the registered per-client scope allow list.
+    it('should carry the registered scope values into the client record', () => {
+      const client = buildRegisteredClient(
+        { ...CONFIDENTIAL, scope: ['openid', 'profile'] },
+        { generateClientId: () => 'dcr-x', generateClientSecret: () => 's', now: () => 0 },
+      );
+      expect(client.scope).toEqual(['openid', 'profile']);
+    });
+
+    it('should omit the scope key from the client record when none was registered', () => {
+      const client = buildRegisteredClient(CONFIDENTIAL);
+      expect(Object.hasOwn(client, 'scope')).toBe(false);
+    });
+
+    it('should copy the scope array instead of sharing it', () => {
+      const metadata: ValidatedClientRegistration = {
+        ...CONFIDENTIAL,
+        scope: ['openid'],
+      };
+      const client = buildRegisteredClient(metadata);
+      metadata.scope!.push('profile');
+      expect(client.scope).toEqual(['openid']);
+    });
   });
 });
 
@@ -1183,6 +1370,47 @@ describe('buildClientRegistrationResponse', () => {
     });
     expect(Object.hasOwn(response, 'client_secret')).toBe(false);
     expect(Object.hasOwn(response, 'client_secret_expires_at')).toBe(false);
+  });
+
+  // RFC 7591 §3.2.1: the response carries all registered metadata, so a
+  // registered scope list comes back as the space-delimited `scope` string.
+  it('should include scope as a space-delimited string in the registration response when registered', () => {
+    const response = buildClientRegistrationResponse({
+      clientId: 'dcr-fixed',
+      clientSecret: 'fixed-secret',
+      clientType: 'confidential',
+      redirectUris: ['https://app.example.com/cb'],
+      grantTypes: ['authorization_code'],
+      responseTypes: ['code'],
+      tokenEndpointAuthMethod: 'client_secret_basic',
+      scope: ['openid', 'profile'],
+      clientIdIssuedAt: 1_790_812_800,
+    });
+    expect(response).toEqual({
+      client_id: 'dcr-fixed',
+      client_secret: 'fixed-secret',
+      client_secret_expires_at: 0,
+      client_id_issued_at: 1_790_812_800,
+      redirect_uris: ['https://app.example.com/cb'],
+      token_endpoint_auth_method: 'client_secret_basic',
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
+      scope: 'openid profile',
+    });
+  });
+
+  it('should omit scope from the registration response when not registered', () => {
+    const response = buildClientRegistrationResponse({
+      clientId: 'dcr-x',
+      clientSecret: 's',
+      clientType: 'confidential',
+      redirectUris: ['https://app.example.com/cb'],
+      grantTypes: ['authorization_code'],
+      responseTypes: ['code'],
+      tokenEndpointAuthMethod: 'client_secret_basic',
+      clientIdIssuedAt: 0,
+    });
+    expect(Object.hasOwn(response, 'scope')).toBe(false);
   });
 
   it('should omit client_name when none was registered', () => {
@@ -1301,6 +1529,9 @@ initial access token はボディを読む前に検査し、資格の無いリ�
 設定オブジェクト `dynamicClientRegistrationConfig` はこのファイルが持ち、apply.ts が `applyOidc` のオプションをこの既定へマージする。
 Token Exchange の `tokenExchangeConfig` と同じ「experimental 機能専用の設定を生成コードに置く」パターンである。
 
+検証の呼び出しには、`--scope` でカスタムスコープを宣言した構成でだけ `supportedScopes: SUPPORTED_SCOPES`（`../scopes.js` から import）が渡る。
+デバイス認可ルートの `findUnsupportedScopes` と同じ条件付き生成の形で、掲載したのは宣言なしの hono サンプルの生成結果なので、このオプションは現れない。
+
 ```typescript
 /**
  * EXPERIMENTAL — Dynamic Client Registration (RFC 7591).
@@ -1407,7 +1638,9 @@ registerApp.post('/', async (c) => {
     // value checks and RFC 7591 §2 defaults — pure functions from
     // @maronn-openid-connect/experimental/dynamic-client-registration. Unknown metadata is
     // silently ignored (§2 MUST), and every error_description is a fixed ASCII
-    // string that never reflects request values.
+    // string that never reflects request values. A registered `scope`
+    // (RFC 7591 §2) becomes the client's per-client allow list: requests for
+    // any other scope fail with invalid_scope, like a static client's.
     const metadata = validateClientRegistrationRequest(rawBody, {
       maxBodyBytes: config.maxRegistrationBodyBytes,
     });
@@ -1680,6 +1913,9 @@ discovery に `registration_endpoint` が無い sample では全テストがス�
 429 の検証は実行順に依存しない形にした。
 上限（3）より 1 回多く登録を試み、先行テストが在庫をいくつ消費していても最後の試行が決定的に 429 になることを使っている。
 
+`scope` の検証は三つの観点で行う。
+登録した `scope` が 201 応答へそのまま返ること、登録した範囲内の認可リクエストがログイン画面へ進むこと、範囲外を含む要求が静的クライアント（`client-scope.spec.ts`）と同じ `invalid_scope` のリダイレクトで拒否されることである。
+
 ```typescript
 import { createHash, randomBytes } from 'node:crypto';
 import { expect, test, type APIRequestContext } from '@playwright/test';
@@ -1939,6 +2175,76 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
     expect(Object.hasOwn(registered, 'software_statement')).toBe(false);
   });
 
+  // --- scope (RFC 7591 §2): the registered per-client scope allow list ---
+
+  test('should echo the registered scope in the 201 response (RFC 7591 §3.2.1)', async ({
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    const endpoint = await registrationEndpoint(request, issuer);
+    test.skip(endpoint === undefined, SKIP_REASON);
+
+    const registered = await registerClient(request, issuer, {
+      redirect_uris: [registeredRedirectUri],
+      scope: 'openid profile',
+    });
+    // The response carries all registered metadata (RFC 7591 §3.2.1), so the
+    // client can see which scope restriction its registration ended up with.
+    expect(registered.scope).toBe('openid profile');
+  });
+
+  test('should continue to the login screen for a scope the registration allows', async ({
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    const endpoint = await registrationEndpoint(request, issuer);
+    test.skip(endpoint === undefined, SKIP_REASON);
+
+    const registered = await registerClient(request, issuer, {
+      redirect_uris: [registeredRedirectUri],
+      scope: 'openid',
+    });
+    const clientId = requireString(registered.client_id, 'client_id');
+
+    const response = await request.get(scopeAuthorizeUrl(issuer, clientId, 'openid'), {
+      maxRedirects: 0,
+    });
+    expect(response.status()).toBe(302);
+    expect(requireHeader(response.headers(), 'location')).toBe(`${issuer}/login`);
+  });
+
+  test('should redirect invalid_scope for a scope outside the registered scope (RFC 6749 §4.1.2.1)', async ({
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    const endpoint = await registrationEndpoint(request, issuer);
+    test.skip(endpoint === undefined, SKIP_REASON);
+
+    const registered = await registerClient(request, issuer, {
+      redirect_uris: [registeredRedirectUri],
+      scope: 'openid',
+    });
+    const clientId = requireString(registered.client_id, 'client_id');
+
+    // The dynamically registered scope is enforced exactly like a static
+    // client's: a request outside it is a redirectable invalid_scope error.
+    const response = await request.get(scopeAuthorizeUrl(issuer, clientId, 'openid profile'), {
+      maxRedirects: 0,
+    });
+    expect(response.status()).toBe(302);
+    const location = new URL(requireHeader(response.headers(), 'location'));
+    expect(`${location.origin}${location.pathname}`).toBe(registeredRedirectUri);
+    expect(location.searchParams.get('error')).toBe('invalid_scope');
+    expect(location.searchParams.get('error_description')).toBe(
+      'Client is not registered for scope: profile',
+    );
+    expect(location.searchParams.get('state')).toBe('dcr-scope-state');
+    expect(location.searchParams.get('code')).toBe(null);
+  });
+
   // --- The restricted instance: initial access token and the inventory cap ---
 
   test('should answer 401 without an error code when no credentials accompany the request (RFC 6750 §3.1)', async ({
@@ -2074,6 +2380,23 @@ async function authorizeInBrowser(
   const code = callbackUrl.searchParams.get('code');
   expect(code).not.toBe(null);
   return { code: code as string, state: { codeVerifier } };
+}
+
+/**
+ * An /authorize URL for the scope tests: a fixed state and the RFC 7636
+ * Appendix B S256 challenge, with only client_id and scope varying.
+ */
+function scopeAuthorizeUrl(issuer: string, clientId: string, scope: string): string {
+  const url = new URL('/authorize', issuer);
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('client_id', clientId);
+  url.searchParams.set('redirect_uri', registeredRedirectUri);
+  url.searchParams.set('scope', scope);
+  url.searchParams.set('state', 'dcr-scope-state');
+  url.searchParams.set('nonce', 'dcr-scope-nonce');
+  url.searchParams.set('code_challenge', 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');
+  url.searchParams.set('code_challenge_method', 'S256');
+  return url.toString();
 }
 
 /**
