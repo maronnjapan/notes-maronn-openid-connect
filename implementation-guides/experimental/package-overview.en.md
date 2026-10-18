@@ -176,7 +176,8 @@ In the hono output the file is the same whichever features are enabled (in the e
  * marker line names it, `// [step-id] (feature: <id>) Label — Spec`.
  *
  * features/enabled.ts lists the features of this provider. Remove a feature
- * by deleting its directory and its line there.
+ * by deleting its directory, its lines there and the owner blocks that name
+ * it in the pipelines (with their imports).
  */
 import type { Hono } from 'hono';
 import type { OidcProviderOptions } from '../app.js';
