@@ -4167,7 +4167,8 @@ So a token-exchange request with a `requested_token_type` other than ID-JAG does
 
 When the OP is generated without `--enable id-jag`, the generator deletes the two blocks and the two imports only they used from `pipeline.ts`.
 Neither block defines a value a later block reads (each either answers or passes through), so no `const x = undefined;` is left behind.
-The `steps` of `endpoints/token/endpoint.ts` list the step ids of every feature in diagram order, and `maronn-oidc graph` leaves out the steps of features that are not generated, so that file does not change with id-jag.
+The `steps` of `endpoints/token/endpoint.ts` in `apps/hono` list the step ids of every feature in diagram order.
+The generator removes the lines of `dispatch-id-jag-issuance` and `dispatch-id-jag-redemption` from the generated `endpoint.ts`, so the file lists only the steps the output has.
 
 ### The generated code in full (hono)
 

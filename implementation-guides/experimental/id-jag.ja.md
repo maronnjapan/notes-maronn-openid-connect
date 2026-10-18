@@ -4170,8 +4170,8 @@ token-exchange を有効にしていない構成でも、discovery は発行の�
 
 `--enable id-jag` を付けずに生成すると、ジェネレータは 2 つのブロックと、それだけが使っていた import 2 行を `pipeline.ts` から削除する。
 どちらのブロックも、後続のブロックが読む値を作らない（応答を返すか素通りするだけである）ので、`const x = undefined;` の置き換えも残らない。
-`endpoints/token/endpoint.ts` の `steps` は、どの機能のステップも含めて図の順にステップ ID を並べ、`maronn-oidc graph` は生成されていない機能のステップを図から外す。
-このため、id-jag の有無でこのファイルは変わらない。
+`apps/hono` の `endpoints/token/endpoint.ts` の `steps` は、どの機能のステップも含めて図の順にステップ ID を並べる。
+ジェネレータは生成する `endpoint.ts` から `dispatch-id-jag-issuance` と `dispatch-id-jag-redemption` の行を削除するので、このファイルには出力にあるステップだけが残る。
 
 ### 生成コードに入るコードの全文（hono）
 
