@@ -2684,6 +2684,16 @@ import { deviceAuthorizationGrant } from './device-authorization-grant/feature.j
   deviceAuthorizationGrant,
 ```
 
+#### `endpoints/token/endpoint.ts` に入る行
+
+`endpoints/token/endpoint.ts` は、トークンエンドポイントのステップの並びと矢印を記述するファイルで、`maronn-oidc graph` の図と `--flow` の検証はこの記述から作る。
+`steps` には `device-authorization-grant` のステップの行が入る。
+`device-authorization-grant` を無効にして生成すると、CLI はこれらの行を削除し、出力の `endpoint.ts` には出力にあるステップだけが残る。
+
+```typescript
+    'dispatch-device-code',
+```
+
 #### `endpoints/token/pipeline.ts` の `(feature: device-authorization-grant)` ブロック
 
 トークンエンドポイントのパイプラインの先頭に、ブロックが呼ぶステップの import が加わる。

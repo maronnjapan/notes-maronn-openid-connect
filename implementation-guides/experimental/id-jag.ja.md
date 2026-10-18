@@ -4190,6 +4190,17 @@ import { idJag } from './id-jag/feature.js';
   idJag,
 ```
 
+#### `endpoints/token/endpoint.ts` に入る行
+
+`endpoints/token/endpoint.ts` は、トークンエンドポイントのステップの並びと矢印を記述するファイルで、`maronn-oidc graph` の図と `--flow` の検証はこの記述から作る。
+`steps` には `id-jag` のステップの行が 2 行入る。
+`id-jag` を無効にして生成すると、CLI はこれらの行を削除し、出力の `endpoint.ts` には出力にあるステップだけが残る。
+
+```typescript
+    'dispatch-id-jag-issuance',
+    'dispatch-id-jag-redemption',
+```
+
 #### `endpoints/token/pipeline.ts` の `(feature: id-jag)` ブロック
 
 2 つのブロックが呼ぶステップは、`pipeline.ts` の冒頭の次の import で `features/id-jag/steps/` から読み込まれる。

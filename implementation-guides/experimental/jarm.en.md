@@ -944,6 +944,16 @@ import { jarm } from './jarm/feature.js';
   jarm,
 ```
 
+#### The lines added to `endpoints/authorize/endpoint.ts`
+
+`endpoints/authorize/endpoint.ts` describes the steps of the authorization endpoint and the edges between them; `maronn-oidc graph` draws its diagram and `--flow` checks a flow document from this description.
+Its `steps` hold the line of the `jarm` step.
+When the provider is generated without `jarm`, the CLI removes these lines, so the output's `endpoint.ts` lists only the steps the output has.
+
+```typescript
+    'resolve-jarm-response-mode',
+```
+
 #### The `(feature: jarm)` block of `endpoints/authorize/pipeline.ts`
 
 The authorization endpoint's pipeline imports the JARM step the block calls at the top of the file.

@@ -4187,6 +4187,17 @@ import { idJag } from './id-jag/feature.js';
   idJag,
 ```
 
+#### The lines added to `endpoints/token/endpoint.ts`
+
+`endpoints/token/endpoint.ts` describes the steps of the token endpoint and the edges between them; `maronn-oidc graph` draws its diagram and `--flow` checks a flow document from this description.
+Its `steps` hold the 2 lines of the `id-jag` steps.
+When the provider is generated without `id-jag`, the CLI removes these lines, so the output's `endpoint.ts` lists only the steps the output has.
+
+```typescript
+    'dispatch-id-jag-issuance',
+    'dispatch-id-jag-redemption',
+```
+
 #### The `(feature: id-jag)` block of `endpoints/token/pipeline.ts`
 
 The steps the two blocks call are imported from `features/id-jag/steps/` at the top of `pipeline.ts`:

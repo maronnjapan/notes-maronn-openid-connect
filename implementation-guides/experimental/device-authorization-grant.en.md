@@ -2678,6 +2678,16 @@ import { deviceAuthorizationGrant } from './device-authorization-grant/feature.j
   deviceAuthorizationGrant,
 ```
 
+#### The lines added to `endpoints/token/endpoint.ts`
+
+`endpoints/token/endpoint.ts` describes the steps of the token endpoint and the edges between them; `maronn-oidc graph` draws its diagram and `--flow` checks a flow document from this description.
+Its `steps` hold the line of the `device-authorization-grant` step.
+When the provider is generated without `device-authorization-grant`, the CLI removes these lines, so the output's `endpoint.ts` lists only the steps the output has.
+
+```typescript
+    'dispatch-device-code',
+```
+
 #### The `(feature: device-authorization-grant)` block of `endpoints/token/pipeline.ts`
 
 The import of the step the block calls joins the top of the token pipeline.

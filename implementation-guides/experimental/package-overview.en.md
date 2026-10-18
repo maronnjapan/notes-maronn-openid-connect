@@ -135,6 +135,7 @@ It follows that `--enable <feature-id>` adds exactly three things to the generat
 
 The order of the array in `features/enabled.ts` is the order in which the hooks apply.
 Removing a feature by hand after generating takes more than deleting its two lines in `features/enabled.ts` and its directory: its owner blocks and the imports they use must go too.
+So must the lines of its steps in the `endpoint.ts` files, with the lines of the edges to and from them.
 
 ### The feature registry
 
@@ -176,8 +177,9 @@ In the hono output the file is the same whichever features are enabled (in the e
  * marker line names it, `// [step-id] (feature: <id>) Label — Spec`.
  *
  * features/enabled.ts lists the features of this provider. Remove a feature
- * by deleting its directory, its lines there and the owner blocks that name
- * it in the pipelines (with their imports).
+ * by deleting its directory, its lines there, the owner blocks that name it
+ * in the pipelines (with their imports) and the lines of its steps in the
+ * endpoint.ts files (with the edges to and from them).
  */
 import type { Hono } from 'hono';
 import type { OidcProviderOptions } from '../app.js';

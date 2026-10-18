@@ -2823,6 +2823,16 @@ import { ciba } from './ciba/feature.js';
   ciba,
 ```
 
+#### The lines added to `endpoints/token/endpoint.ts`
+
+`endpoints/token/endpoint.ts` describes the steps of the token endpoint and the edges between them; `maronn-oidc graph` draws its diagram and `--flow` checks a flow document from this description.
+Its `steps` hold the line of the `ciba` step.
+When the provider is generated without `ciba`, the CLI removes these lines, so the output's `endpoint.ts` lists only the steps the output has.
+
+```typescript
+    'dispatch-ciba',
+```
+
 #### The `(feature: ciba)` block of `endpoints/token/pipeline.ts`
 
 The import of the step the block calls joins the top of the token pipeline.

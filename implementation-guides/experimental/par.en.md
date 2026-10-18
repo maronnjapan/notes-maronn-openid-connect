@@ -1781,6 +1781,16 @@ import { par } from './par/feature.js';
   par,
 ```
 
+#### The lines added to `endpoints/authorize/endpoint.ts`
+
+`endpoints/authorize/endpoint.ts` describes the steps of the authorization endpoint and the edges between them; `maronn-oidc graph` draws its diagram and `--flow` checks a flow document from this description.
+Its `steps` hold the line of the `par` step.
+When the provider is generated without `par`, the CLI removes these lines, so the output's `endpoint.ts` lists only the steps the output has.
+
+```typescript
+    'resolve-pushed-request',
+```
+
 #### The `(feature: par)` block of `endpoints/authorize/pipeline.ts`
 
 The authorization endpoint's pipeline imports the PAR step the block calls at the top of the file.

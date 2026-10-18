@@ -798,6 +798,20 @@ import { jwtIntrospectionResponse } from './jwt-introspection-response/feature.j
   jwtIntrospectionResponse,
 ```
 
+#### `features/introspection/endpoints/introspection/endpoint.ts` に入る行
+
+`features/introspection/endpoints/introspection/endpoint.ts` は、イントロスペクションエンドポイントのステップの並びと矢印を記述するファイルで、`maronn-oidc graph` の図と `--flow` の検証はこの記述から作る。
+`steps` には `jwt-introspection-response` のステップの行が、`edges.extra` にはそのステップから出る矢印の行が入る。
+`jwt-introspection-response` を無効にして生成すると、CLI はこれらの行を削除し、出力の `endpoint.ts` には出力にあるステップだけが残る。
+
+```typescript
+    'sign-response',
+```
+
+```typescript
+      { from: 'sign-response', to: 'respond', label: 'application/token-introspection+jwt', kind: 'branch' },
+```
+
 #### `features/introspection/endpoints/introspection/pipeline.ts` の `(feature: jwt-introspection-response)` ブロック
 
 パイプラインの先頭に、ブロックが呼ぶステップの import が加わる。

@@ -2831,6 +2831,16 @@ import { ciba } from './ciba/feature.js';
   ciba,
 ```
 
+#### `endpoints/token/endpoint.ts` に入る行
+
+`endpoints/token/endpoint.ts` は、トークンエンドポイントのステップの並びと矢印を記述するファイルで、`maronn-oidc graph` の図と `--flow` の検証はこの記述から作る。
+`steps` には `ciba` のステップの行が入る。
+`ciba` を無効にして生成すると、CLI はこれらの行を削除し、出力の `endpoint.ts` には出力にあるステップだけが残る。
+
+```typescript
+    'dispatch-ciba',
+```
+
 #### `endpoints/token/pipeline.ts` の `(feature: ciba)` ブロック
 
 トークンエンドポイントのパイプラインの先頭に、ブロックが呼ぶステップの import が加わる。

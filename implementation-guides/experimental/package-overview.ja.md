@@ -132,6 +132,7 @@ base のパイプラインの途中で動く処理はフックにしない。
 
 `features/enabled.ts` の配列の順序は、フックを適用する順序である。
 生成後に機能を手で外すときは、`features/enabled.ts` の 2 行とディレクトリを消すだけでは足りず、その機能の所有者付きブロックと、ブロックが使う import も消す必要がある。
+`endpoint.ts` にあるその機能のステップの行と、そのステップに出入りする矢印の行も消す。
 
 ### 機能の登録簿
 
@@ -173,8 +174,9 @@ hono の生成コードでは、どの機能を有効にしてもこのファイ
  * marker line names it, `// [step-id] (feature: <id>) Label — Spec`.
  *
  * features/enabled.ts lists the features of this provider. Remove a feature
- * by deleting its directory, its lines there and the owner blocks that name
- * it in the pipelines (with their imports).
+ * by deleting its directory, its lines there, the owner blocks that name it
+ * in the pipelines (with their imports) and the lines of its steps in the
+ * endpoint.ts files (with the edges to and from them).
  */
 import type { Hono } from 'hono';
 import type { OidcProviderOptions } from '../app.js';

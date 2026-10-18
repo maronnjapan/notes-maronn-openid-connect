@@ -2104,6 +2104,16 @@ import { tokenExchange } from './token-exchange/feature.js';
   tokenExchange,
 ```
 
+#### The lines added to `endpoints/token/endpoint.ts`
+
+`endpoints/token/endpoint.ts` describes the steps of the token endpoint and the edges between them; `maronn-oidc graph` draws its diagram and `--flow` checks a flow document from this description.
+Its `steps` hold the line of the `token-exchange` step.
+When the provider is generated without `token-exchange`, the CLI removes these lines, so the output's `endpoint.ts` lists only the steps the output has.
+
+```typescript
+    'dispatch-token-exchange',
+```
+
 #### The `(feature: token-exchange)` block of `endpoints/token/pipeline.ts`
 
 The token endpoint's pipeline imports the Token Exchange step the block calls at the top of the file.

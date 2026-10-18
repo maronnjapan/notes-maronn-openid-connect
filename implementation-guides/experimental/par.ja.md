@@ -1784,6 +1784,16 @@ import { par } from './par/feature.js';
   par,
 ```
 
+#### `endpoints/authorize/endpoint.ts` に入る行
+
+`endpoints/authorize/endpoint.ts` は、認可エンドポイントのステップの並びと矢印を記述するファイルで、`maronn-oidc graph` の図と `--flow` の検証はこの記述から作る。
+`steps` には `par` のステップの行が入る。
+`par` を無効にして生成すると、CLI はこれらの行を削除し、出力の `endpoint.ts` には出力にあるステップだけが残る。
+
+```typescript
+    'resolve-pushed-request',
+```
+
 #### `endpoints/authorize/pipeline.ts` の `(feature: par)` ブロック
 
 認可エンドポイントのパイプラインは、ファイル先頭で、ブロックが呼ぶ PAR のステップを import する。

@@ -2109,6 +2109,16 @@ import { tokenExchange } from './token-exchange/feature.js';
   tokenExchange,
 ```
 
+#### `endpoints/token/endpoint.ts` に入る行
+
+`endpoints/token/endpoint.ts` は、トークンエンドポイントのステップの並びと矢印を記述するファイルで、`maronn-oidc graph` の図と `--flow` の検証はこの記述から作る。
+`steps` には `token-exchange` のステップの行が入る。
+`token-exchange` を無効にして生成すると、CLI はこれらの行を削除し、出力の `endpoint.ts` には出力にあるステップだけが残る。
+
+```typescript
+    'dispatch-token-exchange',
+```
+
 #### `endpoints/token/pipeline.ts` の `(feature: token-exchange)` ブロック
 
 トークンエンドポイントのパイプラインは、ファイル先頭で、ブロックが呼ぶ Token Exchange のステップを import する。

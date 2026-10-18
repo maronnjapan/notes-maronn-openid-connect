@@ -798,6 +798,20 @@ import { jwtIntrospectionResponse } from './jwt-introspection-response/feature.j
   jwtIntrospectionResponse,
 ```
 
+#### The lines added to `features/introspection/endpoints/introspection/endpoint.ts`
+
+`features/introspection/endpoints/introspection/endpoint.ts` describes the steps of the introspection endpoint and the edges between them; `maronn-oidc graph` draws its diagram and `--flow` checks a flow document from this description.
+Its `steps` hold the line of the `jwt-introspection-response` step, and its `edges.extra` the line of the edge that leaves that step.
+When the provider is generated without `jwt-introspection-response`, the CLI removes these lines, so the output's `endpoint.ts` lists only the steps the output has.
+
+```typescript
+    'sign-response',
+```
+
+```typescript
+      { from: 'sign-response', to: 'respond', label: 'application/token-introspection+jwt', kind: 'branch' },
+```
+
 #### The `(feature: jwt-introspection-response)` block of `features/introspection/endpoints/introspection/pipeline.ts`
 
 The import of the step the block calls joins the top of the pipeline.
