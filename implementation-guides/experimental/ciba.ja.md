@@ -2918,7 +2918,7 @@ export const ciba = defineFeature({
 
 #### `features/ciba/config.ts`
 
-機能の設定値 `cibaConfig` と、`OidcProviderOptions` への `cibaUserResolver` の追加である。
+機能の設定値 `cibaConfig` と、`OidcProviderOptions` への `cibaUserResolver` の追加、`RegisteredClient` への `backchannelTokenDeliveryMode` の追加である。
 `authReqIdExpiresIn`、`pollingInterval`、`maxPendingPerSubject` はバックチャネル認証エンドポイントの `create-request` ステップが experimental パッケージに渡し、`maxLoginAttempts` は認証デバイス画面の `submit-login` ステップが読む。
 トークンエンドポイントの dispatch-ciba ステップはこのオブジェクトを読まず、レコードに記録された間隔を `processCibaGrant()` が使う。
 値は export されたオブジェクトのプロパティなので、このファイルを編集するか、ホストアプリが起動時にプロパティへ代入して変える。
@@ -2927,6 +2927,9 @@ export const ciba = defineFeature({
 設定の書き損じは、承認画面への flood を抑える上限か、ポーリングの契約のどちらかを弱めるからである。
 `declare module '../../app.js'` は、`createApp()` と `applyOidc()` のオプションに `cibaUserResolver` を加える。
 `login_hint` の意味（メールアドレス、電話番号、ユーザー名）はユーザーストアの設計に依存するので、解決を丸ごと差し替えられるようにしている。
+`declare module '../../config.js'` は、クライアントの登録の型 `RegisteredClient` に CIBA §4 のクライアントメタデータ `backchannel_token_delivery_mode` を加える。
+この OP は poll しか提供しないので、ping または push で登録したクライアントのバックチャネル認証リクエストは、`create-request` ステップで experimental パッケージが `unauthorized_client` で拒否する。
+項目は機能のディレクトリから加えるので、ciba を外して生成すると型からも消える。
 
 ```typescript
 /**
@@ -2975,6 +2978,18 @@ declare module '../../app.js' {
     cibaUserResolver?: (
       loginHint: string,
     ) => Promise<{ subject: string } | null> | { subject: string } | null;
+  }
+}
+
+declare module '../../config.js' {
+  interface RegisteredClient {
+    /**
+     * EXPERIMENTAL (CIBA Core 1.0 §4): the backchannel_token_delivery_mode
+     * client metadata. This provider offers poll only, so a client registered
+     * for ping or push has every backchannel authentication request refused
+     * with unauthorized_client. Omitted means poll.
+     */
+    backchannelTokenDeliveryMode?: 'poll' | 'ping' | 'push';
   }
 }
 ```
@@ -3607,7 +3622,8 @@ export function validateCibaClientScope(params: Record<string, string>, client: 
 ステップが渡すのは、`config.ts` の `cibaConfig`、context の `cibaUserResolver` とストア、refresh token を発行できるかどうかである。
 refresh token の可否は、refresh-token 機能を import せず、有効な機能のフックから `tokenGrantsOf(features).includes('refresh_token')` で読む。
 機能のディレクトリが別の機能を import してよいのは、`packages/cli/src/registry.ts` の `requires` に書いた場合だけだからである。
-クライアントの登録の型（`config.ts` の `RegisteredClient`）に配信モードの項目は無く、`CibaClientInfo` として渡すクライアントの配信モードは未設定になるので、experimental パッケージの既定どおり poll として扱われる。
+配信モードは、クライアントの登録（`features/ciba/config.ts` が `RegisteredClient` に加えた `backchannelTokenDeliveryMode`）のまま `CibaClientInfo` として渡る。
+未設定のクライアントは、experimental パッケージの既定どおり poll として扱われる。
 
 ```typescript
 import type { TokenClientInfo } from '@maronn-openid-connect/core';

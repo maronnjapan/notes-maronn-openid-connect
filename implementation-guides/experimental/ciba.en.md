@@ -2910,7 +2910,7 @@ export const ciba = defineFeature({
 
 #### `features/ciba/config.ts`
 
-The feature's settings, `cibaConfig`, and the addition of `cibaUserResolver` to `OidcProviderOptions`.
+The feature's settings, `cibaConfig`, the addition of `cibaUserResolver` to `OidcProviderOptions`, and the addition of `backchannelTokenDeliveryMode` to `RegisteredClient`.
 `authReqIdExpiresIn`, `pollingInterval` and `maxPendingPerSubject` are handed to the experimental package by the `create-request` step of the backchannel authentication endpoint, and `maxLoginAttempts` is read by the `submit-login` step of the authentication device screens.
 The token endpoint's dispatch-ciba step does not read this object; `processCibaGrant()` uses the interval stored on the record.
 The values are properties of an exported object, so they are changed by editing this file or by assigning to the properties when the host app starts.
@@ -2919,6 +2919,9 @@ A value outside the documented ranges throws when the module is loaded.
 A typo in the settings would weaken either the cap that holds back floods of the approval screen or the polling contract.
 `declare module '../../app.js'` adds `cibaUserResolver` to the options of `createApp()` and `applyOidc()`.
 What a `login_hint` means (an email address, a phone number, a username) depends on the design of the user store, so the resolution can be replaced as a whole.
+`declare module '../../config.js'` adds the CIBA §4 client metadata `backchannel_token_delivery_mode` to `RegisteredClient`, the type of a client registration.
+This OP offers poll only, so the experimental package refuses every backchannel authentication request of a client registered for ping or push with `unauthorized_client` in the `create-request` step.
+The member is added from the feature's directory, so generating without ciba removes it from the type as well.
 
 ```typescript
 /**
@@ -2967,6 +2970,18 @@ declare module '../../app.js' {
     cibaUserResolver?: (
       loginHint: string,
     ) => Promise<{ subject: string } | null> | { subject: string } | null;
+  }
+}
+
+declare module '../../config.js' {
+  interface RegisteredClient {
+    /**
+     * EXPERIMENTAL (CIBA Core 1.0 §4): the backchannel_token_delivery_mode
+     * client metadata. This provider offers poll only, so a client registered
+     * for ping or push has every backchannel authentication request refused
+     * with unauthorized_client. Omitted means poll.
+     */
+    backchannelTokenDeliveryMode?: 'poll' | 'ping' | 'push';
   }
 }
 ```
@@ -3599,7 +3614,8 @@ The order is: the client checks (public client, grant registration, delivery mod
 The step hands over `cibaConfig` of `config.ts`, `cibaUserResolver` and the store from the context, and whether refresh tokens can be issued.
 Whether refresh tokens can be issued is read from the hooks of the enabled features, `tokenGrantsOf(features).includes('refresh_token')`, without importing the refresh-token feature.
 A feature's directory may import another feature only when `requires` in `packages/cli/src/registry.ts` lists it.
-The client registration type (`RegisteredClient` in `config.ts`) has no delivery-mode member, so the client passed as `CibaClientInfo` has no delivery mode set and is treated as poll, the experimental package's default.
+The delivery mode reaches the experimental package as the client registration has it (`backchannelTokenDeliveryMode`, which `features/ciba/config.ts` adds to `RegisteredClient`), through the client passed as `CibaClientInfo`.
+A client without it is treated as poll, the experimental package's default.
 
 ```typescript
 import type { TokenClientInfo } from '@maronn-openid-connect/core';
