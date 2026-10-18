@@ -26,26 +26,26 @@ Each guide explains what the feature does, which use cases it serves, and walks 
 各機能の解説は、次のコードをすべて全文で載せる。
 
 - `packages/experimental/src/<feature-id>/` の実装ファイルとテストファイルのすべて
-- CLI の `--enable <feature-id>` が生成コードへ注入するコードの全文（hono。他フレームワークの差分は同等の内容なのでリンクで示す）
+- CLI の `--enable <feature-id>` が生成コードへ注入するコードの全文（hono）。`features/<feature-id>/` の全ファイル、`features/enabled.ts` に入る行、基盤のパイプラインにある `(feature: <feature-id>)` のブロックである。express と fastify は同じファイルを WebRouter に載せ替えたもので、Next.js は `apps/nextjs` の route group と `_oidc-provider/features/<feature-id>/` から抽出される。これらはリンクで示す
 - その機能の E2E テストスペックの全文
 
-全機能で共有される基盤（core 本体、E2E ハーネス、CLI テンプレート全体）は個別機能のコードではないため、リンクで参照する。
+全機能で共有される基盤（core 本体、E2E ハーネス、生成元の `apps/hono` の基盤部分）は個別機能のコードではないため、リンクで参照する。
 
-生成コードへの寄与は、unified diff をそのまま貼らず、ファイルごとの節に分けて、追加・変更されるコードを言語指定つきのコードブロック（TypeScript なら ```typescript）で示す。
+生成コードへの寄与は、unified diff をそのまま貼らず、ファイルごとの節に分けて、追加または変更されるコードを言語指定つきのコードブロック（TypeScript なら ```typescript）で示す。
 diff 形式はシンタックスハイライトが効かず読みにくいためで、どこに入るコードかは前後の文で述べる。
-CLI 統合を変更した場合は、生成結果と解説に掲載したコードを同じ変更内で照合する。
+CLI 統合（`apps/hono` の機能のコード）を変更した場合は、`maronn-oidc generate hono --enable <feature-id>` の生成結果と解説に掲載したコードを同じ変更内で照合する。
 
 Each feature guide embeds, verbatim and in full:
 
 - every implementation and test file under `packages/experimental/src/<feature-id>/`
-- the complete code that `--enable <feature-id>` adds to the CLI-generated output (hono; the other frameworks' diffs are equivalent and are linked)
+- the complete code that `--enable <feature-id>` adds to the CLI-generated output (hono): every file of `features/<feature-id>/`, the lines it adds to `features/enabled.ts`, and the `(feature: <feature-id>)` blocks of the base pipelines. Express and Fastify get the same files on the WebRouter, and Next.js is extracted from the route groups and `_oidc-provider/features/<feature-id>/` of `apps/nextjs`; the guides link to those
 - the complete E2E test spec for the feature
 
-Infrastructure shared by all features (the core package itself, the E2E harness, the CLI template files as a whole) is not code of any single feature, so the guides link to it instead of embedding it.
+Infrastructure shared by all features (the core package itself, the E2E harness, the base of `apps/hono` the code is extracted from) is not code of any single feature, so the guides link to it instead of embedding it.
 
 The generated-code contribution is presented file by file, as syntax-highlighted code blocks (```typescript) of the added or changed code, with the surrounding prose stating where each block lands.
 Raw unified diffs are not embedded in the guides: they render without syntax highlighting and are hard to read.
-When the CLI integration changes, verify the generated result against the code embedded in the guide within the same change.
+When the CLI integration (the feature code in `apps/hono`) changes, verify the output of `maronn-oidc generate hono --enable <feature-id>` against the code embedded in the guide within the same change.
 
 ## 更新の規約 / Maintenance rules
 

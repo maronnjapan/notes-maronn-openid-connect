@@ -6,10 +6,10 @@
 この文書が全文を載せるのは次のコードである。
 
 - `packages/experimental/src/par/` の実装 4 ファイルとテスト 2 ファイルのすべて
-- CLI の `--enable par` が生成コードへ注入する差分の全文（hono）
+- CLI の `--enable par` が生成コードへ加えるコードの全文（hono）
 - PAR の E2E テストスペックの全文
 
-core 本体、E2E 共有ハーネス、他フレームワークの生成差分は全機能で共有される基盤なので、リンクで参照する。
+core 本体、E2E 共有ハーネス、他フレームワークの生成コードは全機能で共有される基盤なので、リンクで参照する。
 
 ## 機能の概要
 
@@ -608,7 +608,8 @@ function toParErrorCodeFromAuthorization(code: AuthorizationErrorCode): ParError
 `assertPushedRequestUsed` は `require_pushed_authorization_requests`（§5）のガードで、PAR 必須設定のときに URN 形式の `request_uri` を伴わない認可リクエストを拒否する。
 
 エラー型 `PushedRequestUriError` を core の `AuthorizationError` と別に新設しているのは、core の enum が `invalid_request_uri` を含まないためである。
-このエラーは常に非リダイレクトで、生成コードの authorize ハンドラが catch 節に専用の分岐を持ち、既存の非リダイレクト経路と同じ描画で処理する。
+このエラーは常に非リダイレクトである。
+生成コードでは `features/par/steps/resolve-pushed-request.ts` がこれを `redirect_uri` を持たない core の `AuthorizationError` に写し、既存の非リダイレクトのエラーと同じ経路で OP 上に返す。
 
 ```typescript
 /**
@@ -1723,918 +1724,736 @@ describe('PushedRequestUriError', () => {
 ## CLI 統合と生成コードへの寄与
 
 experimental 本体はロジック層であり、HTTP エンドポイントとしての PAR は CLI が生成するコードが実装する。
-`maronn-oidc generate <framework> --enable par` を指定すると、生成コードに次が入る。
+生成コードは、全機能を有効にして動かしているアプリ [apps/hono](../../../apps/hono) の `src/oidc-provider/` から、CLI が抜き出したものである。
+`maronn-oidc generate <framework> --enable par` を指定すると、生成コードに次の 3 つが入る。
 
-- **routes/par.ts の追加**：`POST /par` のハンドラ。`application/x-www-form-urlencoded` の検証、ステップ関数の順次呼び出し、`ParError` の JSON 応答化を行う。`parConfig`（`expiresInSeconds: 60` と `requirePushedAuthorizationRequests: false`）もこのファイルにあり、モジュール読み込み時に `assertParExpiresInSeconds` で検証される
-- **routes/authorize.ts の変更**：認可処理の前段に `resolvePushedRequestUri` を差し込み、URN 形式の `request_uri` を展開する。PAR 必須設定のときは `assertPushedRequestUsed` を先に通す。catch 節に `PushedRequestUriError` の非リダイレクト分岐が加わる
-- **routes/discovery.ts の変更**：メタデータに `pushed_authorization_request_endpoint` を追加し、必須設定のときは `require_pushed_authorization_requests: true` も広告する
-- **store.ts の変更**：`parStore`（`PushedAuthorizationRequestStore` の実装）が加わる
-- **app.ts / apply.ts の変更**：`/par` ルートのマウント、メソッド制約（POST のみ）、CORS の適用
-- **conformance.test.ts の変更**：上記すべての挙動を契約テストとして固定する
+- **`features/par/` ディレクトリ**：PAR が所有するファイルのすべて。`feature.ts` が `defineFeature()` で機能を宣言し、`routes` フックで `POST /par`（POST 以外は 405、CORS はトークンエンドポイントと同じ protected）を、`discovery` フックで `pushed_authorization_request_endpoint` を、`context` フックで `parStore` を base に差し込む
+- **`features/enabled.ts` の 2 行**：`par` の import 行と、機能の一覧 `features` の 1 項目
+- **`endpoints/authorize/pipeline.ts` の所有者付きブロック 1 つ**：`[resolve-pushed-request]` ブロックが、base の `[parse-request]` と `[resolve-client]` のあいだで、URN 形式の `request_uri` を pushed パラメータへ展開する。ブロックが呼ぶステップの import 行も、ファイル先頭に 1 行入る
 
-リクエストの経路をまとめると、`POST /par` は「ボディ検証 → クライアント認証 → 認可リクエスト検証 → 保存 → 201」、`GET /authorize` は「（必須設定なら PAR 使用ガード →）URN 展開 → 従来の認可処理」という流れになる。
+フックが受け渡すのは、ルート、メタデータ、リクエストコンテキストの値のように、base が決まった場所で読む宣言的な値である。
+base のパイプラインの途中で動く処理はフックにせず、そのパイプラインの中に、機能の名前を書いた目印のコメントで始まるブロックとして置く。
+目印のコメントは `// [step-id] (feature: <feature-id>)` で始まり、次の目印の直前までがそのブロックになる。
+このブロックを **所有者付きブロック** と呼ぶ。
+`--enable par` を付けずに生成すると、CLI は PAR のブロックと、そのブロックだけが使っていた import 行を削除する。
+PAR のブロックは base が宣言した `params` に展開の結果を代入し直すだけなので、削除してもパイプラインの残りはそのまま動く。
 
-### 生成コードに入る差分の全文（hono）
+リクエストの経路をまとめると次のようになる。
+`POST /par` は、`app.ts` が `routes` フックから受け取って `/par` にマウントした `parApp`（`features/par/endpoints/par/pipeline.ts`）に届き、「本文の解析 → クライアント認証 → 認可リクエストの検証 → 保存 → 201」の順に進む。
+`GET /authorize` は、base の `endpoints/authorize/pipeline.ts` が「リクエストの解析 →（PAR のブロック）必須設定なら PAR 使用ガード、続いて URN の展開 → 従来の認可処理」の順に進める。
+discovery では、base の `build-metadata` ステップが組み立てたメタデータに、`features/feature.ts` の `discoveryOf()` が PAR の `discovery` フックの値を加える。
 
-以下は、デフォルト構成（`default-op`）と `--enable par`（`with-par`）の生成結果の差分そのもので、`--enable par` が生成コードに足すもののすべてである。
-conformance.test.ts の差分には、この機能が生成 OP に保証させる挙動（契約テスト）がすべて含まれるので、仕様と実装の突き合わせはそこを起点にするとよい。
+この配置には 3 つの設計判断がある。
 
-````diff
-diff --git a/default-op/app.ts b/with-par/app.ts
-index 4246f6b..270379c 100644
---- a/default-op/app.ts
-+++ b/with-par/app.ts
-@@ -5,6 +5,7 @@ import { tokenApp } from './routes/token.js';
- import { userinfoApp } from './routes/userinfo.js';
- import { introspectionApp } from './routes/introspection.js';
- import { revocationApp } from './routes/revocation.js';
-+import { parApp } from './routes/par.js';
- import { jwksApp } from './routes/jwks.js';
- import { discoveryApp } from './routes/discovery.js';
- import { loginApp } from './routes/login.js';
-@@ -19,6 +20,7 @@ import {
- } from './resolvers.js';
- import {
-   defaultProviderStores,
-+  parStore,
-   type ProviderStores,
-   type ProviderStoresFactory,
- } from './store.js';
-@@ -105,6 +107,7 @@ const OIDC_ENDPOINT_METHODS: Readonly<Record<string, readonly string[]>> = {
-   '/userinfo': ['GET', 'POST'],
-   '/introspect': ['POST'],
-   '/revoke': ['POST'],
-+  '/par': ['POST'],
-   '/.well-known/jwks.json': ['GET'],
-   '/.well-known/openid-configuration': ['GET'],
-   '/login': ['GET', 'POST'],
-@@ -148,6 +151,7 @@ export function createApp(options: CreateAppOptions): Hono<{ Variables: Record<s
-   app.use('/userinfo', protectedCors);
-   app.use('/introspect', protectedCors);
-   app.use('/revoke', protectedCors);
-+  app.use('/par', protectedCors);
-   app.use('/.well-known/openid-configuration', publicCors);
-   app.use('/.well-known/jwks.json', publicCors);
-   // CORS must run first so OPTIONS preflights are answered before method enforcement.
-@@ -215,6 +219,7 @@ export function createApp(options: CreateAppOptions): Hono<{ Variables: Record<s
-     c.set('introspectionAccessTokenResolver', storeResolvers.introspectionAccessTokenResolver);
-     c.set('introspectionRefreshTokenResolver', storeResolvers.introspectionRefreshTokenResolver);
-     c.set('revocationResolvers', storeResolvers.revocationResolvers);
-+    c.set('parStore', parStore);
- 
-     // P1: default cookie-based session + consent resolvers so prompt=none /
-     // max_age / SSO work out of the box (OIDC Core 1.0 Section 3.1.2.1 / 3.1.2.3).
-@@ -238,6 +243,7 @@ export function createApp(options: CreateAppOptions): Hono<{ Variables: Record<s
-   app.route('/userinfo', userinfoApp);
-   app.route('/introspect', introspectionApp);
-   app.route('/revoke', revocationApp);
-+  app.route('/par', parApp);
-   app.route('/.well-known/jwks.json', jwksApp);
-   app.route('/.well-known/openid-configuration', discoveryApp);
-   app.route('/login', loginApp);
-diff --git a/default-op/apply.ts b/with-par/apply.ts
-index db15234..ec6d629 100644
---- a/default-op/apply.ts
-+++ b/with-par/apply.ts
-@@ -5,6 +5,7 @@ import { tokenApp } from './routes/token.js';
- import { userinfoApp } from './routes/userinfo.js';
- import { introspectionApp } from './routes/introspection.js';
- import { revocationApp } from './routes/revocation.js';
-+import { parApp } from './routes/par.js';
- import { jwksApp } from './routes/jwks.js';
- import { discoveryApp } from './routes/discovery.js';
- import { loginApp } from './routes/login.js';
-@@ -19,6 +20,7 @@ import {
- } from './resolvers.js';
- import {
-   defaultProviderStores,
-+  parStore,
-   type ProviderStores,
-   type ProviderStoresFactory,
- } from './store.js';
-@@ -136,6 +138,7 @@ const OIDC_ENDPOINT_METHODS: Readonly<Record<string, readonly string[]>> = {
-   '/userinfo': ['GET', 'POST'],
-   '/introspect': ['POST'],
-   '/revoke': ['POST'],
-+  '/par': ['POST'],
-   '/.well-known/jwks.json': ['GET'],
-   '/.well-known/openid-configuration': ['GET'],
-   '/login': ['GET', 'POST'],
-@@ -191,6 +194,7 @@ export function applyOidc(app: Hono<any>, options: ApplyOidcOptions): void {
-   app.use('/userinfo', protectedCors);
-   app.use('/introspect', protectedCors);
-   app.use('/revoke', protectedCors);
-+  app.use('/par', protectedCors);
-   app.use('/.well-known/openid-configuration', publicCors);
-   app.use('/.well-known/jwks.json', publicCors);
-   // CORS must run first so OPTIONS preflights are answered before method enforcement.
-@@ -266,6 +270,7 @@ export function applyOidc(app: Hono<any>, options: ApplyOidcOptions): void {
-     c.set('introspectionAccessTokenResolver', storeResolvers.introspectionAccessTokenResolver);
-     c.set('introspectionRefreshTokenResolver', storeResolvers.introspectionRefreshTokenResolver);
-     c.set('revocationResolvers', storeResolvers.revocationResolvers);
-+    c.set('parStore', parStore);
- 
-     // T-015: acr / amr resolver (optional; undefined preserves T-009 hold behavior).
-     if (options.acrResolver) {
-@@ -289,6 +294,7 @@ export function applyOidc(app: Hono<any>, options: ApplyOidcOptions): void {
-   app.route('/userinfo', userinfoApp);
-   app.route('/introspect', introspectionApp);
-   app.route('/revoke', revocationApp);
-+  app.route('/par', parApp);
-   app.route('/.well-known/jwks.json', jwksApp);
-   app.route('/.well-known/openid-configuration', discoveryApp);
-   app.route('/login', loginApp);
-diff --git a/default-op/conformance.test.ts b/with-par/conformance.test.ts
-index 58258e6..2a12eca 100644
---- a/default-op/conformance.test.ts
-+++ b/with-par/conformance.test.ts
-@@ -9,6 +9,8 @@ import { accessTokenStore, authSessionStore, consentStore, createJsonProviderSto
- import { consentResolver } from './resolvers.js';
- import { defaultViews } from './views.js';
- import { renderView } from './views.js';
-+import { parStore } from './store.js';
-+import { parConfig } from './routes/par.js';
- 
- /**
-  * HTTP conformance smoke tests for the generated OpenID Connect Provider.
-@@ -2474,6 +2476,416 @@ describe('generated provider HTTP conformance', () => {
-   });
- 
- 
-+  // EXPERIMENTAL — Pushed Authorization Requests (RFC 9126). Generated because
-+  // this provider was created with --enable par. These tests pin the contract the
-+  // repository guarantees for the generated PAR endpoint: change the behavior and
-+  // they fail, which is how a customized OP learns it has drifted.
-+  describe('Pushed Authorization Requests (RFC 9126)', () => {
-+    // RFC 7636 Appendix B example PKCE pair (verifier -> its S256 challenge).
-+    const PKCE_VERIFIER = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
-+    const PKCE_CHALLENGE_S256 = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
-+    const REQUEST_URI_PREFIX = 'urn:ietf:params:oauth:request_uri:';
-+    const OPAQUE_FAILURE_DESCRIPTION =
-+      'The request_uri is invalid, expired, or has already been used';
-+
-+    // Pure helpers: they fetch and parse only. Every assertion lives in an it().
-+    function pushedRequestBody(overrides: Record<string, string> = {}): Record<string, string> {
-+      return {
-+        response_type: 'code',
-+        client_id: 'c-conf',
-+        client_secret: 's',
-+        redirect_uri: REDIRECT_URI,
-+        scope: 'openid',
-+        state: 'par-state',
-+        nonce: 'par-nonce',
-+        code_challenge: PKCE_CHALLENGE_S256,
-+        code_challenge_method: 'S256',
-+        ...overrides,
-+      };
-+    }
-+
-+    function pushRequest(body: Record<string, string>): Promise<Response> {
-+      return app.request('/par', {
-+        method: 'POST',
-+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-+        body: new URLSearchParams(body).toString(),
-+      });
-+    }
-+
-+    async function pushAndGetRequestUri(overrides: Record<string, string> = {}): Promise<string> {
-+      const res = await pushRequest(pushedRequestBody(overrides));
-+      const body = await res.json();
-+      return body.request_uri as string;
-+    }
-+
-+    function authorizeWithRequestUri(requestUri: string, clientId = 'c-conf'): Promise<Response> {
-+      return app.request(
-+        '/authorize?client_id=' + clientId + '&request_uri=' + encodeURIComponent(requestUri),
-+        { headers: { Accept: 'application/json' } },
-+      );
-+    }
-+
-+    function relativeFrom(location: string | null): string {
-+      const url = new URL(location ?? '', 'http://localhost');
-+      return url.pathname + url.search;
-+    }
-+
-+    function csrfFrom(html: string): string {
-+      return html.match(/name="csrf_token" value="([^"]+)"/)?.[1] ?? '';
-+    }
-+
-+    describe('Endpoint response', () => {
-+      it('should return 201 with a URN request_uri and the configured lifetime', async () => {
-+        // RFC 9126 §2.2: 201 Created, application/json, Cache-Control: no-cache, no-store.
-+        const res = await pushRequest(pushedRequestBody());
-+        const body = await res.json();
-+
-+        expect(res.status).toBe(201);
-+        expect(res.headers.get('Content-Type')).toBe('application/json');
-+        expect(res.headers.get('Cache-Control')).toBe('no-cache, no-store');
-+        expect(Object.keys(body).sort()).toEqual(['expires_in', 'request_uri']);
-+        expect(body.expires_in).toBe(60);
-+        expect((body.request_uri as string).startsWith(REQUEST_URI_PREFIX)).toBe(true);
-+        expect((body.request_uri as string).slice(REQUEST_URI_PREFIX.length)).toHaveLength(43);
-+      });
-+
-+      it('should issue a different request_uri for every pushed request', async () => {
-+        const first = await pushAndGetRequestUri();
-+        const second = await pushAndGetRequestUri();
-+
-+        expect(first === second).toBe(false);
-+      });
-+
-+      it('should reject a request that is not form-urlencoded', async () => {
-+        const res = await app.request('/par', {
-+          method: 'POST',
-+          headers: { 'Content-Type': 'application/json' },
-+          body: JSON.stringify(pushedRequestBody()),
-+        });
-+
-+        expect(res.status).toBe(400);
-+        expect(await res.json()).toEqual({
-+          error: 'invalid_request',
-+          error_description: 'Pushed authorization requests must use application/x-www-form-urlencoded',
-+        });
-+      });
-+
-+      it('should reject a GET on the PAR endpoint with 405', async () => {
-+        // RFC 9126 §2.3 lists 405 among the responses the endpoint may return.
-+        const res = await app.request('/par');
-+
-+        expect(res.status).toBe(405);
-+        expect(res.headers.get('Allow')).toBe('POST');
-+      });
-+    });
-+
-+    describe('Client authentication', () => {
-+      it('should reject an unauthenticated pushed request with 401 invalid_client', async () => {
-+        const body = pushedRequestBody();
-+        delete body.client_secret;
-+        const res = await pushRequest(body);
-+
-+        expect(res.status).toBe(401);
-+        expect(res.headers.get('WWW-Authenticate')).toBe('Basic realm="Client Authentication"');
-+        expect((await res.json()).error).toBe('invalid_client');
-+      });
-+
-+      it('should reject a wrong client_secret with 401 invalid_client', async () => {
-+        const res = await pushRequest(pushedRequestBody({ client_secret: 'wrong' }));
-+
-+        expect(res.status).toBe(401);
-+        expect((await res.json()).error).toBe('invalid_client');
-+      });
-+    });
-+
-+    describe('Pushed parameter validation', () => {
-+      it('should reject a request_uri inside the pushed body', async () => {
-+        // RFC 9126 §2.1: request_uri MUST NOT be provided in a pushed request.
-+        const res = await pushRequest(
-+          pushedRequestBody({ request_uri: REQUEST_URI_PREFIX + 'anything' }),
-+        );
-+
-+        expect(res.status).toBe(400);
-+        expect(await res.json()).toEqual({
-+          error: 'invalid_request',
-+          error_description: 'request_uri MUST NOT be included in a pushed authorization request',
-+        });
-+      });
-+
-+      it('should reject a request parameter because PAR with a Request Object is unsupported', async () => {
-+        const res = await pushRequest(pushedRequestBody({ request: 'eyJhbGciOiJSUzI1NiJ9.e30.s' }));
-+
-+        expect(res.status).toBe(400);
-+        expect(await res.json()).toEqual({
-+          error: 'invalid_request',
-+          error_description: 'The request parameter (Request Object) is not supported by this pushed authorization request endpoint',
-+        });
-+      });
-+
-+      it('should reject an unregistered redirect_uri before the user sees anything', async () => {
-+        // RFC 9126 §2.1: the pushed request is validated as an authorization request
-+        // would be — so this fails on the back channel, with no redirect.
-+        const res = await pushRequest(
-+          pushedRequestBody({ redirect_uri: 'http://attacker.example/cb' }),
-+        );
-+
-+        expect(res.status).toBe(400);
-+        expect(res.headers.get('Location')).toBe(null);
-+        expect((await res.json()).error).toBe('invalid_request');
-+      });
-+
-+      it('should reject a scope without openid as invalid_scope', async () => {
-+        const res = await pushRequest(pushedRequestBody({ scope: 'profile' }));
-+
-+        expect(res.status).toBe(400);
-+        expect((await res.json()).error).toBe('invalid_scope');
-+      });
-+    });
-+
-+    describe('Authorization endpoint resolution', () => {
-+      it('should complete the full PAR to token flow', async () => {
-+        const requestUri = await pushAndGetRequestUri();
-+
-+        const authorizeRes = await app.request(
-+          '/authorize?client_id=c-conf&request_uri=' + encodeURIComponent(requestUri),
-+        );
-+        const loginPath = relativeFrom(authorizeRes.headers.get('Location'));
-+        // Carry forward whatever cookie /authorize set, exactly as a browser would.
-+        // With --enable transaction-binding this is the per-transaction binding
-+        // secret the later steps require; without it this is '' and the OP ignores
-+        // it, so the same flow works in both builds.
-+        const bindingCookie = (authorizeRes.headers.get('Set-Cookie') ?? '').split(';')[0] ?? '';
-+        const transactionId =
-+          new URL(loginPath, 'http://localhost').searchParams.get('transaction_id') ?? '';
-+        const loginGet = await app.request(loginPath, { headers: { Cookie: bindingCookie } });
-+        const loginRes = await app.request('/login', {
-+          method: 'POST',
-+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-+          body: new URLSearchParams({
-+            transaction_id: transactionId,
-+            csrf_token: csrfFrom(await loginGet.text()),
-+            username: 'testuser',
-+            password: 'password',
-+          }).toString(),
-+        });
-+        const consentPath = relativeFrom(loginRes.headers.get('Location'));
-+        const consentGet = await app.request(consentPath, { headers: { Cookie: bindingCookie } });
-+        const consentRes = await app.request('/consent', {
-+          method: 'POST',
-+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-+          body: new URLSearchParams({
-+            transaction_id: transactionId,
-+            csrf_token: csrfFrom(await consentGet.text()),
-+            action: 'approve',
-+          }).toString(),
-+        });
-+        const callback = new URL(consentRes.headers.get('Location') ?? '', 'http://localhost');
-+
-+        expect(authorizeRes.status).toBe(302);
-+        expect(loginPath.startsWith('/login?')).toBe(true);
-+        expect(consentPath.startsWith('/consent?')).toBe(true);
-+        // The pushed state is what comes back, proving the stored parameters were used.
-+        expect(callback.searchParams.get('state')).toBe('par-state');
-+
-+        const tokenRes = await app.request('/token', {
-+          method: 'POST',
-+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-+          body: new URLSearchParams({
-+            grant_type: 'authorization_code',
-+            client_id: 'c-conf',
-+            client_secret: 's',
-+            code: callback.searchParams.get('code') ?? '',
-+            redirect_uri: REDIRECT_URI,
-+            code_verifier: PKCE_VERIFIER,
-+          }).toString(),
-+        });
-+        const tokenBody = await tokenRes.json();
-+
-+        expect(tokenRes.status).toBe(200);
-+        // The nonce pushed to /par is the one bound into the ID Token (OIDC Core §2).
-+        expect(idTokenPayload(tokenBody.id_token as string).nonce).toBe('par-nonce');
-+      });
-+
-+      it('should keep the pushed parameters authoritative over the query string', async () => {
-+        // RFC 9126 §4: the client sends only client_id and request_uri; anything else
-+        // in the query is ignored so it cannot tamper with the pushed request.
-+        const requestUri = await pushAndGetRequestUri();
-+
-+        const authorizeRes = await app.request(
-+          '/authorize?client_id=c-conf&scope=openid+admin&state=tampered&request_uri=' +
-+            encodeURIComponent(requestUri),
-+        );
-+        const loginPath = relativeFrom(authorizeRes.headers.get('Location'));
-+        // Carry forward whatever cookie /authorize set, exactly as a browser would.
-+        // With --enable transaction-binding this is the per-transaction binding
-+        // secret the later steps require; without it this is '' and the OP ignores
-+        // it, so the same flow works in both builds.
-+        const bindingCookie = (authorizeRes.headers.get('Set-Cookie') ?? '').split(';')[0] ?? '';
-+        const transactionId =
-+          new URL(loginPath, 'http://localhost').searchParams.get('transaction_id') ?? '';
-+        const loginGet = await app.request(loginPath, { headers: { Cookie: bindingCookie } });
-+        const loginRes = await app.request('/login', {
-+          method: 'POST',
-+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-+          body: new URLSearchParams({
-+            transaction_id: transactionId,
-+            csrf_token: csrfFrom(await loginGet.text()),
-+            username: 'testuser',
-+            password: 'password',
-+          }).toString(),
-+        });
-+        const consentPath = relativeFrom(loginRes.headers.get('Location'));
-+        const consentHtml = await (await app.request(consentPath, { headers: { Cookie: bindingCookie } })).text();
-+
-+        expect(authorizeRes.status).toBe(302);
-+        // The consent screen lists the pushed scope, not the tampered one.
-+        expect(consentHtml.includes('<li>admin</li>')).toBe(false);
-+      });
-+
-+      it('should reject the second use of the same request_uri', async () => {
-+        // RFC 9126 §7.3: single use. A browser reload of the authorize URL fails too;
-+        // that is the intended trade-off of not allowing the §4 duplicate-use MAY.
-+        const requestUri = await pushAndGetRequestUri();
-+        const first = await app.request(
-+          '/authorize?client_id=c-conf&request_uri=' + encodeURIComponent(requestUri),
-+        );
-+        const second = await authorizeWithRequestUri(requestUri);
-+
-+        expect(first.status).toBe(302);
-+        expect(second.status).toBe(400);
-+        expect(await second.json()).toEqual({
-+          error: 'invalid_request_uri',
-+          error_description: OPAQUE_FAILURE_DESCRIPTION,
-+        });
-+      });
-+
-+      it('should reject an expired request_uri', async () => {
-+        // RFC 9126 §4: "An expired request_uri MUST be rejected as invalid."
-+        const requestUri = REQUEST_URI_PREFIX + 'expired-conformance-reference';
-+        await parStore.save({
-+          requestUri,
-+          clientId: 'c-conf',
-+          params: pushedRequestBody({ client_secret: '' }),
-+          createdAt: new Date(Date.now() - 120_000),
-+          expiresAt: new Date(Date.now() - 60_000),
-+        });
-+
-+        const res = await authorizeWithRequestUri(requestUri);
-+
-+        expect(res.status).toBe(400);
-+        expect((await res.json()).error).toBe('invalid_request_uri');
-+      });
-+
-+      it('should reject a request_uri presented by a different client', async () => {
-+        // RFC 9126 §2.2: the request_uri MUST be bound to the client that pushed it.
-+        const requestUri = await pushAndGetRequestUri();
-+
-+        const res = await authorizeWithRequestUri(requestUri, 'c-public');
-+
-+        expect(res.status).toBe(400);
-+        expect((await res.json()).error).toBe('invalid_request_uri');
-+      });
-+
-+      it('should return the identical response for every resolution failure', async () => {
-+        // The response must not reveal whether a given request_uri ever existed.
-+        const consumed = await pushAndGetRequestUri();
-+        await app.request('/authorize?client_id=c-conf&request_uri=' + encodeURIComponent(consumed));
-+        const reused = await authorizeWithRequestUri(consumed);
-+        const unknown = await authorizeWithRequestUri(REQUEST_URI_PREFIX + 'never-issued');
-+        const stolen = await pushAndGetRequestUri();
-+        const mismatched = await authorizeWithRequestUri(stolen, 'c-public');
-+
-+        expect([reused.status, unknown.status, mismatched.status]).toEqual([400, 400, 400]);
-+        expect([await reused.json(), await unknown.json(), await mismatched.json()]).toEqual([
-+          { error: 'invalid_request_uri', error_description: OPAQUE_FAILURE_DESCRIPTION },
-+          { error: 'invalid_request_uri', error_description: OPAQUE_FAILURE_DESCRIPTION },
-+          { error: 'invalid_request_uri', error_description: OPAQUE_FAILURE_DESCRIPTION },
-+        ]);
-+      });
-+
-+      it('should never redirect a resolution failure to the client', async () => {
-+        // RFC 6749 §4.1.2.1: without a verified redirect_uri the OP MUST NOT redirect.
-+        const res = await authorizeWithRequestUri(REQUEST_URI_PREFIX + 'never-issued');
-+
-+        expect(res.status).toBe(400);
-+        expect(res.headers.get('Location')).toBe(null);
-+      });
-+
-+      it('should leave a URL-form request_uri to the core request_uri_not_supported path', async () => {
-+        // OIDC Core 1.0 §6.2 by-reference request objects stay unsupported.
-+        const res = await app.request(
-+          '/authorize?response_type=code&client_id=c-conf' +
-+            '&redirect_uri=' + encodeURIComponent(REDIRECT_URI) +
-+            '&scope=openid&state=url-form' +
-+            '&code_challenge=' + PKCE_CHALLENGE_S256 + '&code_challenge_method=S256' +
-+            '&request_uri=' + encodeURIComponent('https://client.example/request.jwt'),
-+        );
-+        const location = new URL(res.headers.get('Location') ?? '', 'http://localhost');
-+
-+        expect(res.status).toBe(302);
-+        expect(location.searchParams.get('error')).toBe('request_uri_not_supported');
-+      });
-+    });
-+
-+    describe('Provider metadata and PAR enforcement', () => {
-+      it('should advertise the pushed_authorization_request_endpoint', async () => {
-+        // RFC 9126 §5.
-+        const res = await app.request('/.well-known/openid-configuration');
-+        const metadata = await res.json();
-+
-+        expect(metadata.pushed_authorization_request_endpoint).toBe(
-+          'http://localhost:3000/par',
-+        );
-+      });
-+
-+      it('should not advertise require_pushed_authorization_requests while PAR is optional', async () => {
-+        const metadata = await (await app.request('/.well-known/openid-configuration')).json();
-+
-+        expect(metadata.require_pushed_authorization_requests).toBe(undefined);
-+      });
-+
-+      it('should advertise require_pushed_authorization_requests when PAR is enforced', async () => {
-+        parConfig.requirePushedAuthorizationRequests = true;
-+        const metadata = await (await app.request('/.well-known/openid-configuration')).json();
-+        parConfig.requirePushedAuthorizationRequests = false;
-+
-+        expect(metadata.require_pushed_authorization_requests).toBe(true);
-+      });
-+
-+      it('should reject a non-pushed authorization request when PAR is enforced', async () => {
-+        // RFC 9126 §5. The rejection is non-redirect, like every other PAR failure.
-+        parConfig.requirePushedAuthorizationRequests = true;
-+        const res = await app.request(
-+          '/authorize?response_type=code&client_id=c-conf' +
-+            '&redirect_uri=' + encodeURIComponent(REDIRECT_URI) +
-+            '&scope=openid&state=no-par' +
-+            '&code_challenge=' + PKCE_CHALLENGE_S256 + '&code_challenge_method=S256',
-+          { headers: { Accept: 'application/json' } },
-+        );
-+        const body = await res.json();
-+        parConfig.requirePushedAuthorizationRequests = false;
-+
-+        expect(res.status).toBe(400);
-+        expect(res.headers.get('Location')).toBe(null);
-+        expect(body).toEqual({
-+          error: 'invalid_request',
-+          error_description: 'Pushed authorization requests are required by this authorization server',
-+        });
-+      });
-+
-+      it('should still accept a pushed request while PAR is enforced', async () => {
-+        parConfig.requirePushedAuthorizationRequests = true;
-+        const requestUri = await pushAndGetRequestUri();
-+        const res = await app.request(
-+          '/authorize?client_id=c-conf&request_uri=' + encodeURIComponent(requestUri),
-+        );
-+        parConfig.requirePushedAuthorizationRequests = false;
-+
-+        expect(res.status).toBe(302);
-+      });
-+    });
-+  });
-+
-   // The device authorization grant is disabled in this generated provider: no
-   // endpoint, no metadata, and the URN stays an unsupported grant. These pin the
-   // default-off contract so enabling the feature by accident is visible.
-diff --git a/default-op/routes/authorize.ts b/with-par/routes/authorize.ts
-index a3ffab2..cfa29de 100644
---- a/default-op/routes/authorize.ts
-+++ b/with-par/routes/authorize.ts
-@@ -37,6 +37,13 @@ import {
-   authSessionStore as defaultAuthSessionStore,
- } from '../store.js';
- import { defaultViews, renderView } from '../views.js';
-+import {
-+  PushedRequestUriError,
-+  assertPushedRequestUsed,
-+  resolvePushedRequestUri,
-+} from '@maronn-openid-connect/experimental/par';
-+import { parConfig } from './par.js';
-+import { parStore as defaultParStore } from '../store.js';
- 
- export const authorizeApp = new Hono<{ Variables: Record<string, any> }>();
- 
-@@ -147,9 +154,31 @@ const handleAuthorizationRequest = async (c: any) => {
-     return c.json({ error: 'invalid_request', error_description: 'Missing required parameter: client_id' }, 400);
-   }
- 
--  const params = rawParams;
-+  let params = rawParams;
- 
-   try {
-+    // EXPERIMENTAL — Pushed Authorization Requests (RFC 9126 §4).
-+    const parStore = c.get('parStore') ?? defaultParStore;
-+    // RFC 9126 §5: when require_pushed_authorization_requests is on, an
-+    // authorization request that did not go through /par is rejected outright.
-+    if (parConfig.requirePushedAuthorizationRequests) {
-+      assertPushedRequestUsed(rawParams);
-+    }
-+    // Expand a request_uri of the form urn:ietf:params:oauth:request_uri:<ref> into
-+    // the parameters pushed to /par. The reference is single use and short lived,
-+    // so a reload of this URL fails with invalid_request_uri by design.
-+    // Anything that is not a URN (absent, or an OIDC Core §6.2 URL) returns null
-+    // and is left to the normal pipeline, which rejects it with
-+    // request_uri_not_supported.
-+    const pushedParams = await resolvePushedRequestUri({ params: rawParams, store: parStore });
-+    if (pushedParams !== null) {
-+      if (!isAuthorizationRequestParams(pushedParams)) {
-+        // Defensive: client_id was validated when the request was pushed.
-+        throw new PushedRequestUriError('invalid_request_uri', 'The request_uri is invalid, expired, or has already been used');
-+      }
-+      params = pushedParams;
-+    }
-+
-     const clientResolver = c.get('clientResolver') ?? defaultClientResolver;
-     const transactionStore = c.get('transactionStore') ?? defaultTransactionStore;
-     const authCodeStore = c.get('authCodeStore') ?? defaultAuthCodeStore;
-@@ -501,6 +530,35 @@ const handleAuthorizationRequest = async (c: any) => {
-     loginUrl.searchParams.set('transaction_id', transactionId);
-     return c.redirect(loginUrl.toString());
-   } catch (error) {
-+    if (error instanceof PushedRequestUriError) {
-+      // RFC 9126 §4 / OIDC Core 1.0 §3.1.2.6: a request_uri that cannot be
-+      // resolved leaves us without a verified redirect_uri, so this error is
-+      // NEVER redirected (RFC 6749 §4.1.2.1). It is rendered through the same
-+      // non-redirect path as AuthorizationError below. Every failure kind
-+      // (unknown / used / expired / wrong client) returns the identical code and
-+      // description so the response cannot be used as an existence oracle.
-+      const acceptsJson = (c.req.header('Accept') ?? '').includes('application/json');
-+      if (acceptsJson) {
-+        return c.json({ error: error.code, error_description: error.errorDescription }, 400);
-+      }
-+      const parErrorPagePath = c.get('config').authorizationErrorRedirectPath;
-+      if (parErrorPagePath && parErrorPagePath.startsWith('/') && !parErrorPagePath.startsWith('//')) {
-+        const parErrorParams = new URLSearchParams({
-+          error: error.code,
-+          error_description: error.errorDescription,
-+        });
-+        return c.redirect(`${parErrorPagePath}?${parErrorParams.toString()}`, 303);
-+      }
-+      const parViews = c.get('views') ?? defaultViews;
-+      return renderView(
-+        parViews.errorPage({
-+          error: error.code,
-+          errorDescription: error.errorDescription,
-+          statusCode: 400,
-+        }),
-+        { status: 400 },
-+      );
-+    }
-     if (error instanceof AuthorizationError) {
-       if (error.redirectUri) {
-         const redirectUrl = new URL(error.redirectUri);
-diff --git a/default-op/routes/discovery.ts b/with-par/routes/discovery.ts
-index 72c0758..364ac2a 100644
---- a/default-op/routes/discovery.ts
-+++ b/with-par/routes/discovery.ts
-@@ -1,6 +1,7 @@
- import { Hono } from 'hono';
- import { buildProviderMetadata, getJwaAlgorithm, type SigningKey } from '@maronn-openid-connect/core';
- import { defaultProviderConfig } from '../config.js';
-+import { parConfig } from './par.js';
- 
- export const discoveryApp = new Hono<{ Variables: Record<string, any> }>();
- 
-@@ -144,5 +145,11 @@ discoveryApp.get('/', (c) => {
-   return c.json({
-     ...metadata,
-     code_challenge_methods_supported: ['S256'],
-+    // EXPERIMENTAL — RFC 9126 §5 metadata. require_pushed_authorization_requests
-+    // is only advertised when PAR is actually enforced (its default is false).
-+    pushed_authorization_request_endpoint: `${issuer}/par`,
-+    ...(parConfig.requirePushedAuthorizationRequests
-+      ? { require_pushed_authorization_requests: true }
-+      : {}),
-   });
- });
-diff --git a/with-par/routes/par.ts b/with-par/routes/par.ts
-new file mode 100644
-index 0000000..0369ff8
---- /dev/null
-+++ b/with-par/routes/par.ts
-@@ -0,0 +1,157 @@
-+/**
-+ * EXPERIMENTAL — Pushed Authorization Requests (RFC 9126).
-+ *
-+ * This route was generated because the OP was created with `--enable par`.
-+ * It is backed by @maronn-openid-connect/experimental, whose API is NOT stable: it may
-+ * change in a breaking way between releases. Do not build production code on it
-+ * without pinning the version.
-+ *
-+ * The client POSTs the authorization request parameters here (back channel,
-+ * authenticated) and receives a short-lived `request_uri` reference that it
-+ * then passes to /authorize.
-+ */
-+import { Hono } from 'hono';
-+import {
-+  ParError,
-+  assertParExpiresInSeconds,
-+  authenticateParClient,
-+  buildPushedAuthorizationResponse,
-+  createPushedAuthorizationRecord,
-+  rejectForbiddenParParams,
-+  validatePushedAuthorizationParams,
-+} from '@maronn-openid-connect/experimental/par';
-+import { sanitizeErrorDescription } from '@maronn-openid-connect/core';
-+import { clientResolver as defaultClientResolver } from '../resolvers.js';
-+import { parStore as defaultParStore } from '../store.js';
-+
-+/**
-+ * PAR settings. Imported by the authorize route, so keep both files in sync when
-+ * changing them.
-+ *
-+ * - expiresInSeconds: request_uri lifetime. RFC 9126 §2.2 recommends 5–600
-+ *   seconds; values outside that range fail fast at module load.
-+ * - requirePushedAuthorizationRequests: RFC 9126 §5. When true, /authorize
-+ *   rejects any request that did not go through this endpoint, and discovery
-+ *   advertises require_pushed_authorization_requests: true.
-+ */
-+export const parConfig = {
-+  expiresInSeconds: 60,
-+  requirePushedAuthorizationRequests: false,
-+};
-+
-+assertParExpiresInSeconds(parConfig.expiresInSeconds);
-+
-+export const parApp = new Hono<{ Variables: Record<string, any> }>();
-+
-+/**
-+ * RFC 9126 §2.1: the pushed authorization request body MUST be
-+ * application/x-www-form-urlencoded.
-+ */
-+function isFormUrlEncoded(contentType: string): boolean {
-+  const [mediaType = ''] = contentType.toLowerCase().split(';');
-+  return mediaType.trim() === 'application/x-www-form-urlencoded';
-+}
-+
-+/**
-+ * Pushed Authorization Request Endpoint
-+ * RFC 9126 §2
-+ *
-+ * NOTE (RFC 9126 §2.3): request size limits (413) and rate limiting (429) are
-+ * deliberately left to the deployment layer (reverse proxy / platform), not
-+ * implemented here. This endpoint is unauthenticated until the client
-+ * credentials are checked, so put a rate limit in front of it in production.
-+ */
-+parApp.post('/', async (c) => {
-+  const contentType = c.req.header('Content-Type') ?? '';
-+  if (!isFormUrlEncoded(contentType)) {
-+    c.header('Cache-Control', 'no-cache, no-store');
-+    c.header('Pragma', 'no-cache');
-+    return c.json({ error: 'invalid_request', error_description: 'Pushed authorization requests must use application/x-www-form-urlencoded' }, 400);
-+  }
-+
-+  // RFC 6749 §3.1: request parameters MUST NOT be repeated. Read the raw body so
-+  // URLSearchParams iteration exposes duplicates instead of silently keeping the last.
-+  const rawBody = await c.req.text();
-+  const params: Record<string, string> = {};
-+  const seen = new Set<string>();
-+  let duplicateKey: string | undefined;
-+  for (const [key, value] of new URLSearchParams(rawBody)) {
-+    if (seen.has(key)) {
-+      duplicateKey = key;
-+      break;
-+    }
-+    seen.add(key);
-+    params[key] = value;
-+  }
-+
-+  if (duplicateKey !== undefined) {
-+    c.header('Cache-Control', 'no-cache, no-store');
-+    c.header('Pragma', 'no-cache');
-+    return c.json({ error: 'invalid_request', error_description: `Parameter "${sanitizeErrorDescription(duplicateKey)}" must not be repeated` }, 400);
-+  }
-+
-+  const authorization = c.req.header('Authorization') ?? '';
-+
-+  try {
-+    const clientResolver = c.get('clientResolver') ?? defaultClientResolver;
-+    const parStore = c.get('parStore') ?? defaultParStore;
-+    const config = c.get('config');
-+
-+    // --- Pushed authorization request pipeline ------------------------------
-+    // Each step below is an independent function from @maronn-openid-connect/experimental/par,
-+    // called in RFC 9126 §2.1 order. Delete a call to drop that validation, or
-+    // insert your own logic between steps.
-+
-+    // RFC 9126 §2.1: request_uri MUST NOT be pushed. The request parameter
-+    // (PAR + JAR, §3) is not supported by this generated provider.
-+    rejectForbiddenParParams(params);
-+
-+    // RFC 9126 §2.1: authenticate exactly like the token endpoint does.
-+    // Public clients present only client_id (no credentials).
-+    const clientId = await authenticateParClient({
-+      params,
-+      authorizationHeader: authorization,
-+      clientResolver,
-+    });
-+
-+    // client_id is a required authorization request parameter (RFC 9126 §2.1),
-+    // so pin it to the authenticated client before validating and storing.
-+    const pushedParams = { ...params, client_id: clientId };
-+
-+    // RFC 9126 §2.1: "validate the request the same way the authorization
-+    // endpoint would" — an unregistered redirect_uri or a bad scope fails here,
-+    // before the user ever sees a screen.
-+    await validatePushedAuthorizationParams(pushedParams, clientResolver, {
-+      allowNonPkceAuthorizationCodeFlow: config.allowNonPkceAuthorizationCodeFlow,
-+    });
-+
-+    // RFC 9126 §2.2 / §7.1: mint a cryptographically random reference value and
-+    // store the request under it. Client credentials are never persisted.
-+    const record = await createPushedAuthorizationRecord({
-+      clientId,
-+      params: pushedParams,
-+      store: parStore,
-+      expiresInSeconds: parConfig.expiresInSeconds,
-+    });
-+    const response = buildPushedAuthorizationResponse(record);
-+
-+    // Never log the pushed parameters themselves: they can carry PII such as
-+    // login_hint, and the Authorization header carries the client_secret.
-+
-+    // RFC 9126 §2.2: 201 Created with a non-cacheable JSON body.
-+    c.header('Cache-Control', 'no-cache, no-store');
-+    c.header('Pragma', 'no-cache');
-+    return c.json({ request_uri: response.requestUri, expires_in: response.expiresIn }, 201);
-+  } catch (error) {
-+    c.header('Cache-Control', 'no-cache, no-store');
-+    c.header('Pragma', 'no-cache');
-+    if (error instanceof ParError) {
-+      // RFC 9126 §2.3: token-endpoint style JSON errors. This endpoint never redirects.
-+      if (error.wwwAuthenticate) {
-+        c.header('WWW-Authenticate', error.wwwAuthenticate);
-+      }
-+      return c.json({ error: error.code, error_description: error.errorDescription }, error.statusCode);
-+    }
-+    return c.json({ error: 'server_error' }, 500);
-+  }
-+});
-diff --git a/default-op/store.ts b/with-par/store.ts
-index e530896..ef42ec2 100644
---- a/default-op/store.ts
-+++ b/with-par/store.ts
-@@ -6,6 +6,10 @@ import type {
-   RefreshTokenInfo,
-   UserClaims,
- } from '@maronn-openid-connect/core';
-+import type {
-+  PushedAuthorizationRecord,
-+  PushedAuthorizationRequestStore,
-+} from '@maronn-openid-connect/experimental/par';
- 
- /**
-  * In-memory Authorization Transaction Store.
-@@ -823,3 +827,58 @@ export const authSessionStore = defaultProviderStores.authSessionStore;
- export const browserSessionStore = defaultProviderStores.browserSessionStore;
- export const consentStore = defaultProviderStores.consentStore;
- export const userStore = defaultProviderStores.userStore;
-+
-+/**
-+ * EXPERIMENTAL — in-memory Pushed Authorization Request store (RFC 9126).
-+ *
-+ * Replace with a persistent store (Redis, KV, database) in production. The
-+ * contract is only two methods:
-+ *
-+ * - save(record): persist the pushed request, ideally with a TTL matching
-+ *   record.expiresAt so entries cannot pile up (RFC 9126 §7.3).
-+ * - consume(requestUri): fetch AND delete in one atomic operation. A
-+ *   non-atomic implementation lets the same request_uri be replayed
-+ *   concurrently. Treat requestUri as an opaque external value: never
-+ *   interpolate it into a query, always bind it as a parameter.
-+ */
-+export class InMemoryPushedAuthorizationRequestStore
-+  implements PushedAuthorizationRequestStore
-+{
-+  private records = new Map<string, PushedAuthorizationRecord>();
-+
-+  async save(record: PushedAuthorizationRecord): Promise<void> {
-+    this.records.set(record.requestUri, record);
-+  }
-+
-+  async consume(requestUri: string): Promise<PushedAuthorizationRecord | null> {
-+    const record = this.records.get(requestUri);
-+    // Single use (RFC 9126 §7.3): delete on read, expired or not, so a replay of
-+    // the same reference can never succeed.
-+    this.records.delete(requestUri);
-+    if (!record) {
-+      this.evictExpired();
-+      return null;
-+    }
-+    return record;
-+  }
-+
-+  /** Drop entries whose lifetime has passed so an idle store cannot grow unbounded. */
-+  private evictExpired(): void {
-+    const now = Date.now();
-+    for (const [requestUri, record] of this.records) {
-+      if (record.expiresAt.getTime() < now) {
-+        this.records.delete(requestUri);
-+      }
-+    }
-+  }
-+}
-+
-+// Kept on globalThis for the same reason as the provider stores above: Next.js
-+// instantiates route handlers and server actions in separate module layers.
-+const parStoreRegistry = globalThis as typeof globalThis & {
-+  __oidcPushedAuthorizationRequestStore?: PushedAuthorizationRequestStore;
-+};
-+
-+export const parStore: PushedAuthorizationRequestStore =
-+  (parStoreRegistry.__oidcPushedAuthorizationRequestStore ??=
-+    new InMemoryPushedAuthorizationRequestStore());
+第一に、`request_uri` の展開を所有者付きブロックにしたのは、置く位置に意味があるからである。
+クライアントの解決、Request Object の検証、`redirect_uri` の確定、パラメータの検証は、どれも展開後のパラメータを読まなければならない。
+そのため展開は `[parse-request]` の直後、`[resolve-client]` より前に置く必要があり、フックのような宣言的な値ではこの位置を表せない。
+ブロックとして置いたステップは `maronn-oidc graph` の図に箱として現れ、メタ情報が `removable: false` なので、`--flow` のフロー文書で PAR を残したままこのステップだけを外すことはできない。
 
-````
+第二に、`parStore` は base のストア（`store.ts` の `ProviderStores`）に加えず、機能のディレクトリに置いて `context` フックでリクエストコンテキストへ入れている。
+PAR エンドポイントの `store-request` ステップと、認可エンドポイントの `resolve-pushed-request` ステップは、どちらも `c.get('parStore')` で同じストアを読む。
+base はこの名前を知らないので、PAR を外して生成すればストアの型もインスタンスもディレクトリごと消え、base に使われない項目が残らない。
+その代わり、`--db` で選んだデータベースにはこのストアが入らない。
+既定の実装はプロセス内の Map なので、複数のインスタンスで動かす本番環境では `features/par/store.ts` を永続ストアの実装に差し替える。
 
-### 他フレームワークの差分
+第三に、設定は `features/par/config.ts` の `parConfig` にまとめ、モジュール読み込み時に `assertParExpiresInSeconds` で検証する。
+`request_uri` の有効期間が §2.2 の推奨レンジ（5〜600 秒）を外れていれば、OP はリクエストを受ける前の読み込みの時点で失敗する。
+`requirePushedAuthorizationRequests` の既定は `false` で、PAR を通らない認可リクエストも従来どおり受け付ける。
+`true` にすると、`resolve-pushed-request` ステップが PAR 使用ガードを通し、discovery も `require_pushed_authorization_requests: true` を広告する。
 
-express / fastify / nextjs にも同等の差分が入る（ルーティングの書き方だけがフレームワークに合わせて変わる）。
-全文は昇格レビューパケットにある。
+サンプルでこの機能を有効にしているのは [samples/hono-cloudflare](../../../samples/hono-cloudflare) だけである。
+他の機能と組み合わせた生成結果は、そのサンプルの `src/oidc-provider/` で確認できる。
+サンプルの `src/app.ts` は PAR の設定に手を加えず、生成された既定値のまま動かしている。
 
-- [express](../../../tasks/experimental/done/par/promotion-review/generated-code/express.md)
-- [fastify](../../../tasks/experimental/done/par/promotion-review/generated-code/fastify.md)
-- [nextjs](../../../tasks/experimental/done/par/promotion-review/generated-code/nextjs.md)
+### 生成コードに入るコードの全文（hono）
 
-サンプルでこの機能を有効にしているのは [samples/hono-cloudflare](../../../samples/hono-cloudflare) だけで、他機能と併用した合成結果はそのソースと conformance.test.ts で確認できる。
+以下は、デフォルトの機能に `--enable par` を加えて hono 向けに生成した結果のうち、PAR が加えるもののすべてである。
+`features/enabled.ts` と認可エンドポイントのパイプラインについては加わる行とブロックを、`features/par/` についてはファイルの全文を、生成されたファイルからそのまま写している。
+
+#### `features/enabled.ts` に入る行
+
+`features/enabled.ts` は、この OP が持つ機能の一覧である。
+CLI は有効な機能ごとに import 行を 1 行と、配列 `features` の項目を 1 つ書く。
+配列の順序はフックを適用する順序で、PAR は既定の機能（`pkce` から `request-object` まで）の後ろに並ぶ。
+
+```typescript
+import { par } from './par/feature.js';
+```
+
+```typescript
+  par,
+```
+
+#### `endpoints/authorize/pipeline.ts` の `(feature: par)` ブロック
+
+認可エンドポイントのパイプラインは、ファイル先頭で、ブロックが呼ぶ PAR のステップを import する。
+
+```typescript
+import { resolvePushedAuthorizationRequest } from '../../features/par/steps/resolve-pushed-request.js';
+```
+
+ブロックは `[parse-request]` ブロックの直後、`[resolve-client]` ブロックの直前で動く。
+`parse-request` が作った `params` を `resolvePushedAuthorizationRequest()` に渡し、URN 形式の `request_uri` であれば pushed パラメータに置き換える。
+URN でなければ `params` はそのまま返るので、PAR を使わない認可リクエストは従来どおり進む。
+
+```typescript
+    // [resolve-pushed-request] (feature: par) Expand the pushed request_uri — RFC 9126 §4 / §5
+    params = await resolvePushedAuthorizationRequest(c, params);
+```
+
+#### `features/par/feature.ts`
+
+PAR が base に差し込むものを宣言するファイルで、`features/enabled.ts` が import するのはこのファイルである。
+`routes` は `/par` に `parApp` をマウントさせ、POST 以外のメソッドを 405 で拒否させ、トークンエンドポイントと同じ protected の CORS を適用させる。
+`discovery` は RFC 9126 §5 のメタデータを返し、`require_pushed_authorization_requests` は PAR を強制しているときだけ広告する（省略時の既定値が `false` だから）。
+`context` は `parStore` をリクエストコンテキストへ入れ、PAR エンドポイントと認可エンドポイントのステップが同じストアを読めるようにする。
+
+```typescript
+import { defineFeature } from '../feature.js';
+import { parConfig } from './config.js';
+import { parApp } from './endpoints/par/pipeline.js';
+import { parStore } from './store.js';
+
+/**
+ * EXPERIMENTAL — Pushed Authorization Requests (RFC 9126): POST /par, and the
+ * resolve-pushed-request block of endpoints/authorize/pipeline.ts, which
+ * expands a URN request_uri into the pushed parameters. Settings are in
+ * config.ts.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
+ * may change in a breaking way between releases.
+ */
+export const par = defineFeature({
+  id: 'par',
+  routes: [{ path: '/par', app: parApp, methods: ['POST'], cors: 'protected' }],
+  // RFC 9126 §5 metadata. require_pushed_authorization_requests is only
+  // advertised when PAR is actually enforced (its default is false).
+  discovery: (issuer) => ({
+    pushed_authorization_request_endpoint: `${issuer}/par`,
+    ...(parConfig.requirePushedAuthorizationRequests ? { require_pushed_authorization_requests: true } : {}),
+  }),
+  context: { parStore },
+});
+```
+
+#### `features/par/config.ts`
+
+PAR の設定で、`store-request` ステップ、`resolve-pushed-request` ステップ、`feature.ts` の `discovery` フックが読む。
+`expiresInSeconds` は `request_uri` の有効期間で、末尾の `assertParExpiresInSeconds` が §2.2 の推奨レンジを外れた値をモジュール読み込み時に拒否する。
+`requirePushedAuthorizationRequests` は §5 の強制スイッチで、既定は `false` である。
+どちらも `createApp()` のオプションには含まれないので、変えるときはこのファイルの値を書き換える。
+
+```typescript
+import { assertParExpiresInSeconds } from '@maronn-openid-connect/experimental/par';
+
+/**
+ * PAR settings, read by the par endpoint and the resolve-pushed-request step
+ * of the authorization endpoint.
+ *
+ * - expiresInSeconds: request_uri lifetime. RFC 9126 §2.2 recommends 5–600
+ *   seconds; values outside that range fail fast at module load.
+ * - requirePushedAuthorizationRequests: RFC 9126 §5. When true, /authorize
+ *   rejects any request that did not go through this endpoint, and discovery
+ *   advertises require_pushed_authorization_requests: true.
+ */
+export const parConfig = {
+  expiresInSeconds: 60,
+  requirePushedAuthorizationRequests: false,
+};
+
+assertParExpiresInSeconds(parConfig.expiresInSeconds);
+```
+
+#### `features/par/store.ts`
+
+`request_uri` の保存先で、experimental の `PushedAuthorizationRequestStore` 契約を満たすメモリ上の実装と、そのインスタンス `parStore` を置く。
+`consume` は読み出しと削除を一度に行い、期限切れかどうかに関わらず記録を消すので、同じ参照値を二度目に提示しても展開されない（§7.3 の単回使用）。
+インスタンスを `globalThis` に置くのは、開発時のホットリロードなどでモジュールが二度読み込まれても、push を受けたステップと展開するステップが同じストアを見るためである。
+記録はプロセスの外に残らないので、本番では `save` と `consume` の 2 メソッドを Redis、KV、データベースなどで実装し直す。
+そのとき `consume` は取得と削除を atomic に行わなければならず、`requestUri` はクエリに埋め込まずパラメータとして束縛する。
+
+```typescript
+import type {
+  PushedAuthorizationRecord,
+  PushedAuthorizationRequestStore,
+} from '@maronn-openid-connect/experimental/par';
+
+/**
+ * EXPERIMENTAL — in-memory Pushed Authorization Request store (RFC 9126).
+ *
+ * Replace with a persistent store (Redis, KV, database) in production. The
+ * contract is only two methods:
+ *
+ * - save(record): persist the pushed request, ideally with a TTL matching
+ *   record.expiresAt so entries cannot pile up (RFC 9126 §7.3).
+ * - consume(requestUri): fetch AND delete in one atomic operation. A
+ *   non-atomic implementation lets the same request_uri be replayed
+ *   concurrently. Treat requestUri as an opaque external value: never
+ *   interpolate it into a query, always bind it as a parameter.
+ */
+export class InMemoryPushedAuthorizationRequestStore
+  implements PushedAuthorizationRequestStore
+{
+  private records = new Map<string, PushedAuthorizationRecord>();
+
+  async save(record: PushedAuthorizationRecord): Promise<void> {
+    this.records.set(record.requestUri, record);
+  }
+
+  async consume(requestUri: string): Promise<PushedAuthorizationRecord | null> {
+    const record = this.records.get(requestUri);
+    // Single use (RFC 9126 §7.3): delete on read, expired or not, so a replay of
+    // the same reference can never succeed.
+    this.records.delete(requestUri);
+    if (!record) {
+      this.evictExpired();
+      return null;
+    }
+    return record;
+  }
+
+  /** Drop entries whose lifetime has passed so an idle store cannot grow unbounded. */
+  private evictExpired(): void {
+    const now = Date.now();
+    for (const [requestUri, record] of this.records) {
+      if (record.expiresAt.getTime() < now) {
+        this.records.delete(requestUri);
+      }
+    }
+  }
+}
+
+// Kept on globalThis so every module that asks for the store gets the same one,
+// also where a framework loads a module more than once (dev-mode hot reloads,
+// separate module layers).
+const parStoreRegistry = globalThis as typeof globalThis & {
+  __oidcPushedAuthorizationRequestStore?: PushedAuthorizationRequestStore;
+};
+
+export const parStore: PushedAuthorizationRequestStore =
+  (parStoreRegistry.__oidcPushedAuthorizationRequestStore ??=
+    new InMemoryPushedAuthorizationRequestStore());
+```
+
+#### `features/par/endpoints/par/pipeline.ts`
+
+`POST /par` のハンドラで、PAR エンドポイントのステップを仕様の順に呼ぶ。
+各ブロックは `maronn-oidc graph --detail steps --endpoint par` の図の箱 1 つに対応し、どのステップが投げた失敗も `respondParError()` が OAuth のエラー応答にする。
+ヘッダコメントにあるとおり、§2.3 の 413（リクエストが大きすぎる）と 429（レート制限）は実装せず、リバースプロキシやプラットフォームに任せている。
+クライアント認証が済むまでは誰でも呼べるエンドポイントなので、本番ではレート制限を前に置く。
+
+```typescript
+import { Hono } from 'hono';
+import { authenticatePushingClient } from './steps/authenticate-client.js';
+import { parsePushedAuthorizationRequest } from './steps/parse-request.js';
+import { respondParError } from './steps/respond-error.js';
+import { respondPar } from './steps/respond.js';
+import { storePushedRequest } from './steps/store-request.js';
+import { validatePushedRequest } from './steps/validate-request.js';
+
+/**
+ * EXPERIMENTAL — Pushed Authorization Requests (RFC 9126).
+ *
+ * This endpoint was generated because the OP was created with `--enable par`.
+ * It is backed by @maronn-openid-connect/experimental, whose API is NOT stable: it may
+ * change in a breaking way between releases. Do not build production code on it
+ * without pinning the version.
+ *
+ * The client POSTs the authorization request parameters here (back channel,
+ * authenticated) and receives a short-lived `request_uri` reference that it
+ * then passes to /authorize. Each block below calls one step (one box of
+ * `maronn-oidc graph --detail steps --endpoint par`).
+ *
+ * NOTE (RFC 9126 §2.3): request size limits (413) and rate limiting (429) are
+ * deliberately left to the deployment layer (reverse proxy / platform), not
+ * implemented here. This endpoint is unauthenticated until the client
+ * credentials are checked, so put a rate limit in front of it in production.
+ */
+export const parApp = new Hono<{ Variables: Record<string, any> }>();
+
+parApp.post('/', async (c) => {
+  try {
+    // [parse-request] Parse the pushed authorization request — RFC 9126 §2.1 / RFC 6749 §3.1
+    const { params, authorization } = await parsePushedAuthorizationRequest(c);
+
+    // [authenticate-client] Authenticate the pushing client — RFC 9126 §2.1
+    const { clientId, pushedParams } = await authenticatePushingClient(c, params, authorization);
+
+    // [validate-request] Validate the request as /authorize would — RFC 9126 §2.1
+    await validatePushedRequest(c, pushedParams);
+
+    // [store-request] Store the request under a fresh request_uri — RFC 9126 §2.2 / §7.1
+    const parResponse = await storePushedRequest(c, clientId, pushedParams);
+
+    // [respond] Respond 201 (no-store) — RFC 9126 §2.2
+    return respondPar(c, parResponse);
+  } catch (error) {
+    return respondParError(c, error);
+  }
+});
+```
+
+#### `features/par/endpoints/par/endpoint.ts`
+
+PAR エンドポイントのメタ情報で、`maronn-oidc graph` はこれを読んで図を描く。
+`steps` がステップの順序、`errorStep` が失敗したときに行き着くステップ、`journeys` が `/par` から `/authorize` へ `request_uri` を運ぶ矢印を表す。
+`rearrangeable: true` なので、`--flow` のフロー文書でステップを並べ替えられる。
+
+```typescript
+import { defineEndpoint } from '../../../../endpoints/step.js';
+
+/** EXPERIMENTAL — the pushed authorization request endpoint. RFC 9126 §2 */
+export const endpoint = defineEndpoint({
+  id: 'par',
+  order: 110,
+  label: 'Pushed authorization request endpoint',
+  path: '/par',
+  methods: ['POST'],
+  layer: 'api',
+  group: { id: 'pushed-authorization', label: 'Pushed Authorization Requests (RFC 9126)' },
+  spec: 'RFC 9126 §2',
+  feature: 'par',
+  rearrangeable: true,
+  steps: [
+    'parse-request',
+    'authenticate-client',
+    'validate-request',
+    'store-request',
+    'respond',
+    'respond-error',
+  ],
+  errorStep: 'respond-error',
+  edges: {
+    chain: true,
+  },
+  journeys: [
+    { from: 'par', to: 'authorize', label: 'request_uri', kind: 'flow', order: 10 },
+  ],
+});
+```
+
+#### `features/par/endpoints/par/response.ts`
+
+PAR エンドポイントの応答の形 `ParEndpointResponse` と、決まった応答で失敗を返すための例外 `ParEndpointError` を定義する。
+experimental の `ParError` が RFC 9126 の検証の失敗を表すのに対し、`ParEndpointError` は生成コードの側で決める失敗（Content-Type の誤りやパラメータの重複）を表す。
+
+```typescript
+/**
+ * What the pushed authorization request endpoint answers, and the failure a
+ * step answers with a fixed response.
+ */
+
+/** What the pushed authorization request endpoint answers; respondPar() turns it into HTTP. */
+export interface ParEndpointResponse {
+  status: number;
+  body: object;
+  headers?: Record<string, string>;
+}
+
+/** A failure a step answers with a fixed response (a malformed request). */
+export class ParEndpointError extends Error {
+  constructor(readonly response: ParEndpointResponse) {
+    const details = (response.body ?? {}) as { error?: unknown; error_description?: unknown };
+    super(String(details.error_description ?? details.error ?? 'pushed authorization request endpoint error'));
+    this.name = 'ParEndpointError';
+  }
+}
+```
+
+#### `features/par/endpoints/par/steps/parse-request.ts`
+
+本文と `Authorization` ヘッダを読むステップである。
+§2.1 は本文を `application/x-www-form-urlencoded` に限るので、それ以外の Content-Type は `invalid_request` で拒否する。
+本文を `c.req.text()` で生のまま読むのは、`URLSearchParams` を走査して重複したパラメータを見つけるためである（RFC 6749 §3.1）。
+フォームの解析結果だけを見ると同じ名前の最後の値しか残らず、重複を検出できない。
+エラー文言に入れるパラメータ名は `sanitizeErrorDescription` を通す。
+
+```typescript
+import { sanitizeErrorDescription } from '@maronn-openid-connect/core';
+import { ParEndpointError } from '../response.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'parse-request',
+  endpoint: 'par',
+  feature: 'par',
+  kind: 'parse',
+  label: 'Parse the pushed authorization request',
+  spec: 'RFC 9126 §2.1 / RFC 6749 §3.1',
+  function: 'parsePushedAuthorizationRequest',
+  consumes: [],
+  produces: ['params', 'authorization'],
+  removable: false,
+});
+
+/**
+ * RFC 9126 §2.1: the pushed authorization request body MUST be
+ * application/x-www-form-urlencoded.
+ */
+function isFormUrlEncoded(contentType: string): boolean {
+  const [mediaType = ''] = contentType.toLowerCase().split(';');
+  return mediaType.trim() === 'application/x-www-form-urlencoded';
+}
+
+/**
+ * Parse the pushed authorization request: the form body and the Authorization
+ * header. RFC 9126 §2.1 / RFC 6749 §3.1
+ */
+export async function parsePushedAuthorizationRequest(
+  c: any,
+): Promise<{ params: Record<string, string>; authorization: string }> {
+  const contentType = c.req.header('Content-Type') ?? '';
+  if (!isFormUrlEncoded(contentType)) {
+    throw new ParEndpointError({
+      status: 400,
+      body: { error: 'invalid_request', error_description: 'Pushed authorization requests must use application/x-www-form-urlencoded' },
+    });
+  }
+
+  // RFC 6749 §3.1: request parameters MUST NOT be repeated. Read the raw body so
+  // URLSearchParams iteration exposes duplicates instead of silently keeping the last.
+  const rawBody = await c.req.text();
+  const params: Record<string, string> = {};
+  const seen = new Set<string>();
+  let duplicateKey: string | undefined;
+  for (const [key, value] of new URLSearchParams(rawBody)) {
+    if (seen.has(key)) {
+      duplicateKey = key;
+      break;
+    }
+    seen.add(key);
+    params[key] = value;
+  }
+
+  if (duplicateKey !== undefined) {
+    throw new ParEndpointError({
+      status: 400,
+      body: { error: 'invalid_request', error_description: `Parameter "${sanitizeErrorDescription(duplicateKey)}" must not be repeated` },
+    });
+  }
+
+  const authorization = c.req.header('Authorization') ?? '';
+  return { params, authorization };
+}
+```
+
+#### `features/par/endpoints/par/steps/authenticate-client.ts`
+
+pushed request を送ってきたクライアントを、トークンエンドポイントと同じ方法で認証するステップである（public client は `client_id` だけを示す）。
+認証の前に `rejectForbiddenParParams` で、pushed request に含めてはならない `request_uri`（§2.1）と、この生成 OP が対応しない `request`（PAR と JAR の併用、§3）を拒否する。
+認証が済んだら `client_id` を認証済みの値で上書きし、以降の検証と保存をこのクライアントに結びつける。
+
+```typescript
+import { authenticateParClient, rejectForbiddenParParams } from '@maronn-openid-connect/experimental/par';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'authenticate-client',
+  endpoint: 'par',
+  feature: 'par',
+  kind: 'validate',
+  label: 'Authenticate the pushing client',
+  spec: 'RFC 9126 §2.1',
+  function: 'authenticatePushingClient',
+  calls: ['rejectForbiddenParParams', 'authenticateParClient'],
+  consumes: ['params', 'authorization'],
+  produces: ['clientId', 'pushedParams'],
+  removable: false,
+});
+
+/**
+ * Authenticate the pushing client exactly like the token endpoint does
+ * (public clients present only client_id), after refusing the parameters a
+ * pushed request must not carry. RFC 9126 §2.1
+ *
+ * client_id is a required authorization request parameter, so the pushed
+ * parameters are pinned to the authenticated client before validation.
+ */
+export async function authenticatePushingClient(
+  c: any,
+  params: Record<string, string>,
+  authorization: string,
+): Promise<{ clientId: string; pushedParams: Record<string, string> }> {
+  const clientResolver = c.get('clientResolver');
+
+  // RFC 9126 §2.1: request_uri MUST NOT be pushed. The request parameter
+  // (PAR + JAR, §3) is not supported by this generated provider.
+  rejectForbiddenParParams(params);
+
+  const clientId = await authenticateParClient({
+    params,
+    authorizationHeader: authorization,
+    clientResolver,
+  });
+
+  return { clientId, pushedParams: { ...params, client_id: clientId } };
+}
+```
+
+#### `features/par/endpoints/par/steps/validate-request.ts`
+
+§2.1 に従い、認可エンドポイントと同じ検証を push の時点で行うステップである。
+未登録の `redirect_uri` や不正な `scope` は、ユーザーが画面を見る前にここで失敗する。
+PKCE を省略してよいかは base の設定 `allowNonPkceAuthorizationCodeFlow` に従い、`pkce` 機能が有効な既定の生成では `false`（PKCE 必須）になる。
+
+```typescript
+import { validatePushedAuthorizationParams } from '@maronn-openid-connect/experimental/par';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'validate-request',
+  endpoint: 'par',
+  feature: 'par',
+  kind: 'validate',
+  label: 'Validate the request as /authorize would',
+  spec: 'RFC 9126 §2.1',
+  function: 'validatePushedRequest',
+  calls: ['validatePushedAuthorizationParams'],
+  consumes: ['pushedParams'],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * RFC 9126 §2.1: "validate the request the same way the authorization
+ * endpoint would" — an unregistered redirect_uri or a bad scope fails here,
+ * before the user ever sees a screen.
+ */
+export async function validatePushedRequest(c: any, pushedParams: Record<string, string>): Promise<void> {
+  const clientResolver = c.get('clientResolver');
+  const config = c.get('config');
+  await validatePushedAuthorizationParams(pushedParams, clientResolver, {
+    allowNonPkceAuthorizationCodeFlow: config.allowNonPkceAuthorizationCodeFlow,
+  });
+}
+```
+
+#### `features/par/endpoints/par/steps/store-request.ts`
+
+暗号論的に安全な乱数で参照値を作り、pushed パラメータをその下に保存するステップである（§2.2 と §7.1）。
+記録の作成は experimental の `createPushedAuthorizationRecord` に任せ、認証済みの `client_id`、パラメータ、`parStore`、`parConfig.expiresInSeconds` を渡す。
+クライアントの認証情報（`client_secret` など）は experimental の側で取り除かれるので、ストアには残らない。
+応答は §2.2 の 201 で、本文は `request_uri` と `expires_in` だけである。
+pushed パラメータは `login_hint` のような個人情報を含みうるので、ログには出さない。
+
+```typescript
+import {
+  buildPushedAuthorizationResponse,
+  createPushedAuthorizationRecord,
+} from '@maronn-openid-connect/experimental/par';
+import type { ParEndpointResponse } from '../response.js';
+import { parConfig } from '../../../config.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'store-request',
+  endpoint: 'par',
+  feature: 'par',
+  kind: 'persist',
+  label: 'Store the request under a fresh request_uri',
+  spec: 'RFC 9126 §2.2 / §7.1',
+  function: 'storePushedRequest',
+  calls: ['createPushedAuthorizationRecord', 'buildPushedAuthorizationResponse'],
+  consumes: ['clientId', 'pushedParams'],
+  produces: ['parResponse'],
+  removable: false,
+});
+
+/**
+ * RFC 9126 §2.2 / §7.1: mint a cryptographically random reference value and
+ * store the request under it. Client credentials are never persisted.
+ */
+export async function storePushedRequest(
+  c: any,
+  clientId: string,
+  pushedParams: Record<string, string>,
+): Promise<ParEndpointResponse> {
+  const parStore = c.get('parStore');
+  const record = await createPushedAuthorizationRecord({
+    clientId,
+    params: pushedParams,
+    store: parStore,
+    expiresInSeconds: parConfig.expiresInSeconds,
+  });
+  const response = buildPushedAuthorizationResponse(record);
+
+  // Never log the pushed parameters themselves: they can carry PII such as
+  // login_hint, and the Authorization header carries the client_secret.
+
+  // RFC 9126 §2.2: 201 Created.
+  return { status: 201, body: { request_uri: response.requestUri, expires_in: response.expiresIn } };
+}
+```
+
+#### `features/par/endpoints/par/steps/respond.ts`
+
+成功も失敗も、最後はこの関数が HTTP の応答にする。
+§2.2 に合わせてキャッシュされない JSON で返すため、`Cache-Control: no-cache, no-store` と `Pragma: no-cache` を付ける。
+`WWW-Authenticate` のような追加のヘッダは、`ParEndpointResponse.headers` から写す。
+
+```typescript
+import type { ParEndpointResponse } from '../response.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'respond',
+  endpoint: 'par',
+  feature: 'par',
+  kind: 'respond',
+  label: 'Respond 201 (no-store)',
+  spec: 'RFC 9126 §2.2',
+  function: 'respondPar',
+  consumes: ['parResponse'],
+  produces: [],
+  removable: false,
+});
+
+/** RFC 9126 §2.2: a non-cacheable JSON body. */
+export function respondPar(c: any, response: ParEndpointResponse): Response {
+  c.header('Cache-Control', 'no-cache, no-store');
+  c.header('Pragma', 'no-cache');
+  for (const [name, value] of Object.entries(response.headers ?? {})) {
+    c.header(name, value);
+  }
+  return c.json(response.body, response.status);
+}
+```
+
+#### `features/par/endpoints/par/steps/respond-error.ts`
+
+どのステップが投げた失敗も、トークンエンドポイントと同じ形の JSON エラーにするステップである（§2.3）。
+このエンドポイントはリダイレクトしない。
+`ParEndpointError` は決めてあった応答をそのまま返し、experimental の `ParError` はステータスコード、エラーコード、`WWW-Authenticate` を写し、それ以外の例外は `server_error`（500）にする。
+
+```typescript
+import { ParError } from '@maronn-openid-connect/experimental/par';
+import { ParEndpointError } from '../response.js';
+import { respondPar } from './respond.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'respond-error',
+  endpoint: 'par',
+  feature: 'par',
+  kind: 'respond',
+  label: 'Respond with the OAuth error',
+  spec: 'RFC 9126 §2.3',
+  function: 'respondParError',
+  consumes: [],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * RFC 9126 §2.3: token-endpoint style JSON errors. This endpoint never redirects.
+ */
+export function respondParError(c: any, error: unknown): Response {
+  if (error instanceof ParEndpointError) {
+    return respondPar(c, error.response);
+  }
+  if (error instanceof ParError) {
+    return respondPar(c, {
+      status: error.statusCode,
+      body: { error: error.code, error_description: error.errorDescription },
+      headers: error.wwwAuthenticate ? { 'WWW-Authenticate': error.wwwAuthenticate } : undefined,
+    });
+  }
+  return respondPar(c, { status: 500, body: { error: 'server_error' } });
+}
+```
+
+#### `features/par/steps/resolve-pushed-request.ts`
+
+認可エンドポイントの所有者付きブロックが呼ぶステップで、PAR のコードのうち base のパイプラインの中で動くのはこのファイルだけである。
+`meta` の `endpoint: 'authorize'` と `feature: 'par'` が、どのエンドポイントのどの機能のステップかを示す。
+必須設定のときは先に `assertPushedRequestUsed` を通し、続いて `resolvePushedRequestUri` で URN 形式の `request_uri` を展開する。
+URN でなければ `null` が返り、受け取った `params` をそのまま返す（URL 形式の `request_uri` は後続の検証が `request_uri_not_supported` で拒否する）。
+展開に失敗したときの `PushedRequestUriError` は、`redirect_uri` を持たない core の `AuthorizationError` に写す。
+検証済みの `redirect_uri` がない失敗なので、`authorizationErrorOutcome()` はこのエラーをリダイレクトせず、OP 上のエラーとして返す。
+失敗の種類（不存在、使用済み、期限切れ、client_id の不一致）によらずコードと文言が同じなので、応答から参照値が存在したかどうかを判定できない。
+
+```typescript
+import { AuthorizationError, type AuthorizationErrorCode } from '@maronn-openid-connect/core';
+import {
+  PushedRequestUriError,
+  assertPushedRequestUsed,
+  resolvePushedRequestUri,
+} from '@maronn-openid-connect/experimental/par';
+import { parConfig } from '../config.js';
+import { type AuthorizationRequestInput, isAuthorizationRequestParams } from '../../../endpoints/authorize/outcome.js';
+import { step } from '../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'resolve-pushed-request',
+  endpoint: 'authorize',
+  feature: 'par',
+  kind: 'resolve',
+  label: 'Expand the pushed request_uri',
+  spec: 'RFC 9126 §4 / §5',
+  function: 'resolvePushedAuthorizationRequest',
+  calls: ['assertPushedRequestUsed', 'resolvePushedRequestUri'],
+  consumes: ['params'],
+  produces: ['params'],
+  removable: false,
+});
+
+/**
+ * EXPERIMENTAL — Pushed Authorization Requests (RFC 9126 §4 / §5).
+ *
+ * Expands a request_uri of the form urn:ietf:params:oauth:request_uri:<ref>
+ * into the parameters pushed to /par. The reference is single use and short
+ * lived, so a reload of this URL fails with invalid_request_uri by design.
+ * Anything that is not a URN (absent, or an OIDC Core §6.2 URL) is left to the
+ * normal pipeline, which rejects it with request_uri_not_supported.
+ *
+ * A request_uri that does not resolve fails with an AuthorizationError that
+ * authorizationErrorOutcome() keeps on the OP: without a resolved request
+ * there is no verified redirect_uri.
+ */
+export async function resolvePushedAuthorizationRequest(
+  c: any,
+  params: AuthorizationRequestInput,
+): Promise<AuthorizationRequestInput> {
+  const parStore = c.get('parStore');
+  try {
+    // RFC 9126 §5: when require_pushed_authorization_requests is on, an
+    // authorization request that did not go through /par is rejected outright.
+    if (parConfig.requirePushedAuthorizationRequests) {
+      assertPushedRequestUsed(params);
+    }
+    const pushedParams = await resolvePushedRequestUri({ params, store: parStore });
+    if (pushedParams === null) return params;
+    if (!isAuthorizationRequestParams(pushedParams)) {
+      // Defensive: client_id was validated when the request was pushed.
+      throw new PushedRequestUriError('invalid_request_uri', 'The request_uri is invalid, expired, or has already been used');
+    }
+    return pushedParams;
+  } catch (error) {
+    // RFC 9126 §4 / OIDC Core 1.0 §3.1.2.6: a request_uri that cannot be
+    // resolved leaves us without a verified redirect_uri, so this error is
+    // NEVER redirected (RFC 6749 §4.1.2.1): an AuthorizationError without a
+    // redirect URI stays on the OP. Every failure kind (unknown / used /
+    // expired / wrong client) carries the identical code and description so
+    // the response cannot be used as an existence oracle.
+    if (error instanceof PushedRequestUriError) {
+      throw new AuthorizationError(error.code as AuthorizationErrorCode, error.errorDescription);
+    }
+    throw error;
+  }
+}
+```
+
+### 他フレームワークの生成コード
+
+express と fastify の生成コードは、hono と同じファイルからなる。
+CLI は、エンドポイントが import する `hono` のルーターを Fetch API の小さなルーター `web-router.ts`（`WebRouter` と `WebContext`）に置き換え、フレームワーク向けの `apply.ts`、`web-router.ts`、`node-adapter.ts` を加える。
+加えるファイルの元は [apps/hono/src/web/](../../../apps/hono/src/web) にあり、どのファイルをどこに置くかは [packages/cli/extract.json](../../../packages/cli/extract.json) が定める。
+画面は hono/jsx のままなので、これらの生成物も JSX ランタイムとして `hono` を必要とする。
+`features/par/` で変わるのは `features/par/endpoints/par/pipeline.ts` の `Hono` が `WebRouter` になる点だけで、ほかのファイルは hono と同じ内容である。
+
+Next.js の生成コードは、Next.js App Router のアプリ [apps/nextjs](../../../apps/nextjs) から抜き出す。
+PAR のルートファイルはルートグループ `app/(par)/` に、それ以外のコードは `app/_oidc-provider/features/par/` に置かれる。
+どちらもこの解説には載せず、ディレクトリへのリンクで示す。
 
 ## E2E テストの全文
 

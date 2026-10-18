@@ -62,244 +62,262 @@ CI verifies the lower bound mechanically (`.github/scripts/verify-release-contra
 ## How the CLI integration works
 
 Users reach the experimental features through the CLI.
-Only when they run `maronn-oidc generate <framework> --enable <feature-id>` does the generated code gain that feature's routes and branches, and only then does the generated project depend on the experimental package.
+Only when they run `maronn-oidc generate <framework> --enable <feature-id>` does the generated code gain that feature's code, and only then does the generated project depend on the experimental package.
 A default generation never references experimental at all.
 
-The feature registry lives in `packages/cli/src/features.ts`.
-Adding a feature-id to `EXPERIMENTAL_FEATURES` and mapping it to an `OidcFeatureConfig` flag makes it available to the CLI's `--enable` resolution.
-This file is the single source of truth for the experimental integration, so it is embedded here in full.
+### The app the generated code is extracted from
+
+`maronn-oidc generate` does not assemble the generated code from templates; it copies code out of a running app.
+The source is `src/oidc-provider/` of [apps/hono](../../../apps/hono), an OP that runs with every feature enabled and that the per-PR E2E suite runs against.
+[packages/cli/extract.json](../../../packages/cli/extract.json) defines which directories become the output of which framework; the CLI build copies those directories into the CLI package and gathers the meta of their steps and endpoints into a catalog.
+`generate` selects the files of the enabled features from that copy, removes the code of the disabled ones, and writes the result ([packages/cli/src/generate.ts](../../../packages/cli/src/generate.ts)).
+Test files (`*.test.ts`, `*.test.tsx`) are not copied, so the generated output contains none.
+
+The hono output is laid out as follows.
+
+```text
+app.ts  apply.ts  config.ts  store.ts  resolvers.ts  views.tsx  cors.ts  cookies.ts  scopes.ts  development.ts
+db/                         the database (the kind chosen with --db)
+pages/                      the error pages and response helpers
+endpoints/<endpoint>/
+  pipeline.ts               calls the steps of the endpoint in order
+  steps/<step>.ts           one file per step
+  endpoint.ts               the meta the maronn-oidc graph diagram is drawn from
+features/
+  feature.ts                defineFeature() and the types of the hooks
+  enabled.ts                the list of enabled features
+  <feature-id>/             everything that feature owns
+```
+
+### The boundary between the base and the features
+
+Every file of the app belongs, by its path, to the base, to one feature, or to one database kind.
+Files under `features/<feature-id>/` belong to that feature, files under `db/<kind>/` to that database kind (memory, sql, kv), and everything else is the base.
+The base imports neither `features/<feature-id>/` nor the experimental package, a boundary that `pnpm run lint` (`.github/scripts/lint-import-boundaries.mjs`) checks.
+A feature plugs into the base in exactly two ways: through the hooks of `features/feature.ts`, and through owner blocks in the base pipelines.
+
+Hooks are declarative values that the base reads at fixed places.
+The `feature.ts` of each feature declares the feature with `defineFeature({...})`, giving values to a fixed set of hooks:
+
+- **routes**: the endpoints the feature serves. `app.ts` mounts them; the entry also declares the methods of the path (any other is answered with 405), the paths below it with their methods (`subpaths`), and whether it takes the CORS policy of the token endpoint (`cors: 'protected'`)
+- **discovery**: members added to the provider metadata. An array value is merged with the base array; any other value replaces it
+- **context**: values put into the request context (`c.set`) for the feature's own steps
+- **config**: defaults of the provider settings, applied over the defaults of `config.ts`
+- **token.grants**: the `grant_type` values answered at the token endpoint; they are also added to `grant_types_supported` in discovery
+- **authorize.responseModes**: the response modes the feature answers in; `/consent` uses them to restore, from the stored transaction, the mode the authorization request asked for
+- **loginMethods**: ways to sign in that the login page offers next to the password form
+
+The base reads them through the functions of `features/feature.ts` (`routesOf()`, `discoveryOf()`, `applyContextOf()`, `configOf()`, `tokenGrantsOf()`, `responseModesOf()`, `loginMethodsOf()`) and never imports a feature.
+The options, settings and screens a feature takes are added to the base types by module augmentation from the feature's directory (`declare module '../../app.js'`, `'../../config.js'`, `'../../views.js'`).
+
+Logic that runs in the middle of a base pipeline is not a hook.
+The step function of that logic lives in the feature's directory, and its call sits in the base `pipeline.ts` as a block that starts with a marker comment naming the feature.
+This is the block PAR places in the pipeline of the authorization endpoint:
+
+```typescript
+    // [resolve-pushed-request] (feature: par) Expand the pushed request_uri — RFC 9126 §4 / §5
+    params = await resolvePushedAuthorizationRequest(c, params);
+```
+
+A block runs from its marker line to the line before the next marker, and is called an **owner block**.
+When a feature is disabled, the CLI deletes the feature's blocks and the imports only those blocks used.
+A value such a block defined that later code still reads is left as `const <name> = undefined;`, and a binding nothing reads any more is dropped.
+This logic is not a hook because its position in the pipeline matters.
+Each block is one box of the `maronn-oidc graph` diagram, and when a `--flow` document reorders or leaves out steps, the CLI reorders or deletes the blocks to match.
+
+### What `--enable` adds
+
+It follows that `--enable <feature-id>` adds exactly three things to the generated code:
+
+1. the directory `features/<feature-id>/` (every file of the feature)
+2. one import line and one entry of the array `features` in `features/enabled.ts`
+3. the `(feature: <feature-id>)` owner blocks of the base pipelines, and the imports those blocks use at the top of each pipeline
+
+The order of the array in `features/enabled.ts` is the order in which the hooks apply.
+Removing a feature by hand after generating takes more than deleting its two lines in `features/enabled.ts` and its directory: its owner blocks and the imports they use must go too.
+
+### The feature registry
+
+The features the CLI knows are listed one entry each in `FEATURE_REGISTRY` of [packages/cli/src/registry.ts](../../../packages/cli/src/registry.ts).
+An entry holds the name used with `--enable` and `--disable` (`id`, which is also the directory name under `features/`), whether it is generated by default (`tier`), the features its code imports (`requires`), the packages its generated code imports (`packages`), and the frameworks and runtimes it supports.
+There are three tiers: `stable` is generated by default, while `experimental` and `extension` are generated only when named with `--enable`.
+Every experimental feature has `tier: 'experimental'` and lists `@maronn-openid-connect/experimental` in `packages`.
+The import-boundary lint reads `requires` from this file: `features/<a>/` may import `features/<b>/` only when the entry of `a` lists `b`.
+The features in `features/enabled.ts` appear in the order of this registry.
+
+### The other frameworks
+
+The express and fastify outputs are extracted from `apps/hono` as well.
+The CLI replaces the `hono` router the endpoints import with `web-router.ts`, a small Fetch-API router (`WebRouter` and `WebContext`), and adds the framework's `apply.ts`, `web-router.ts` and `node-adapter.ts` from [apps/hono/src/web/](../../../apps/hono/src/web).
+The screens stay hono/jsx, so those outputs need `hono` as their JSX runtime.
+
+The Next.js output is extracted from [apps/nextjs](../../../apps/nextjs), a Next.js App Router app.
+A feature's route files live in the route group `app/(<feature-id>)/`, and the rest of its code in `app/_oidc-provider/features/<feature-id>/`.
+
+### `features/feature.ts`, in full
+
+The values a feature can plug into the base are limited to the types this file defines, so it is embedded in full.
+In the hono output the file is the same whichever features are enabled (in the express and fastify outputs, `Hono` is replaced with `WebRouter`).
 
 ```typescript
 /**
- * Feature toggles for the generated OpenID Connect Provider.
+ * What a feature can add to the provider.
  *
- * The default generation output enables every feature (the full Basic OP +
- * optional endpoints). Users can remove features from the default with
- * `--disable`, and explicitly (re-)enable them with `--enable`.
+ * Each directory under features/ is one feature, and its feature.ts describes
+ * it with defineFeature(): the routes it serves, the discovery metadata it
+ * advertises, the values it puts into the request context, the defaults it
+ * adds to the provider settings, the grants it answers at the token
+ * endpoint, the response modes it restores at /consent and the login methods
+ * it shows on the login page. These are the hooks; the rest of the provider
+ * reads them through the functions below and never imports a feature.
  *
- * Basic OP mandatory capabilities (authorize / token / userinfo / discovery /
- * jwks / login / consent) are not toggleable and are always generated.
+ * Logic that runs inside one of the provider's pipelines is not a hook: the
+ * pipeline.ts of that endpoint calls the step of the feature in a block whose
+ * marker line names it, `// [step-id] (feature: <id>) Label — Spec`.
  *
- * Optional features are stable core capabilities that are nonetheless NOT part
- * of the default output, because the spec does not require them. Experimental
- * features are a third category: they live in the separate experimental package
- * and their APIs are unstable. Both must be requested explicitly with
- * `--enable`.
+ * features/enabled.ts lists the features of this provider. Remove a feature
+ * by deleting its directory and its line there.
  */
+import type { Hono } from 'hono';
+import type { OidcProviderOptions } from '../app.js';
+import type { ProviderConfig } from '../config.js';
+import type { AuthorizationResponseModeHandler } from '../endpoints/authorize/response-mode.js';
+import type { LoginMethod } from '../endpoints/login/login-method.js';
+import type { ProviderStores } from '../store.js';
 
-/** CLI-facing feature names (kebab-case, used with --enable / --disable). */
-export const AVAILABLE_FEATURES = [
-  'pkce',
-  'refresh-token',
-  'introspection',
-  'revocation',
-  'request-object',
-] as const;
-
-export type FeatureName = (typeof AVAILABLE_FEATURES)[number];
-
-/**
- * Optional feature names (kebab-case, used with --enable).
- *
- * Stable, implemented in `@maronn-openid-connect/core` — but **disabled by
- * default** because no OIDC Core / OAuth 2.1 clause requires them. The default
- * generation output is meant to be the specification and nothing more, so a
- * user verifying "does the spec allow X?" is never answered by this library's
- * own hardening opinions. Turn one on to study the hardening itself.
- *
- * - transaction-binding: bind the authorization transaction to the User-Agent
- *   that started it, via a per-transaction HttpOnly cookie
- *   (OIDC Core 1.0 §3.1.2.3 / §3.1.2.4 leave the mechanism to the
- *   implementation). Costs a cookie jar: driving login / consent by hand with
- *   curl requires carrying the cookie, which is why it is not the default.
- */
-export const OPTIONAL_FEATURES = ['transaction-binding'] as const;
-
-export type OptionalFeatureName = (typeof OPTIONAL_FEATURES)[number];
-
-/**
- * Experimental feature names (kebab-case, used with --enable).
- *
- * Unlike AVAILABLE_FEATURES these are **disabled by default** and are only
- * generated when named explicitly with `--enable`. They are implemented in the
- * separate `@maronn-openid-connect/experimental` package, whose API is unstable and may
- * change in a breaking way between releases.
- *
- * - par: Pushed Authorization Requests (RFC 9126).
- * - token-exchange: OAuth 2.0 Token Exchange (RFC 8693), impersonation and
- *   delegation (act claim per §4.1).
- * - jarm: JWT Secured Authorization Response Mode (JARM), signed query.jwt only.
- * - device-authorization-grant: OAuth 2.0 Device Authorization Grant (RFC 8628).
- */
-export const EXPERIMENTAL_FEATURES = [
-  'par',
-  'token-exchange',
-  'jarm',
-  'device-authorization-grant',
-] as const;
-
-export type ExperimentalFeatureName = (typeof EXPERIMENTAL_FEATURES)[number];
-
-/**
- * Resolved feature configuration passed through the generator pipeline.
- *
- * - pkce: when false, the generated config defaults to
- *   `allowNonPkceAuthorizationCodeFlow: true` (PKCE optional for explicit
- *   confidential clients; public clients still require it).
- * - refreshToken: when false, the token endpoint rejects the refresh_token
- *   grant with `unsupported_grant_type`, offline_access is never granted, and
- *   no refresh token is issued or persisted.
- * - introspection: when false, the RFC 7662 endpoint is not generated.
- * - revocation: when false, the RFC 7009 endpoint is not generated.
- * - requestObject: when false, the authorize endpoint rejects the `request`
- *   parameter with `request_not_supported` (OIDC Core 1.0 §6.3).
- * - par: experimental, disabled by default. When true, the PAR endpoint
- *   (RFC 9126) is generated and the authorize route resolves URN-form
- *   `request_uri` values through `@maronn-openid-connect/experimental/par`.
- * - tokenExchange: experimental, disabled by default. When true, the token
- *   route dispatches the `urn:ietf:params:oauth:grant-type:token-exchange`
- *   grant (RFC 8693) to `@maronn-openid-connect/experimental/token-exchange` before
- *   core's grant_type validation would reject the URN.
- * - jarm: experimental, disabled by default. When true, the authorize route
- *   interprets `response_mode=query.jwt` (and its `jwt` shorthand) and returns
- *   the authorization response as a single signed JWT in the `response` query
- *   parameter, via `@maronn-openid-connect/experimental/jarm`. A request that
- *   does not ask for a JWT response mode is answered exactly as before.
- * - deviceAuthorizationGrant: experimental, disabled by default. When true, the
- *   OP additionally serves the device authorization endpoint
- *   (POST /device_authorization), the verification UI (/device, /device/login,
- *   /device/approve) and dispatches the
- *   `urn:ietf:params:oauth:grant-type:device_code` grant (RFC 8628) to
- *   `@maronn-openid-connect/experimental/device-authorization-grant` before
- *   core's grant_type validation would reject the URN.
- * - transactionBinding: optional hardening, disabled by default. When true, the
- *   authorize endpoint issues a per-transaction HttpOnly cookie and the
- *   login / consent steps refuse to run for a User-Agent that cannot present
- *   it, so a leaked `transaction_id` alone drives no step of the flow.
- */
-export interface OidcFeatureConfig {
-  pkce: boolean;
-  refreshToken: boolean;
-  introspection: boolean;
-  revocation: boolean;
-  requestObject: boolean;
-  par: boolean;
-  tokenExchange: boolean;
-  jarm: boolean;
-  deviceAuthorizationGrant: boolean;
-  transactionBinding: boolean;
+/** An endpoint a feature serves, mounted by app.ts. */
+export interface FeatureRoute {
+  /** Where the app is mounted. */
+  path: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app: Hono<any>;
+  /** The HTTP methods of the path itself; any other one is answered with 405. */
+  methods: readonly string[];
+  /** The paths below the mount point the app also answers, with their methods. */
+  subpaths?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * 'protected': the CORS policy of the token endpoint (the origins of
+   * OidcProviderOptions.corsOrigins). Leave it out for a browser-facing page.
+   */
+  cors?: 'protected';
 }
 
-/** Mapping from CLI feature names to OidcFeatureConfig keys. */
-const FEATURE_KEYS: Record<FeatureName, keyof OidcFeatureConfig> = {
-  pkce: 'pkce',
-  'refresh-token': 'refreshToken',
-  introspection: 'introspection',
-  revocation: 'revocation',
-  'request-object': 'requestObject',
-};
-
-/** Mapping from CLI optional feature names to OidcFeatureConfig keys. */
-const OPTIONAL_FEATURE_KEYS: Record<OptionalFeatureName, keyof OidcFeatureConfig> = {
-  'transaction-binding': 'transactionBinding',
-};
-
-/** Mapping from CLI experimental feature names to OidcFeatureConfig keys. */
-const EXPERIMENTAL_FEATURE_KEYS: Record<ExperimentalFeatureName, keyof OidcFeatureConfig> = {
-  par: 'par',
-  'token-exchange': 'tokenExchange',
-  jarm: 'jarm',
-  'device-authorization-grant': 'deviceAuthorizationGrant',
-};
-
-/**
- * Default: every stable feature enabled (matches the historical generation
- * output), every optional and experimental feature disabled.
- */
-export const DEFAULT_FEATURES: OidcFeatureConfig = {
-  pkce: true,
-  refreshToken: true,
-  introspection: true,
-  revocation: true,
-  requestObject: true,
-  par: false,
-  tokenExchange: false,
-  jarm: false,
-  deviceAuthorizationGrant: false,
-  transactionBinding: false,
-};
-
-function isOptionalFeature(name: string): name is OptionalFeatureName {
-  return (OPTIONAL_FEATURES as readonly string[]).includes(name);
-}
-
-function isExperimentalFeature(name: string): name is ExperimentalFeatureName {
-  return (EXPERIMENTAL_FEATURES as readonly string[]).includes(name);
-}
-
-function assertKnownFeature(
-  name: string,
-): asserts name is FeatureName | OptionalFeatureName | ExperimentalFeatureName {
-  if (
-    !(AVAILABLE_FEATURES as readonly string[]).includes(name) &&
-    !isOptionalFeature(name) &&
-    !isExperimentalFeature(name)
-  ) {
-    throw new Error(
-      `Unknown feature: "${name}". Available features: ${AVAILABLE_FEATURES.join(', ')}. ` +
-        `Optional features (disabled by default): ${OPTIONAL_FEATURES.join(', ')}. ` +
-        `Experimental features (disabled by default): ${EXPERIMENTAL_FEATURES.join(', ')}`,
-    );
-  }
-}
-
-function featureKey(
-  name: FeatureName | OptionalFeatureName | ExperimentalFeatureName,
-): keyof OidcFeatureConfig {
-  if (isOptionalFeature(name)) return OPTIONAL_FEATURE_KEYS[name];
-  return isExperimentalFeature(name) ? EXPERIMENTAL_FEATURE_KEYS[name] : FEATURE_KEYS[name];
+/** What a context hook can read while the provider sets up a request. */
+export interface FeatureContextInput {
+  /** The request context, with every value the provider and the features before this one set. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  c: any;
+  options: OidcProviderOptions;
+  stores: ProviderStores;
 }
 
 /**
- * Resolve CLI --enable / --disable lists into an OidcFeatureConfig,
- * starting from DEFAULT_FEATURES.
- *
- * @throws {Error} on an unknown feature name, or a feature listed in both
- *   enable and disable.
+ * The values a feature puts into the request context (c.set) for its own
+ * steps. A function runs for every request; a value it returns under a name
+ * the provider already set replaces that value.
  */
-export function resolveFeatures(options: {
-  enable?: string[];
-  disable?: string[];
-}): OidcFeatureConfig {
-  const enable = options.enable ?? [];
-  const disable = options.disable ?? [];
+export type FeatureContext =
+  | Readonly<Record<string, unknown>>
+  | ((input: FeatureContextInput) => Record<string, unknown> | Promise<Record<string, unknown>>);
 
-  for (const name of [...enable, ...disable]) {
-    assertKnownFeature(name);
-  }
+export interface Feature {
+  /** The id of --enable / --disable. */
+  readonly id: string;
+  readonly routes?: readonly FeatureRoute[];
+  /**
+   * Members added to the provider metadata (OIDC Discovery 1.0 §3). An array
+   * is merged with the array the provider already advertises under that name;
+   * any other value replaces it.
+   */
+  readonly discovery?: (issuer: string, config: ProviderConfig) => Record<string, unknown>;
+  readonly context?: FeatureContext;
+  /** Defaults of the provider settings, applied over the defaults of config.ts. */
+  readonly config?: Partial<ProviderConfig>;
+  readonly token?: {
+    /**
+     * The grant_type values the feature answers at the token endpoint. The
+     * token endpoint accepts them and discovery advertises them
+     * (grant_types_supported).
+     */
+    readonly grants?: readonly string[];
+  };
+  readonly authorize?: {
+    /**
+     * Response modes the feature answers in. /consent restores the one the
+     * authorization request asked for from the stored transaction.
+     */
+    readonly responseModes?: readonly AuthorizationResponseModeHandler[];
+  };
+  /** Ways to sign in that the login page offers next to the password form. */
+  readonly loginMethods?: readonly LoginMethod[];
+}
 
-  for (const name of enable) {
-    if (disable.includes(name)) {
-      throw new Error(`Feature "${name}" cannot be both enabled and disabled`);
+/** Describe a feature. The function only checks the shape; it returns its argument. */
+export function defineFeature<const F extends Feature>(feature: F): F {
+  return feature;
+}
+
+export function routesOf(features: readonly Feature[]): FeatureRoute[] {
+  return features.flatMap((feature) => feature.routes ?? []);
+}
+
+/**
+ * The provider metadata with the members of the features added: an array
+ * member is merged (each value once, in order), any other member replaced.
+ */
+export function discoveryOf(
+  features: readonly Feature[],
+  metadata: Record<string, unknown>,
+  issuer: string,
+  config: ProviderConfig,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...metadata };
+  for (const feature of features) {
+    for (const [name, value] of Object.entries(feature.discovery?.(issuer, config) ?? {})) {
+      const current = merged[name];
+      merged[name] = Array.isArray(current) && Array.isArray(value)
+        ? [...new Set([...current, ...value])]
+        : value;
     }
   }
+  return merged;
+}
 
-  const features: OidcFeatureConfig = { ...DEFAULT_FEATURES };
-  for (const name of enable) {
-    assertKnownFeature(name);
-    features[featureKey(name)] = true;
+/** Put the context values of the features into the request context, in the order of the features. */
+export async function applyContextOf(
+  features: readonly Feature[],
+  input: FeatureContextInput,
+): Promise<void> {
+  for (const feature of features) {
+    const context = feature.context;
+    if (context === undefined) continue;
+    const values = typeof context === 'function' ? await context(input) : context;
+    for (const [name, value] of Object.entries(values)) {
+      input.c.set(name, value);
+    }
   }
-  // An optional / experimental feature listed in --disable is already off by
-  // default, so this is a no-op rather than an error (same as omitting it).
-  for (const name of disable) {
-    assertKnownFeature(name);
-    features[featureKey(name)] = false;
-  }
-  return features;
+}
+
+export function configOf(features: readonly Feature[]): Partial<ProviderConfig> {
+  return Object.assign({}, ...features.map((feature) => feature.config ?? {}));
+}
+
+export function tokenGrantsOf(features: readonly Feature[]): string[] {
+  // Two features may answer the same grant_type (token-exchange and id-jag
+  // both read the token-exchange URN); it is listed once.
+  return [...new Set(features.flatMap((feature) => feature.token?.grants ?? []))];
+}
+
+export function responseModesOf(features: readonly Feature[]): AuthorizationResponseModeHandler[] {
+  return features.flatMap((feature) => feature.authorize?.responseModes ?? []);
+}
+
+export function loginMethodsOf(features: readonly Feature[]): LoginMethod[] {
+  return features.flatMap((feature) => feature.loginMethods ?? []);
 }
 ```
 
-Each feature guide embeds the complete code that the feature contributes to generated output.
+Each feature guide embeds the complete code that the feature adds to the generated output.
 When the CLI integration changes, the generated result and the embedded guide code must be updated in the same change.
 
 ## The package configuration files, in full

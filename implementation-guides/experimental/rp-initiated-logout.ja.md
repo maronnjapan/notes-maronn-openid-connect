@@ -794,77 +794,88 @@ describe('resolvePostLogoutRedirect', () => {
 
 ## CLI 統合と生成コードへの寄与
 
-`maronn-oidc generate <framework> --enable rp-initiated-logout` を指定すると、生成コードに次が入る。
+experimental パッケージが持つのは、ログアウト要求の正規化、ヒント audience の抽出、ログアウト分岐の判定、リダイレクト先の解決という判定のロジック層だけである。
+HTTP の受け口、Cookie、セッションの削除、画面は、`maronn-oidc generate` が出力する生成コードの側にある。
+`--enable rp-initiated-logout` は、生成コードに次の 2 つを加える。
 
-- **routes/logout.ts（新規）**：`GET|POST /logout` と `POST /logout/approve` の 3 ルートと、設定オブジェクト `rpInitiatedLogoutConfig`
-- **store.ts の追記**：確認画面の CSRF cookie ヘルパーと、セッション Cookie を破棄する Set-Cookie ビルダー
-- **views.ts の追記**：確認画面と完了画面（`views` オプションで差し替え可能）
-- **routes/discovery.ts の追記**：`end_session_endpoint` メタデータ
-- **app.ts の追記**：メソッドガードへの 2 パス登録とルートのマウント
-- **conformance.test.ts の追記**：ログアウト経路の契約テスト
+- **`features/rp-initiated-logout/`**：機能を記述する `feature.ts`、リダイレクト先の登録簿の `config.ts`、確認画面の Cookie の `cookies.ts`、画面の `views.tsx`、エンドポイント本体の `endpoints/logout/`（`page.tsx`、`endpoint.ts`、`outcome.ts`、`steps/` の 2 ステップ）
+- **`features/enabled.ts`**：`rpInitiatedLogout` の import 1 行と、機能一覧 `features` の要素 1 つ
 
-機能を有効にしない生成コードは、変更前の CLI とバイト単位で同一である（解決済みフィーチャー構成の全キーを記録する生成マニフェスト `.maronn-openid-connect.json` にだけ、`rpInitiatedLogout: false` のキーが増える）。
-無効時の契約（`/logout` が存在しないこと、discovery に `end_session_endpoint` が無いこと）は、CLI のジェネレータテスト `packages/cli/src/__tests__/rp-initiated-logout-feature.test.ts` が固定している。
+生成コードでは、機能が基底のパイプラインの中で動かすロジックを、そのエンドポイントの `pipeline.ts` に、`(feature: <feature-id>)` を含むマーカーコメントで始まるブロック（この解説では **オーナーブロック** と呼ぶ）として置く。
+rp-initiated-logout のオーナーブロックは基底のパイプラインに 1 つも無く、基底への寄与はすべて `feature.ts` のフックを通る。
+この機能は自分のエンドポイントで完結し、他のエンドポイントのパイプラインの途中で動く処理を持たないためである。
 
-### routes/logout.ts（新規ファイル全文）
+`feature.ts` が使うフックは `routes` と `discovery` の 2 つである。
+`routes` は `/logout`（GET と POST）とその下の `/approve`（POST のみ）を宣言し、`app.ts` がこれをマウントして、宣言したメソッド以外を 405 で答える。
+`cors` を指定しないので、`/login` や `/consent` と同じく、ブラウザが直接開く画面として CORS ヘッダは付かない。
+`discovery` は `end_session_endpoint` を返す。
 
-ルートは判定を experimental の純関数と core の `validateIdTokenHint` に寄せ、自分では HTTP の入出力と Cookie、ストアの `delete` だけを行う。
-承認 POST の検証順序（cookie とトークンの対の照合が先、削除は後）と、リダイレクト先を cookie 側で運ぶ設計は、ファイル冒頭のコメントに理由ごと書いてある。
+ステップが読むセッションストア、設定、`jwksProvider` は基底の `setRequestContext()` がどの構成でもリクエストコンテキストに置くので、`context` フックも使わない。
+セッション Cookie を読む `parseSessionId()` と消す `buildClearedSessionCookie()` も基底の `cookies.ts` にあり、機能の有無に関わらず生成される。
+画面の 2 つは、`views.tsx` のモジュール拡張（`declare module '../../views.js'`）が基底の `Views` にメンバーとして加えるので、`createApp()` や `applyOidc()` の `views` オプションで差し替えられる。
+
+ログアウトの流れは次のとおりである。
+RP がユーザーエージェントを `GET` か `POST` の `/logout` へ送ると、`app.ts` の共通ミドルウェアがリクエストコンテキストを用意し、`endpoints/logout/page.tsx` がパラメータを取り出して `processEndSessionRequest()` を呼ぶ。
+ステップは `Response` を作らず、次に何を返すか（確認画面、リダイレクト、完了画面）と付ける Cookie を `LogoutOutcome` として返し、`page.tsx` がそれを HTTP に変える。
+確認画面のフォームは `csrf_token` を `/logout/approve` へ送り、`approveLogout()` が HttpOnly の Cookie と照合してからセッションを削除する。
+
+`--enable rp-initiated-logout` を付けずに生成すると、`features/rp-initiated-logout/` と `features/enabled.ts` の 2 行が出力されないだけで、他のファイルは変わらない。
+
+### 生成コードに入るコードの全文（hono）
+
+以下は、既定の機能に rp-initiated-logout を加えて `maronn-oidc generate hono --enable rp-initiated-logout` で生成した出力からの掲載である。
+
+#### `features/enabled.ts` に入る行
+
+`features/enabled.ts` は、有効な機能をフックの適用順に並べるファイルである。
+rp-initiated-logout はこのファイルに、`feature.ts` の import と配列 `features` の要素を 1 つずつ加える。
 
 ```typescript
-/**
- * EXPERIMENTAL — OpenID Connect RP-Initiated Logout 1.0, end_session_endpoint.
- *
- * This route was generated because the OP was created with
- * `--enable rp-initiated-logout`. It is backed by
- * @maronn-openid-connect/experimental, whose API is NOT stable: it may change in a breaking
- * way between releases. Do not build production code on it without pinning the
- * version.
- *
- * The RP sends the user agent here (GET or POST, §2 MUST) to end the OP
- * browser session. A request whose id_token_hint verifies against this OP's
- * keys AND matches the current session's End-User logs out immediately; every
- * other request — no hint, an invalid or expired hint, a client_id that
- * mismatches the hint audience, no session, another user's session — falls to
- * one shared confirmation screen (§2 MUST; §7: an unauthenticated logout link
- * would otherwise be a denial-of-service primitive). The failure reason is
- * never disclosed anywhere: a reason would turn this endpoint into an oracle
- * for session state.
- *
- * ## Why the confirmation approve step demands a cookie + token pair
- *
- * The approve POST ends a session, so a forged cross-site POST must not drive
- * it. When the confirmation screen is rendered the OP mints a fresh secret and
- * hands it to that one browser twice: in an HttpOnly cookie and in the form's
- * hidden csrf_token. /logout/approve runs only when both come back equal. An
- * attacker can obtain a valid pair in their own browser but cannot plant that
- * cookie into the victim's, so the forged POST fails the comparison — the
- * same model as the device verification binding cookie (see store.ts).
- *
- * The cookie also carries the OP-computed post-logout redirect target, so the
- * confirmation flow never round-trips the id_token_hint (or any redirect
- * parameter) through the HTML page: the only value the form submits back is
- * the csrf_token itself.
- */
-import { Hono } from 'hono';
-import {
-  decideLogoutFlow,
-  extractIdTokenHintAudience,
-  parseEndSessionRequest,
-  resolvePostLogoutRedirect,
-} from '@maronn-openid-connect/experimental/rp-initiated-logout';
-import { IdTokenHintError, generateRandomString, validateIdTokenHint } from '@maronn-openid-connect/core';
-import {
-  browserSessionStore as defaultBrowserSessionStore,
-  buildClearedLogoutConfirmationCookie,
-  buildClearedSessionCookie,
-  buildLogoutConfirmationCookie,
-  parseLogoutConfirmation,
-  parseSessionId,
-} from '../store.js';
-import { defaultProviderConfig } from '../config.js';
-import { defaultViews, renderView } from '../views.js';
+import { rpInitiatedLogout } from './rp-initiated-logout/feature.js';
+```
 
+```typescript
+  rpInitiatedLogout,
+```
+
+#### `features/rp-initiated-logout/feature.ts`
+
+機能を記述するファイルで、`defineFeature()` に `id`、`routes`、`discovery` を渡す。
+`routes` の要素は、マウント先のパス、そこにマウントする `page.tsx` の `logoutPage`、パス自体のメソッド、その下のパスとメソッド（`subpaths`）である。
+§2 は end_session_endpoint に GET と POST の両方を求め（MUST）、承認の `/logout/approve` はフォームの POST だけを受ける。
+`discovery` は §2.1 の `end_session_endpoint` を issuer から組み立てる。
+
+```typescript
+import { defineFeature } from '../feature.js';
+import { logoutPage } from './endpoints/logout/page.js';
+
+/**
+ * EXPERIMENTAL — OpenID Connect RP-Initiated Logout 1.0: the end session
+ * endpoint GET|POST /logout and its confirmation POST /logout/approve.
+ * Settings (the registered post_logout_redirect_uri values) are in config.ts.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
+ * may change in a breaking way between releases.
+ */
+export const rpInitiatedLogout = defineFeature({
+  id: 'rp-initiated-logout',
+  routes: [
+    { path: '/logout', app: logoutPage, methods: ['GET', 'POST'], subpaths: { '/approve': ['POST'] } },
+  ],
+  // RP-Initiated Logout 1.0 §2.1 metadata.
+  discovery: (issuer) => ({ end_session_endpoint: `${issuer}/logout` }),
+});
+```
+
+#### `features/rp-initiated-logout/config.ts`
+
+`post_logout_redirect_uri` の登録簿 `rpInitiatedLogoutConfig.postLogoutRedirectUris` を置くファイルで、client_id ごとに完全一致で照合する URI の一覧を持つ。
+認可エンドポイントの `redirect_uris` は流用せず、ログアウト用に別の登録簿を持つ。
+既定は空で、登録するまではどのログアウトもリダイレクトせず完了画面で終わる（fail-closed）。
+登録簿を `config` フックではなくこのファイルのオブジェクトに置くのは、`config` フックが与えられるのが基底の設定（`ProviderConfig`）の既定値だけで、この登録簿はそこに含まれないからである。
+`process-end-session-request` ステップがこのオブジェクトを直接 import して読み、デプロイは起動時に中身を書き換える（後述のサンプルがその例である）。
+
+```typescript
 /**
  * EXPERIMENTAL — settings for RP-Initiated Logout.
  *
@@ -879,184 +890,18 @@ import { defaultViews, renderView } from '../views.js';
 export const rpInitiatedLogoutConfig = {
   postLogoutRedirectUris: {} as Record<string, string[]>,
 };
-
-export const logoutApp = new Hono<{ Variables: Record<string, any> }>();
-
-/**
- * Attach Set-Cookie headers to a Response a view already produced.
- * renderView() builds its own Response, so headers staged on the framework
- * context never reach it (same helper as the device verification UI).
- */
-function withCookies(response: Response, cookies: string[]): Response {
-  const headers = new Headers(response.headers);
-  for (const cookie of cookies) {
-    headers.append('Set-Cookie', cookie);
-  }
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
-
-/** 302 to the registered post_logout_redirect_uri, with cookies attached. */
-function redirectResponse(location: string, cookies: string[]): Response {
-  const headers = new Headers({ Location: location });
-  for (const cookie of cookies) {
-    headers.append('Set-Cookie', cookie);
-  }
-  return new Response(null, { status: 302, headers });
-}
-
-/**
- * Interpret one end_session request (§2) and answer it. GET and POST share
- * this handler — they differ only in where the parameters come from.
- */
-async function handleEndSessionRequest(c: any, params: URLSearchParams): Promise<Response> {
-  const views = c.get('views') ?? defaultViews;
-  const browserSessionStore = c.get('browserSessionStore') ?? defaultBrowserSessionStore;
-  const config = c.get('config') ?? defaultProviderConfig;
-  const request = parseEndSessionRequest(params);
-  // logout_hint and ui_locales are accepted but unused (OPTIONAL, §2): the
-  // hint is not read past parsing and is never logged — it can identify the
-  // End-User. The same goes for the id_token_hint value itself.
-
-  // §2: verify the hint (signature / iss / aud / exp) against the same key
-  // set id_token_hint uses elsewhere (context jwksProvider). The expected
-  // audience is the client_id parameter when present, otherwise it is
-  // extracted — unverified — from the hint payload; trust comes from
-  // validateIdTokenHint afterwards.
-  let verifiedHint: { sub: string; [key: string]: unknown } | null = null;
-  let expectedAudience: string | null = null;
-  if (request.idTokenHint !== undefined) {
-    expectedAudience = request.clientId ?? extractIdTokenHintAudience(request.idTokenHint);
-    if (expectedAudience !== null) {
-      try {
-        const jwks = await c.get('jwksProvider')();
-        verifiedHint = await validateIdTokenHint(request.idTokenHint, {
-          expectedIss: config.issuer,
-          expectedAud: expectedAudience,
-          jwks,
-        });
-      } catch (error) {
-        // An expired, tampered or foreign hint is not an error to report — it
-        // just fails to prove logout authority, so the request falls to the
-        // confirmation path (§2 MUST) with no reason disclosed. Anything that
-        // is not a hint-validation failure (e.g. the JWKS provider itself
-        // failing) is rethrown: masking an outage as "invalid hint" would
-        // silently degrade every logout into a confirmation.
-        if (!(error instanceof IdTokenHintError)) throw error;
-        verifiedHint = null;
-      }
-    }
-  }
-
-  const sessionId = parseSessionId(c.req.header('Cookie') ?? null);
-  const session = sessionId ? await browserSessionStore.get(sessionId) : undefined;
-
-  const decision = decideLogoutFlow({
-    verifiedHint,
-    expectedAudience,
-    clientIdParam: request.clientId,
-    sessionSubject: session ? session.subject : null,
-  });
-
-  // §3: redirect only to the verified client's exactly-matching registered
-  // URI, with state appended. Resolved before the branch because the
-  // confirmation flow honors the same result after approval — the redirect
-  // condition is the hint and the exact match, not which path the logout took.
-  const redirectTo = resolvePostLogoutRedirect({
-    postLogoutRedirectUri: request.postLogoutRedirectUri,
-    state: request.state,
-    verifiedClientId: decision.verifiedClientId,
-    registeredUris:
-      decision.verifiedClientId === null
-        ? []
-        : rpInitiatedLogoutConfig.postLogoutRedirectUris[decision.verifiedClientId] ?? [],
-  });
-
-  if (decision.requiresConfirmation) {
-    // §2 MUST. Nothing is deleted here, and the screen's wording never varies
-    // with session state. The minted secret pairs the HttpOnly cookie with the
-    // form's hidden csrf_token; the redirect target rides inside the cookie.
-    const csrfSecret = generateRandomString(32);
-    return withCookies(
-      renderView(views.logoutConfirmationPage({ csrfToken: csrfSecret })),
-      [buildLogoutConfirmationCookie({ csrfSecret, redirectTo })],
-    );
-  }
-
-  // Immediate logout: a valid hint for the current session's End-User (§2).
-  // Delete the store entry and expire the cookie together.
-  if (sessionId) {
-    await browserSessionStore.delete(sessionId);
-  }
-  const cookies = [buildClearedSessionCookie()];
-  if (redirectTo !== null) {
-    return redirectResponse(redirectTo, cookies);
-  }
-  return withCookies(renderView(views.logoutCompletedPage({})), cookies);
-}
-
-/** end_session_endpoint - GET (§2: the OP MUST support GET and POST). */
-logoutApp.get('/', (c) => handleEndSessionRequest(c, new URL(c.req.url).searchParams));
-
-/** end_session_endpoint - POST, application/x-www-form-urlencoded body (§2). */
-logoutApp.post('/', async (c) => {
-  const body = await c.req.parseBody();
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(body)) {
-    if (typeof value === 'string') {
-      params.append(key, value);
-    }
-  }
-  return handleEndSessionRequest(c, params);
-});
-
-/**
- * Confirmation approve - POST
- *
- * Runs only for the browser that rendered the confirmation screen: the
- * HttpOnly cookie and the hidden csrf_token must present the same secret
- * (neither alone is accepted). On success the session is deleted and the
- * redirect decision computed at render time — carried in the cookie, never in
- * the form — is honored (§3).
- */
-logoutApp.post('/approve', async (c) => {
-  const views = c.get('views') ?? defaultViews;
-  const browserSessionStore = c.get('browserSessionStore') ?? defaultBrowserSessionStore;
-
-  const body = await c.req.parseBody();
-  const csrfToken = String(body['csrf_token'] ?? '');
-  const confirmation = parseLogoutConfirmation(c.req.header('Cookie') ?? null);
-  if (confirmation === null || csrfToken === '' || confirmation.csrfSecret !== csrfToken) {
-    // Forged, replayed or expired confirmation: delete nothing. This is a
-    // browser surface, so the answer is the error page, not OAuth error JSON.
-    return renderView(
-      views.errorPage({ error: 'Invalid logout confirmation', statusCode: 400 }),
-      { status: 400 },
-    );
-  }
-
-  // The End-User explicitly approved (§2). When the session is already gone
-  // there is nothing to delete and the response is the same either way — the
-  // confirmation flow is not an oracle for whether a session existed.
-  const sessionId = parseSessionId(c.req.header('Cookie') ?? null);
-  if (sessionId) {
-    await browserSessionStore.delete(sessionId);
-  }
-  const cookies = [buildClearedSessionCookie(), buildClearedLogoutConfirmationCookie()];
-  if (confirmation.redirectTo !== null) {
-    return redirectResponse(confirmation.redirectTo, cookies);
-  }
-  return withCookies(renderView(views.logoutCompletedPage({})), cookies);
-});
 ```
 
-### store.ts に入るコード
+#### `features/rp-initiated-logout/cookies.ts`
 
-`buildSessionCookie` の直後に、確認画面の CSRF cookie 一式とセッション破棄ヘルパーが入る。
-cookie 値はシークレットと base64url 化したリダイレクト先をドットでつないだ 2 部構成で、`parseLogoutConfirmation` はどんな不正形も null に落とす（承認 POST は null を 400 にし、何も削除しない）。
+確認画面と承認 POST を結ぶ Cookie の組み立てと解釈を置くファイルである。
+確認画面を描くたびに乱数のシークレットを作り、HttpOnly の Cookie とフォームの hidden の `csrf_token` の 2 か所で同じブラウザへ渡す。
+攻撃者は自分のブラウザで有効な組を手に入れられても、被害者のブラウザへこの Cookie を置けないので、クロスサイトから偽造した POST は照合で落ちる。
+
+Cookie の値は、シークレットと、OP が確定したリダイレクト先を base64url にしたものをドットでつないだ 2 部構成である。
+リダイレクト先を hidden フィールドではなく HttpOnly の Cookie で運ぶので、フォームから書き換えられず、`id_token_hint` をページへ書き戻す必要もない。
+`parseLogoutConfirmation()` はどんな不正な形も `null` に落とし、承認 POST はそれを 400 にして何も削除しない。
+有効期間は 10 分（`Max-Age=600`）で、放置された確認画面の Cookie を長く残さない。
 
 ```typescript
 /**
@@ -1070,7 +915,8 @@ cookie 値はシークレットと base64url 化したリダイレクト先を�
  * cannot set this cookie in the victim's browser, so a forged cross-site POST
  * fails the comparison (and SameSite=Lax drops the cookie from a cross-site
  * POST to begin with). Neither half alone is ever accepted — the same model
- * as the device verification binding cookie above.
+ * as the device verification binding cookie of the device-authorization-grant
+ * feature.
  *
  * The cookie also carries the OP-computed post-logout redirect target
  * (base64url of the exact registered URL, or empty when there is none), so
@@ -1139,23 +985,31 @@ export function parseLogoutConfirmation(cookieHeader: string | null): LogoutConf
     return null;
   }
 }
-
-/**
- * Build the Set-Cookie value that removes the browser session cookie. The
- * logout routes pair it with browserSessionStore.delete(): the store entry
- * and the cookie go away together (RP-Initiated Logout 1.0 §2).
- */
-export function buildClearedSessionCookie(): string {
-  return SESSION_COOKIE_NAME + '=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0';
-}
 ```
 
-### views.ts に入るコード
+#### `features/rp-initiated-logout/views.tsx`
 
-パラメータ型が 2 つ、`Views` インターフェースのメンバーが 2 つ、既定実装が 2 つ、`defaultViews` のエントリが 2 行入る。
-完了画面のパラメータをあえて空にしているのは、この画面に End-User やクライアントの識別子を出さない（画面を見た第三者に何も漏らさない）方針と、文言を削除の有無で変えない（オラクルにしない）方針の両方を型で固定するためである。
+確認画面と完了画面の既定の hono/jsx 実装と、そのパラメータ型を置くファイルである。
+モジュール拡張で基底の `Views` に `logoutConfirmationPage` と `logoutCompletedPage` を省略可能なメンバーとして加え、`logoutViews()` が差し替えられた画面か既定の画面を選ぶ。
+確認画面の文言は、どの経路から来ても（ヒントなし、無効や期限切れのヒント、別ユーザーのセッション、セッションなし）同じである。
+完了画面のパラメータ型 `LogoutCompletedPageParams` をあえて空にしているのは、画面に End-User やクライアントの識別子を出さないことと、文言を削除の有無で変えないこと（セッション状態のオラクルにしないこと）を型で固定するためである。
 
-```typescript
+```tsx
+/** @jsxImportSource hono/jsx */
+/**
+ * EXPERIMENTAL — the views of the RP-Initiated Logout screens
+ * (RP-Initiated Logout 1.0 §2), in hono/jsx.
+ *
+ * They are members of Views (views.tsx), added below, so the views option of
+ * createApp() / applyOidc() can replace them like the login and consent
+ * views. A member left out falls back to the default of this file.
+ */
+import type { JSX } from 'hono/jsx/jsx-runtime';
+import {
+  Layout,
+  type Views,
+} from '../../views.js';
+
 export interface LogoutConfirmationPageParams {
   /** CSRF token (must be included as hidden form field of the approve POST) */
   csrfToken: string;
@@ -1168,359 +1022,497 @@ export interface LogoutConfirmationPageParams {
  * deleted — varying it would make the page a session-existence oracle.
  */
 export interface LogoutCompletedPageParams {}
-```
 
-`Views` インターフェースには次の 2 メンバーが加わる。
+declare module '../../views.js' {
+  interface Views {
+    /** EXPERIMENTAL (RP-Initiated Logout 1.0 §2): render the logout confirmation screen */
+    logoutConfirmationPage?(params: LogoutConfirmationPageParams): ViewResult;
+    /** EXPERIMENTAL (RP-Initiated Logout 1.0): render the logged-out screen */
+    logoutCompletedPage?(params: LogoutCompletedPageParams): ViewResult;
+  }
+}
 
-```typescript
-  /** EXPERIMENTAL (RP-Initiated Logout 1.0 §2): render the logout confirmation screen */
-  logoutConfirmationPage(params: LogoutConfirmationPageParams): ViewResult;
-  /** EXPERIMENTAL (RP-Initiated Logout 1.0): render the logged-out screen */
-  logoutCompletedPage(params: LogoutCompletedPageParams): ViewResult;
-```
-
-既定実装は次の 2 関数で、`defaultViews` へ次の 2 行で登録される。
-
-```typescript
 // RP-Initiated Logout 1.0 §2: the wording is fixed for every path into this
 // screen (no hint, an invalid or expired hint, another user's session, no
 // session at all), so the page cannot be used as an oracle for session state
 // or for why the hint failed.
-function defaultLogoutConfirmationPage(params: LogoutConfirmationPageParams): string {
-  return `<!DOCTYPE html>
-<html>
-<head><title>Log out</title></head>
-<body>
-  <h1>Log out</h1>
-  <p>Do you want to log out of the OpenID Provider?</p>
-  <p>If you did not request this, close this page.</p>
-  <form method="POST" action="/logout/approve">
-    <input type="hidden" name="csrf_token" value="${escapeHtml(params.csrfToken)}" />
-    <button type="submit">Log out</button>
-  </form>
-</body>
-</html>`;
+function defaultLogoutConfirmationPage(params: LogoutConfirmationPageParams): JSX.Element {
+  return (
+    <Layout title="Log out">
+      <h1>Log out</h1>
+      <p>Do you want to log out of the OpenID Provider?</p>
+      <p>If you did not request this, close this page.</p>
+      <form method="post" action="/logout/approve">
+        <input type="hidden" name="csrf_token" value={params.csrfToken} />
+        <button type="submit">Log out</button>
+      </form>
+    </Layout>
+  );
 }
 
-function defaultLogoutCompletedPage(_params: LogoutCompletedPageParams): string {
-  return `<!DOCTYPE html>
-<html>
-<head><title>Logged out</title></head>
-<body>
-  <h1>Logged out</h1>
-  <p>You have been logged out.</p>
-  <p>You can close this page.</p>
-</body>
-</html>`;
+function defaultLogoutCompletedPage(_params: LogoutCompletedPageParams): JSX.Element {
+  return (
+    <Layout title="Logged out">
+      <h1>Logged out</h1>
+      <p>You have been logged out.</p>
+      <p>You can close this page.</p>
+    </Layout>
+  );
+}
+
+/** The views of the request for these screens: the ones the app replaced, else the defaults above. */
+export function logoutViews(c: any): Required<Pick<Views, 'logoutConfirmationPage' | 'logoutCompletedPage'>> {
+  const views: Partial<Views> = c.get('views') ?? {};
+  return {
+    logoutConfirmationPage: views.logoutConfirmationPage ?? defaultLogoutConfirmationPage,
+    logoutCompletedPage: views.logoutCompletedPage ?? defaultLogoutCompletedPage,
+  };
 }
 ```
 
-```typescript
-  logoutConfirmationPage: defaultLogoutConfirmationPage,
-  logoutCompletedPage: defaultLogoutCompletedPage,
+#### `features/rp-initiated-logout/endpoints/logout/page.tsx`
+
+`/logout` にマウントされる Hono アプリ `logoutPage` で、`GET /`、`POST /`、`POST /approve` の 3 ルートを持つ。
+GET はクエリから、POST は `application/x-www-form-urlencoded` のボディから `URLSearchParams` を作り、同じ `processEndSessionRequest()` に渡す。
+`respond()` は `LogoutOutcome` の種類ごとに応答を組み立てる。
+偽造や期限切れの確認は、ブラウザが見る画面なので OAuth のエラー JSON ではなくエラーページ（400）で答える。
+確認画面と完了画面には `LogoutOutcome` が運ぶ Cookie を付け、リダイレクトは Cookie 付きの 302 で返す。
+ステップが `Response` を作らないので、ログアウトの UI を変えるときに触るのはこのファイルか `views.tsx` だけで、判定のステップは変えなくてよい。
+
+```tsx
+/** @jsxImportSource hono/jsx */
+/**
+ * EXPERIMENTAL — RP-Initiated Logout screens (RP-Initiated Logout 1.0 §2),
+ * screen routing layer.
+ *
+ * The RP sends the user agent to GET|POST /logout; the browser then sees one
+ * of three things: the confirmation screen, the logged-out screen, or a
+ * redirect to the RP's registered post_logout_redirect_uri. Deciding which —
+ * verifying id_token_hint, matching the session, resolving the redirect — is
+ * the steps of steps/, processEndSessionRequest() and approveLogout() (one box
+ * each of `maronn-oidc graph --detail steps --endpoint logout`); this file only
+ * turns their outcome into HTTP, with the cookies the outcome carries. To
+ * customize the logout UI, edit this file or the views in ../../views.tsx; the
+ * steps never have to change. The confirmation form must keep
+ * posting csrf_token to /logout/approve: it is paired with the HttpOnly cookie
+ * the logic mints.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable.
+ */
+import { Hono } from 'hono';
+import { renderErrorPage } from '../../../../pages/errors.js';
+import { redirectWithCookies, withCookies } from '../../../../pages/respond.js';
+import { renderView } from '../../../../views.js';
+import {
+  logoutViews,
+  type LogoutCompletedPageParams,
+  type LogoutConfirmationPageParams,
+} from '../../views.js';
+import type { LogoutOutcome } from './outcome.js';
+import { approveLogout } from './steps/approve-logout.js';
+import { processEndSessionRequest } from './steps/process-end-session-request.js';
+
+export const logoutPage = new Hono<{ Variables: Record<string, any> }>();
+
+/** Render the logout confirmation screen (§2 MUST when no valid hint is presented). */
+export function renderLogoutConfirmationPage(
+  c: any,
+  params: LogoutConfirmationPageParams,
+): Response {
+  const views = logoutViews(c);
+  return renderView(<views.logoutConfirmationPage {...params} />);
+}
+
+/** Render the logged-out screen. */
+export function renderLogoutCompletedPage(c: any, params: LogoutCompletedPageParams): Response {
+  const views = logoutViews(c);
+  return renderView(<views.logoutCompletedPage {...params} />);
+}
+
+/** Turn the outcome of a logout step into the HTTP response. */
+function respond(c: any, outcome: LogoutOutcome): Response {
+  if (outcome.kind === 'invalid_confirmation') {
+    // Forged, replayed or expired confirmation: nothing was deleted. This is a
+    // browser surface, so the answer is the error page, not OAuth error JSON.
+    return renderErrorPage(c, { error: 'Invalid logout confirmation', statusCode: 400 });
+  }
+  if (outcome.kind === 'confirmation') {
+    return withCookies(
+      renderLogoutConfirmationPage(c, { csrfToken: outcome.csrfToken }),
+      outcome.cookies,
+    );
+  }
+  if (outcome.kind === 'redirect') {
+    // §3: the registered post_logout_redirect_uri, state already appended.
+    return redirectWithCookies(outcome.location, outcome.cookies);
+  }
+  return withCookies(renderLogoutCompletedPage(c, {}), outcome.cookies);
+}
+
+/** end_session_endpoint - GET (§2: the OP MUST support GET and POST). */
+logoutPage.get('/', async (c) =>
+  respond(c, await processEndSessionRequest(c, new URL(c.req.url).searchParams)),
+);
+
+/** end_session_endpoint - POST, application/x-www-form-urlencoded body (§2). */
+logoutPage.post('/', async (c) => {
+  const body = await c.req.parseBody();
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (typeof value === 'string') {
+      params.append(key, value);
+    }
+  }
+  return respond(c, await processEndSessionRequest(c, params));
+});
+
+/** Confirmation approve - POST */
+logoutPage.post('/approve', async (c) => {
+  const body = await c.req.parseBody();
+  return respond(c, await approveLogout(c, String(body['csrf_token'] ?? '')));
+});
 ```
 
-### routes/discovery.ts に入るコード
+#### `features/rp-initiated-logout/endpoints/logout/endpoint.ts`
 
-メタデータのスプレッドマージに 1 エントリ加わる。
+`maronn-oidc graph` がエンドポイントの図を描くための記述である。
+`layer: 'browser'` のエンドポイントで、2 つのステップは一直線につながらず（`chain: false`）、確認画面を経由する分岐の辺だけを持つ。
+画面のエンドポイントなので `rearrangeable: false` で、`--flow` はこのエンドポイントのステップを外したり並べ替えたりしない。
+`journeys` は、トークンエンドポイントで発行した ID Token が `id_token_hint` としてここへ届く流れを図に載せる。
 
 ```typescript
-    // EXPERIMENTAL — RP-Initiated Logout 1.0 §2.1 metadata.
-    end_session_endpoint: `${issuer}/logout`,
+import { defineEndpoint } from '../../../../endpoints/step.js';
+
+/** EXPERIMENTAL — the end session endpoint. RP-Initiated Logout 1.0 §2 */
+export const endpoint = defineEndpoint({
+  id: 'logout',
+  order: 170,
+  label: 'End session endpoint',
+  path: '/logout',
+  methods: ['GET', 'POST'],
+  layer: 'browser',
+  group: { id: 'logout', label: 'RP-Initiated Logout 1.0' },
+  spec: 'RP-Initiated Logout 1.0 §2',
+  feature: 'rp-initiated-logout',
+  rearrangeable: false,
+  steps: [
+    'process-end-session-request',
+    'approve-logout',
+  ],
+  edges: {
+    chain: false,
+    extra: [
+      { from: 'process-end-session-request', to: 'approve-logout', label: 'confirmation screen', kind: 'branch' },
+    ],
+  },
+  journeys: [
+    { from: 'token', to: 'logout', label: 'id_token_hint', kind: 'flow', order: 170 },
+  ],
+});
 ```
 
-### app.ts に入るコード
+#### `features/rp-initiated-logout/endpoints/logout/outcome.ts`
 
-メソッドガードの表に 2 パスが入る（§2 MUST の GET / POST 両対応と、承認 POST の POST 限定）。
+ステップと `page.tsx` の間で受け渡す `LogoutOutcome` の型を置くファイルである。
+冒頭のコメントが、エンドポイントの振る舞い（有効なヒントと現在のセッションの End-User が一致するときだけ即時ログアウトし、それ以外はすべて同じ確認画面へ落とす）と、承認 POST に Cookie とトークンの組を求める理由を説明している。
 
 ```typescript
-  '/logout': ['GET', 'POST'],
-  '/logout/approve': ['POST'],
+/**
+ * EXPERIMENTAL — OpenID Connect RP-Initiated Logout 1.0, end_session_endpoint
+ * — API layer: logic only.
+ *
+ * This module was generated because the OP was created with
+ * `--enable rp-initiated-logout`. It is backed by
+ * @maronn-openid-connect/experimental, whose API is NOT stable: it may change in a breaking
+ * way between releases. Do not build production code on it without pinning the
+ * version.
+ *
+ * The RP sends the user agent to /logout (GET or POST, §2 MUST) to end the OP
+ * browser session. A request whose id_token_hint verifies against this OP's
+ * keys AND matches the current session's End-User logs out immediately; every
+ * other request — no hint, an invalid or expired hint, a client_id that
+ * mismatches the hint audience, no session, another user's session — falls to
+ * one shared confirmation screen (§2 MUST; §7: an unauthenticated logout link
+ * would otherwise be a denial-of-service primitive). The failure reason is
+ * never disclosed anywhere: a reason would turn this endpoint into an oracle
+ * for session state.
+ *
+ * Neither step of steps/ builds a Response: each returns an outcome (which
+ * screen or redirect comes next, with which cookies), and page.tsx — which
+ * owns the GET and POST routes — turns it into HTTP.
+ *
+ * ## Why the confirmation approve step demands a cookie + token pair
+ *
+ * The approve POST ends a session, so a forged cross-site POST must not drive
+ * it. When the confirmation screen is shown the OP mints a fresh secret and
+ * hands it to that one browser twice: in an HttpOnly cookie and in the form's
+ * hidden csrf_token. approveLogout() runs only when both come back equal. An
+ * attacker can obtain a valid pair in their own browser but cannot plant that
+ * cookie into the victim's, so the forged POST fails the comparison — the
+ * same model as the device verification binding cookie of the
+ * device-authorization-grant feature.
+ *
+ * The cookie also carries the OP-computed post-logout redirect target, so the
+ * confirmation flow never round-trips the id_token_hint (or any redirect
+ * parameter) through the HTML page: the only value the form submits back is
+ * the csrf_token itself.
+ */
+
+/** What a logout step decided; page.tsx turns it into HTTP. */
+export type LogoutOutcome =
+  /** Forged, replayed or expired confirmation: nothing was deleted (400). */
+  | { kind: 'invalid_confirmation' }
+  /** §2 MUST: ask first. cookies pairs the HttpOnly secret with the form's csrf_token. */
+  | { kind: 'confirmation'; csrfToken: string; cookies: string[] }
+  /** Logged out; §3: return to the registered post_logout_redirect_uri (state appended). */
+  | { kind: 'redirect'; location: string; cookies: string[] }
+  /** Logged out; no registered redirect applied, so show the completed screen. */
+  | { kind: 'completed'; cookies: string[] };
 ```
 
-続いて import とマウントの 2 行が入る。
-`/logout` はブラウザが直接開く画面なので、`/login` や `/consent` と同じく CORS ヘッダは付けない。
+#### `features/rp-initiated-logout/endpoints/logout/steps/process-end-session-request.ts`
+
+GET と POST の `/logout` が呼ぶステップである。
+`id_token_hint` があれば、期待する audience を `client_id` パラメータから、無ければ検証前のヒントのペイロードから取り出し、`validateIdTokenHint()` で署名、iss、aud、exp を検証する。
+鍵セットは、他の場所の id_token_hint と同じ `jwksProvider` である。
+`IdTokenHintError` はログアウト権限を示せなかっただけなので `null` にして確認画面へ回し、理由はどこにも出さない。
+それ以外の例外（JWKS プロバイダ自体の障害など）は投げ直す。
+障害を「無効なヒント」として隠すと、すべてのログアウトが黙って確認画面に変わってしまうためである。
+
+リダイレクト先は分岐の前に `resolvePostLogoutRedirect()` で解決する。
+確認画面を経由した場合も承認後に同じ結果を使うためで、リダイレクトの条件はヒントと登録簿との完全一致であり、どちらの経路でログアウトしたかではない。
+確認が必要なら何も削除せずにシークレットを作って確認画面の `LogoutOutcome` を返し、即時ログアウトならセッションストアのエントリを削除して Cookie を消す。
+`logout_hint` と `ui_locales` は受け付けるが使わず、ログにも残さない。
 
 ```typescript
-import { logoutApp } from './routes/logout.js';
+import {
+  decideLogoutFlow,
+  extractIdTokenHintAudience,
+  parseEndSessionRequest,
+  resolvePostLogoutRedirect,
+} from '@maronn-openid-connect/experimental/rp-initiated-logout';
+import {
+  IdTokenHintError,
+  generateRandomString,
+  validateIdTokenHint,
+} from '@maronn-openid-connect/core';
+import { buildClearedSessionCookie, parseSessionId } from '../../../../../cookies.js';
+import { buildLogoutConfirmationCookie } from '../../../cookies.js';
+import type { LogoutOutcome } from '../outcome.js';
+import { step } from '../../../../../endpoints/step.js';
+import { rpInitiatedLogoutConfig } from '../../../config.js';
 
-  app.route('/logout', logoutApp);
-```
+export const meta = step({
+  id: 'process-end-session-request',
+  endpoint: 'logout',
+  feature: 'rp-initiated-logout',
+  kind: 'decide',
+  label: 'Verify id_token_hint and decide: log out or confirm',
+  spec: 'RP-Initiated Logout 1.0 §2 / §3',
+  function: 'processEndSessionRequest',
+  calls: ['parseEndSessionRequest', 'extractIdTokenHintAudience', 'validateIdTokenHint', 'decideLogoutFlow', 'resolvePostLogoutRedirect'],
+  consumes: [],
+  produces: ['confirmation'],
+  removable: false,
+});
 
-### conformance.test.ts に入るコード
+/**
+ * Interpret one end_session request (§2). GET and POST share this function —
+ * they differ only in where the parameters come from.
+ */
+export async function processEndSessionRequest(c: any, params: URLSearchParams): Promise<LogoutOutcome> {
+  const browserSessionStore = c.get('browserSessionStore');
+  const config = c.get('config');
+  const request = parseEndSessionRequest(params);
+  // logout_hint and ui_locales are accepted but unused (OPTIONAL, §2): the
+  // hint is not read past parsing and is never logged — it can identify the
+  // End-User. The same goes for the id_token_hint value itself.
 
-契約テストは、認可コードフローを実 HTTP で回して ID Token とセッション Cookie を取り、`prompt=none` の応答（生きたセッションなら code、消えたセッションなら `login_required`）でセッションの生死を観測する。
-ログアウトの成否をストアの中身ではなく外形で固定するのは、利用者がストアを差し替えても契約が変わらないようにするためである。
-
-```typescript
-  // EXPERIMENTAL — OpenID Connect RP-Initiated Logout 1.0. Generated because
-  // this provider was created with --enable rp-initiated-logout. These tests
-  // pin the contract the repository guarantees for the generated
-  // end_session_endpoint: change the behavior and they fail, which is how a
-  // customized OP learns it drifted.
-  describe('RP-Initiated Logout (RP-Initiated Logout 1.0)', () => {
-    // RFC 7636 Appendix B example PKCE pair (verifier -> its S256 challenge).
-    const LOGOUT_PKCE_VERIFIER = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
-    const LOGOUT_PKCE_CHALLENGE = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
-    // A logout-specific registered return URI — deliberately NOT the authorize
-    // REDIRECT_URI, because §3 defines post_logout_redirect_uris as its own
-    // registry.
-    const POST_LOGOUT_URI = 'http://localhost:3000/logged-out';
-    const CLEARED_SESSION_COOKIE =
-      'session_id=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0';
-
-    // The generated settings object is the §3 registry; register the test
-    // client's return URI once for every test in this block.
-    rpInitiatedLogoutConfig.postLogoutRedirectUris = { 'c-conf': [POST_LOGOUT_URI] };
-
-    // Pure helpers: they fetch and parse only. Every assertion lives in an it().
-    function relativeFrom(location: string | null): string {
-      const url = new URL(location ?? '', 'http://localhost');
-      return url.pathname + url.search;
+  // §2: verify the hint (signature / iss / aud / exp) against the same key
+  // set id_token_hint uses elsewhere (context jwksProvider). The expected
+  // audience is the client_id parameter when present, otherwise it is
+  // extracted — unverified — from the hint payload; trust comes from
+  // validateIdTokenHint afterwards.
+  let verifiedHint: { sub: string; [key: string]: unknown } | null = null;
+  let expectedAudience: string | null = null;
+  if (request.idTokenHint !== undefined) {
+    expectedAudience = request.clientId ?? extractIdTokenHintAudience(request.idTokenHint);
+    if (expectedAudience !== null) {
+      try {
+        const jwks = await c.get('jwksProvider')();
+        verifiedHint = await validateIdTokenHint(request.idTokenHint, {
+          expectedIss: config.issuer,
+          expectedAud: expectedAudience,
+          jwks,
+        });
+      } catch (error) {
+        // An expired, tampered or foreign hint is not an error to report — it
+        // just fails to prove logout authority, so the request falls to the
+        // confirmation path (§2 MUST) with no reason disclosed. Anything that
+        // is not a hint-validation failure (e.g. the JWKS provider itself
+        // failing) is rethrown: masking an outage as "invalid hint" would
+        // silently degrade every logout into a confirmation.
+        if (!(error instanceof IdTokenHintError)) throw error;
+        verifiedHint = null;
+      }
     }
+  }
 
-    function csrfFrom(html: string): string {
-      return html.match(/name="csrf_token" value="([^"]+)"/)?.[1] ?? '';
-    }
+  const sessionId = parseSessionId(c.req.header('Cookie') ?? null);
+  const session = sessionId ? await browserSessionStore.get(sessionId) : undefined;
 
-    // Drive authorize -> login -> consent -> token and hand back the browser
-    // session cookie plus the ID Token (the id_token_hint of the logout tests).
-    async function loginSession(): Promise<{ idToken: string; sessionCookie: string }> {
-      const authorizeRes = await app.request(
-        '/authorize?response_type=code&client_id=c-conf' +
-          '&redirect_uri=' + encodeURIComponent(REDIRECT_URI) +
-          '&scope=openid&state=logout-flow&nonce=logout-nonce&prompt=consent' +
-          '&code_challenge=' + LOGOUT_PKCE_CHALLENGE + '&code_challenge_method=S256',
-      );
-      const loginPath = relativeFrom(authorizeRes.headers.get('Location'));
-      const bindingCookie = (authorizeRes.headers.get('Set-Cookie') ?? '').split(';')[0] ?? '';
-      const transactionId =
-        new URL(loginPath, 'http://localhost').searchParams.get('transaction_id') ?? '';
-
-      const loginGet = await app.request(loginPath, { headers: { Cookie: bindingCookie } });
-      const loginRes = await app.request('/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-        body: new URLSearchParams({
-          transaction_id: transactionId,
-          csrf_token: csrfFrom(await loginGet.text()),
-          username: 'testuser',
-          password: 'password',
-        }).toString(),
-      });
-      const sessionCookie =
-        (loginRes.headers.get('Set-Cookie') ?? '').match(/session_id=[^;,]+/)?.[0] ?? '';
-      const cookies = bindingCookie ? bindingCookie + '; ' + sessionCookie : sessionCookie;
-
-      const consentPath = relativeFrom(loginRes.headers.get('Location'));
-      const consentGet = await app.request(consentPath, { headers: { Cookie: cookies } });
-      const consentRes = await app.request('/consent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookies },
-        body: new URLSearchParams({
-          transaction_id: transactionId,
-          csrf_token: csrfFrom(await consentGet.text()),
-          action: 'approve',
-        }).toString(),
-      });
-      const code =
-        new URL(consentRes.headers.get('Location') ?? '', 'http://localhost')
-          .searchParams.get('code') ?? '';
-
-      const tokenRes = await app.request('/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: REDIRECT_URI,
-          client_id: 'c-conf',
-          client_secret: 's',
-          code_verifier: LOGOUT_PKCE_VERIFIER,
-        }).toString(),
-      });
-      const idToken = ((await tokenRes.json()) as { id_token?: string }).id_token ?? '';
-      return { idToken, sessionCookie };
-    }
-
-    // prompt=none is the observable session probe (OIDC Core 1.0 §3.1.2.1): a
-    // live session answers with a code, a dead one with error=login_required.
-    async function promptNoneProbe(
-      sessionCookie: string,
-    ): Promise<{ error: string | null; hasCode: boolean }> {
-      const res = await app.request(
-        '/authorize?response_type=code&client_id=c-conf' +
-          '&redirect_uri=' + encodeURIComponent(REDIRECT_URI) +
-          '&scope=openid&state=logout-probe&prompt=none' +
-          '&code_challenge=' + LOGOUT_PKCE_CHALLENGE + '&code_challenge_method=S256',
-        { headers: { Cookie: sessionCookie } },
-      );
-      const callback = new URL(res.headers.get('Location') ?? '', 'http://localhost');
-      return {
-        error: callback.searchParams.get('error'),
-        hasCode: callback.searchParams.get('code') !== null,
-      };
-    }
-
-    it('should advertise end_session_endpoint in discovery metadata', async () => {
-      const res = await app.request('/.well-known/openid-configuration');
-
-      expect(res.status).toBe(200);
-      const metadata = await res.json();
-      expect(metadata.end_session_endpoint).toBe('http://localhost:3000/logout');
-    });
-
-    // §2 + §3: a valid hint for the current session logs out at once, the
-    // session cookie and store entry are destroyed together, and the browser
-    // returns to the registered URI with state appended.
-    it('should log out immediately and redirect with state for a valid hint and registered URI', async () => {
-      const { idToken, sessionCookie } = await loginSession();
-
-      const res = await app.request(
-        '/logout?id_token_hint=' + encodeURIComponent(idToken) +
-          '&post_logout_redirect_uri=' + encodeURIComponent(POST_LOGOUT_URI) +
-          '&state=af0ifjsldkj',
-        { headers: { Cookie: sessionCookie } },
-      );
-
-      expect(res.status).toBe(302);
-      expect(res.headers.get('Location')).toBe(POST_LOGOUT_URI + '?state=af0ifjsldkj');
-      expect(res.headers.get('Set-Cookie')).toBe(CLEARED_SESSION_COOKIE);
-      expect(await promptNoneProbe(sessionCookie)).toEqual({
-        error: 'login_required',
-        hasCode: false,
-      });
-    });
-
-    // §2 MUST: the end_session_endpoint accepts POST with a form body exactly
-    // like GET with a query.
-    it('should accept the logout request as a form POST', async () => {
-      const { idToken, sessionCookie } = await loginSession();
-
-      const res = await app.request('/logout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: sessionCookie },
-        body: new URLSearchParams({
-          id_token_hint: idToken,
-          post_logout_redirect_uri: POST_LOGOUT_URI,
-          state: 'post-body-state',
-        }).toString(),
-      });
-
-      expect(res.status).toBe(302);
-      expect(res.headers.get('Location')).toBe(POST_LOGOUT_URI + '?state=post-body-state');
-    });
-
-    // §2 MUST + §7: without a valid hint nothing is deleted — the screen asks
-    // first, so a planted <img src="/logout"> cannot end the victim's session.
-    it('should show the confirmation screen and keep the session when the hint is absent', async () => {
-      const { sessionCookie } = await loginSession();
-
-      const res = await app.request('/logout', { headers: { Cookie: sessionCookie } });
-
-      expect(res.status).toBe(200);
-      expect(res.headers.get('Content-Type')).toBe('text/html; charset=UTF-8');
-      const html = await res.text();
-      expect(html.includes('action="/logout/approve"')).toBe(true);
-      expect((res.headers.get('Set-Cookie') ?? '').startsWith('oidc_logout_confirm=')).toBe(true);
-      expect(await promptNoneProbe(sessionCookie)).toEqual({ error: null, hasCode: true });
-    });
-
-    it('should delete the session when the confirmation is approved with the paired cookie and token', async () => {
-      const { sessionCookie } = await loginSession();
-      const confirmRes = await app.request('/logout', { headers: { Cookie: sessionCookie } });
-      const confirmCookie =
-        (confirmRes.headers.get('Set-Cookie') ?? '').match(/oidc_logout_confirm=[^;,]+/)?.[0] ?? '';
-      const csrfToken = csrfFrom(await confirmRes.text());
-
-      const res = await app.request('/logout/approve', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Cookie: sessionCookie + '; ' + confirmCookie,
-        },
-        body: new URLSearchParams({ csrf_token: csrfToken }).toString(),
-      });
-
-      expect(res.status).toBe(200);
-      expect((res.headers.get('Set-Cookie') ?? '').includes(CLEARED_SESSION_COOKIE)).toBe(true);
-      expect(await promptNoneProbe(sessionCookie)).toEqual({
-        error: 'login_required',
-        hasCode: false,
-      });
-    });
-
-    // The hidden token alone is not a defense: without the HttpOnly cookie the
-    // approve POST must refuse to delete anything (forged cross-site POST).
-    it('should reject an approve POST without the confirmation cookie and keep the session', async () => {
-      const { sessionCookie } = await loginSession();
-      const confirmRes = await app.request('/logout', { headers: { Cookie: sessionCookie } });
-      const csrfToken = csrfFrom(await confirmRes.text());
-
-      const res = await app.request('/logout/approve', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Cookie: sessionCookie,
-        },
-        body: new URLSearchParams({ csrf_token: csrfToken }).toString(),
-      });
-
-      expect(res.status).toBe(400);
-      expect(await promptNoneProbe(sessionCookie)).toEqual({ error: null, hasCode: true });
-    });
-
-    // §3 MUST NOT: an unregistered URI is never redirected to. The logout
-    // itself still happens (the hint was valid) — the browser just stays on
-    // the completed page and state is not echoed anywhere.
-    it('should show the completed page instead of redirecting to an unregistered URI', async () => {
-      const { idToken, sessionCookie } = await loginSession();
-
-      const res = await app.request(
-        '/logout?id_token_hint=' + encodeURIComponent(idToken) +
-          '&post_logout_redirect_uri=' + encodeURIComponent('https://attacker.example/out') +
-          '&state=leak-probe',
-        { headers: { Cookie: sessionCookie } },
-      );
-
-      expect(res.status).toBe(200);
-      expect(res.headers.get('Location')).toBe(null);
-      expect((await res.text()).includes('leak-probe')).toBe(false);
-      expect(await promptNoneProbe(sessionCookie)).toEqual({
-        error: 'login_required',
-        hasCode: false,
-      });
-    });
-
-    // §2 MUST: a client_id parameter that mismatches the hint audience voids
-    // the hint — confirmation screen, session intact, no redirect.
-    it('should fall back to the confirmation screen when client_id mismatches the hint audience', async () => {
-      const { idToken, sessionCookie } = await loginSession();
-
-      const res = await app.request(
-        '/logout?id_token_hint=' + encodeURIComponent(idToken) +
-          '&client_id=c-public' +
-          '&post_logout_redirect_uri=' + encodeURIComponent(POST_LOGOUT_URI),
-        { headers: { Cookie: sessionCookie } },
-      );
-
-      expect(res.status).toBe(200);
-      expect(res.headers.get('Location')).toBe(null);
-      expect((await res.text()).includes('action="/logout/approve"')).toBe(true);
-      expect(await promptNoneProbe(sessionCookie)).toEqual({ error: null, hasCode: true });
-    });
+  const decision = decideLogoutFlow({
+    verifiedHint,
+    expectedAudience,
+    clientIdParam: request.clientId,
+    sessionSubject: session ? session.subject : null,
   });
+
+  // §3: redirect only to the verified client's exactly-matching registered
+  // URI, with state appended. Resolved before the branch because the
+  // confirmation flow honors the same result after approval — the redirect
+  // condition is the hint and the exact match, not which path the logout took.
+  const redirectTo = resolvePostLogoutRedirect({
+    postLogoutRedirectUri: request.postLogoutRedirectUri,
+    state: request.state,
+    verifiedClientId: decision.verifiedClientId,
+    registeredUris:
+      decision.verifiedClientId === null
+        ? []
+        : rpInitiatedLogoutConfig.postLogoutRedirectUris[decision.verifiedClientId] ?? [],
+  });
+
+  if (decision.requiresConfirmation) {
+    // §2 MUST. Nothing is deleted here, and the screen's wording never varies
+    // with session state. The minted secret pairs the HttpOnly cookie with the
+    // form's hidden csrf_token; the redirect target rides inside the cookie.
+    const csrfSecret = generateRandomString(32);
+    return {
+      kind: 'confirmation',
+      csrfToken: csrfSecret,
+      cookies: [buildLogoutConfirmationCookie({ csrfSecret, redirectTo })],
+    };
+  }
+
+  // Immediate logout: a valid hint for the current session's End-User (§2).
+  // Delete the store entry and expire the cookie together.
+  if (sessionId) {
+    await browserSessionStore.delete(sessionId);
+  }
+  const cookies = [buildClearedSessionCookie()];
+  if (redirectTo !== null) {
+    return { kind: 'redirect', location: redirectTo, cookies };
+  }
+  return { kind: 'completed', cookies };
+}
 ```
 
-### 他フレームワークの生成結果
+#### `features/rp-initiated-logout/endpoints/logout/steps/approve-logout.ts`
 
-express / fastify / nextjs は web-standard 変換で同じルートテンプレートから生成される。
-`routes/logout.ts` は Hono の import と router クラスだけが置き換わり、判定・Cookie・応答の構成は同一である（[web-standard/templates.ts](https://github.com/maronnjapan/maronn-openid-connect/blob/main/packages/cli/src/frameworks/web-standard/templates.ts) の `toWebRouteTemplate`）。
+`POST /logout/approve` が呼ぶステップである。
+確認の Cookie を解釈し、そのシークレットとフォームの `csrf_token` が一致しなければ、何も削除せずに `invalid_confirmation` を返す。
+照合が先で削除が後という順序により、偽造した POST がセッションに触れることは無い。
+一致したらセッションがあれば削除し、セッション Cookie と確認の Cookie の両方を消して、確認画面を描いたときに Cookie へ入れたリダイレクト先へ戻すか、完了画面を返す。
+セッションがすでに無くても応答は同じで、確認の流れがセッションの有無のオラクルにならない。
+
+```typescript
+import { buildClearedLogoutConfirmationCookie, parseLogoutConfirmation } from '../../../cookies.js';
+import { buildClearedSessionCookie, parseSessionId } from '../../../../../cookies.js';
+import type { LogoutOutcome } from '../outcome.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'approve-logout',
+  endpoint: 'logout',
+  feature: 'rp-initiated-logout',
+  kind: 'persist',
+  label: 'Confirmed: end the session',
+  spec: 'RP-Initiated Logout 1.0 §2',
+  function: 'approveLogout',
+  calls: ['parseLogoutConfirmation', 'buildClearedSessionCookie'],
+  consumes: ['confirmation'],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * Confirmation approve (POST /logout/approve)
+ *
+ * Runs only for the browser that saw the confirmation screen: the HttpOnly
+ * cookie and the hidden csrf_token must present the same secret (neither
+ * alone is accepted). On success the session is deleted and the redirect
+ * decision computed when the screen was shown — carried in the cookie, never
+ * in the form — is honored (§3).
+ */
+export async function approveLogout(c: any, csrfToken: string): Promise<LogoutOutcome> {
+  const browserSessionStore = c.get('browserSessionStore');
+
+  const confirmation = parseLogoutConfirmation(c.req.header('Cookie') ?? null);
+  if (confirmation === null || csrfToken === '' || confirmation.csrfSecret !== csrfToken) {
+    // Forged, replayed or expired confirmation: delete nothing.
+    return { kind: 'invalid_confirmation' };
+  }
+
+  // The End-User explicitly approved (§2). When the session is already gone
+  // there is nothing to delete and the answer is the same either way — the
+  // confirmation flow is not an oracle for whether a session existed.
+  const sessionId = parseSessionId(c.req.header('Cookie') ?? null);
+  if (sessionId) {
+    await browserSessionStore.delete(sessionId);
+  }
+  const cookies = [buildClearedSessionCookie(), buildClearedLogoutConfirmationCookie()];
+  if (confirmation.redirectTo !== null) {
+    return { kind: 'redirect', location: confirmation.redirectTo, cookies };
+  }
+  return { kind: 'completed', cookies };
+}
+```
+
+### 他フレームワークの生成コード
+
+Express と Fastify の出力も同じファイル構成である。
+ジェネレータはエンドポイントの `hono` の import を `web-router.ts`（Fetch API の上で動き、`WebRouter` と `WebContext` を持つ小さなルーター）に置き換え、フレームワーク用の `apply.ts`、`web-router.ts`、`node-adapter.ts` を加える。
+これらの元は [apps/hono/src/web/](https://github.com/maronnjapan/maronn-openid-connect/tree/main/apps/hono/src/web) で、どのファイルをどこへ置くかは [packages/cli/extract.json](https://github.com/maronnjapan/maronn-openid-connect/blob/main/packages/cli/extract.json) が定める。
+この機能で置き換わるのは `endpoints/logout/page.tsx` のルーター（`new Hono<...>()` が `new WebRouter()` になる）で、他のファイルは `hono` のルーターを import しない。
+`views.tsx` と `page.tsx` の画面は hono/jsx のまま残るので、Express と Fastify の出力も JSX ランタイムとして `hono` を必要とする。
+
+Next.js の出力は、Next.js App Router のアプリ [apps/nextjs](https://github.com/maronnjapan/maronn-openid-connect/tree/main/apps/nextjs) から抽出する。
+この機能のルートファイルはルートグループ `app/(rp-initiated-logout)/` に、コードは `app/_oidc-provider/features/rp-initiated-logout/` に入る。
+Express、Fastify、Next.js のコードは、この解説には載せない。
 
 ### サンプルと登録簿の注入
 
-`samples/hono-cloudflare` は `--enable rp-initiated-logout` で再生成し、環境変数 `OIDC_POST_LOGOUT_REDIRECT_URIS_JSON` から `rpInitiatedLogoutConfig.postLogoutRedirectUris` を注入する。
-E2E では playwright.config.ts がこの変数に E2E クライアントの `/logged-out` ページを登録して OP を起動する。
+`samples/hono-cloudflare` は `--enable rp-initiated-logout` を付けて生成し、手書きのエントリ `src/app.ts` が生成コードの `features/rp-initiated-logout/config.ts` から `rpInitiatedLogoutConfig` を import する。
+
+```typescript
+import { rpInitiatedLogoutConfig } from './oidc-provider/features/rp-initiated-logout/config.js';
+```
+
+`applyOidc()` を呼ぶ前に、環境変数 `OIDC_POST_LOGOUT_REDIRECT_URIS_JSON` から `rpInitiatedLogoutConfig.postLogoutRedirectUris` を注入する。
+変数を設定しなければ、生成コードの空の登録簿が残る。
+
+```typescript
+// EXPERIMENTAL (RP-Initiated Logout 1.0 §3): the per-client registry of
+// post_logout_redirect_uri values, as JSON ({ [clientId]: string[] }). With
+// the var unset the generated fail-closed default stays: every logout ends on
+// the OP's completed page and no redirect happens.
+if (bindings.OIDC_POST_LOGOUT_REDIRECT_URIS_JSON) {
+  rpInitiatedLogoutConfig.postLogoutRedirectUris = JSON.parse(
+    bindings.OIDC_POST_LOGOUT_REDIRECT_URIS_JSON,
+  ) as Record<string, string[]>;
+}
+```
+
+E2E では、`tests/e2e/playwright.config.ts` がこの変数に E2E クライアントの `/logged-out` ページを登録して OP を起動する。
+
+```typescript
+        // EXPERIMENTAL (RP-Initiated Logout 1.0 §3): register the E2E client's
+        // post-logout return page. A sample OP generated without the feature
+        // ignores the variable; the logout spec skips itself via discovery.
+        OIDC_POST_LOGOUT_REDIRECT_URIS_JSON: JSON.stringify({
+          'e2e-client': [`${clientBaseURL}/logged-out`],
+        }),
+```
 
 ## E2E テストの全文
 

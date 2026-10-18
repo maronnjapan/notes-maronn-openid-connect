@@ -10,7 +10,7 @@
 ## 機能の概要
 
 この OP でクライアントを増やす方法は、既定の生成物では静的な登録簿の編集しかない。
-`config.ts` の Map へエントリを書き足すか、`--db` で生成した場合はクライアント表へ `registerClient()` で投入する起動時処理を書き、いずれもビルドと再起動を経てはじめて新しいクライアントが使える。
+クライアントは起動時の処理が `db/` の `registerClient()` で登録するので、新しいクライアントはその処理を書き換え、ビルドと再起動を経てはじめて使える。
 この運用は二つの場面で摩擦になる。
 一つは OIDF Conformance Suite の実行で、多くのテストプランは「テスト開始時に OP へクライアントを動的登録できる」前提で組まれている。
 もう一つは、MCP（Model Context Protocol）クライアントのように接続時の動的登録を前提とするエコシステムのクライアント検証である。
@@ -90,9 +90,9 @@ core は同関数を公開しておらず、公開 API 以外への依存は作�
 クライアント解決の合成は、生成コードの基底 resolver（`--db` なしは静的 Map、`--db sql` / `--db kv` はクライアント表・キー）を先に引き、無ければ動的ストアを引く順にした。
 静的登録が常に勝つ順序であり、`dcr-` プレフィックスにより衝突自体が起きないことと合わせて二重の防壁になる。
 
-discovery だけは他の experimental 機能と違う経路を使った。
-PAR 以降の 8 機能は「core の `DiscoveryConfig` に対応フィールドが無いメタデータをスプレッドマージで足す」パターンだったが、`registration_endpoint` は core が最初から条件付き出力のフィールドとして持っている。
-core を変えずに使える正規の経路があるので、`buildProviderMetadata` へ `registrationEndpoint` を渡す形にした。
+discovery への `registration_endpoint` の追加も、他の experimental 機能と同じ経路を通る。
+`registration_endpoint` は core の `DiscoveryConfig` に条件付き出力のフィールドとして最初からあるが、生成コードはそれを使わず、`features/dynamic-client-registration/feature.ts` の `discovery` フックが返したメンバーを基底の discovery がマージする。
+基底の `build-metadata` ステップは機能を import せずにフックを読むだけなので、機能ごとのメタデータはすべてこの経路で足される。
 
 ## 実装コードの全文と解説
 
@@ -566,7 +566,7 @@ export function buildClientRegistrationResponse(
 比較はこの呼び出し限りのランダム鍵で HMAC-SHA256 をかけて固定長ダイジェスト同士を XOR で比べる定数時間比較で、`===` のように一致した長さに応じて応答時間が変わることがない。
 
 ヘッダが無い場合の扱い（エラーコード無しの 401）はここに無い。
-ヘッダの有無を知るのは HTTP を受ける生成コードなので、分岐は生成ルートに置き、この関数は「提示された値が期待値と一致するか」だけに答える。
+ヘッダの有無を知るのは HTTP を受ける生成コードなので、分岐は生成コードの `verify-initial-access-token` ステップに置き、この関数は「提示された値が期待値と一致するか」だけに答える。
 
 ```typescript
 /**
@@ -1499,67 +1499,104 @@ describe('verifyInitialAccessToken', () => {
 
 ## CLI 統合と生成コードへの寄与
 
-`packages/cli/src/features.ts` の `EXPERIMENTAL_FEATURES` 末尾に `dynamic-client-registration` を追加した。
-既定では無効で、`--enable dynamic-client-registration` を付けたときだけ以下のコードが生成される。
-未指定時の生成物はバイト同一である（各 sample の `check:generated` で固定）。
+experimental パッケージが持つのは、登録リクエストの検証と既定値の適用、登録レコードと 201 応答の組み立て、initial access token の照合という判定のロジック層だけである。
+HTTP の受け口、動的登録クライアントのストア、総数上限の検査、クライアント解決への合成は、`maronn-oidc generate` が出力する生成コードの側にある。
+`--enable dynamic-client-registration` は、生成コードに次の 2 つを加える。
+
+- **`features/dynamic-client-registration/`**：機能を記述する `feature.ts`、設定の `config.ts`、動的登録クライアントのストアと resolver の合成の `store.ts`、エンドポイント本体の `endpoints/register/`（`pipeline.ts`、`endpoint.ts`、`response.ts`、`steps/` の 6 ステップ）
+- **`features/enabled.ts`**：`dynamicClientRegistration` の import 1 行と、機能一覧 `features` の要素 1 つ
+
+生成コードでは、機能が基底のパイプラインの中で動かすロジックを、そのエンドポイントの `pipeline.ts` に、`(feature: <feature-id>)` を含むマーカーコメントで始まるブロック（この解説では **オーナーブロック** と呼ぶ）として置く。
+dynamic-client-registration のオーナーブロックは基底のパイプラインに 1 つも無く、基底への寄与はすべて `feature.ts` のフックを通る。
+登録は自分のエンドポイントで完結し、他のエンドポイントへの影響（発行したクライアントを引けるようにすること）は、後述の `context` フックで足りるためである。
+
+`feature.ts` が使うフックは `routes`、`discovery`、`context` の 3 つである。
+`routes` は `POST /register` を宣言し、`app.ts` がこれをマウントして、POST 以外を 405 で答える。
+`cors: 'protected'` を指定するので、`/register` には `/token` と同じ CORS ポリシー（`corsOrigins` の origin）が掛かる。
+`discovery` は `registration_endpoint` を返し、基底の discovery がそれを自分のメタデータへマージする。
+
+`context` フックは、ストア、デプロイの上書きをマージした設定、動的登録クライアントも引けるように包んだ `clientResolver` と `tokenClientResolver` をリクエストコンテキストに置く。
+クライアントを引くステップ（認可、トークン、UserInfo、introspection、revocation のエンドポイント）はリクエストコンテキストの resolver を使い、コンテキストフックが基底と同じ名前で返した値はその値を置き換える。
+このため、resolver を 1 か所で包めば、どのパイプラインにもブロックを足さずに、`/register` で発行した `client_id` がすべてのエンドポイントで使えるようになる。
+フックは `features/enabled.ts` の順に適用され、包む対象はそのときコンテキストにある resolver（基底のもの、または `createApp()` の `clientResolver` や `tokenClientResolver` オプションで渡したもの）である。
+
+登録リクエストの流れは次のとおりである。
+クライアントがメタデータを JSON で `POST /register` へ送ると、`app.ts` の CORS とメソッドの検査を経て、共通ミドルウェア（`setRequestContext()`）が基底の値とこの機能のコンテキストの値を置く。
+`endpoints/register/pipeline.ts` は、initial access token の検査、Content-Type の検査とボディの読み取り、メタデータの検証と登録レコードの組み立て、総数上限の検査と保存、201 応答の順にブロックを実行し、失敗はすべて catch 節の `respondRegistrationError()` が答える。
+発行された `client_id` は、次のリクエストから、包まれた resolver を通して `/authorize` と `/token` で解決される。
+
+`--enable dynamic-client-registration` を付けずに生成すると、`features/dynamic-client-registration/` と `features/enabled.ts` の 2 行が出力されないだけで、他のファイルは変わらない。
+
+### 生成コードに入るコードの全文（hono）
+
+以下は、既定の機能に dynamic-client-registration を加えて `maronn-oidc generate hono --enable dynamic-client-registration` で生成した出力からの掲載である。
+
+#### `features/enabled.ts` に入る行
+
+`features/enabled.ts` は、有効な機能をフックの適用順に並べるファイルである。
+dynamic-client-registration はこのファイルに、`feature.ts` の import と配列 `features` の要素を 1 つずつ加える。
 
 ```typescript
-export const EXPERIMENTAL_FEATURES = [
-  'par',
-  'token-exchange',
-  'jarm',
-  'device-authorization-grant',
-  'id-jag',
-  'ciba',
-  'jwt-introspection-response',
-  'rp-initiated-logout',
-  'dynamic-client-registration',
-] as const;
+import { dynamicClientRegistration } from './dynamic-client-registration/feature.js';
 ```
 
-`packages/cli/src/index.ts` の `withExperimentalPackage` と setup コマンドの案内にも feature チェックを足し、選択時だけ install コマンドへ `@maronn-openid-connect/experimental` が入る。
+```typescript
+  dynamicClientRegistration,
+```
 
-### routes/register.ts（新規ファイル全文）
+#### `features/dynamic-client-registration/feature.ts`
 
-登録エンドポイントの本体である。
-検証は「initial access token → Content-Type → 純関数（ボディ長・形式・値・既定値）→ 上限 → 保存」の順で、最初に失敗した段階のエラーを返す。
-initial access token はボディを読む前に検査し、資格の無いリクエストにボディの解釈を一切与えない。
-`Content-Type` の検査は RFC 7591 §3.1 への適合に加え、CORS プリフライトが発生しない `text/plain` のクロスオリジン POST で JSON 形のボディを合成する手口を閉じる。
+機能を記述するファイルで、`defineFeature()` に `id`、`routes`、`discovery`、`context` を渡す。
+`/register` はブラウザが開く画面ではなくクライアントが呼ぶ API なので、`cors: 'protected'` でトークンエンドポイントと同じ CORS ポリシーにする。
+`context` は関数で、リクエストごとに `createApp()` や `applyOidc()` の `dynamicClientRegistration` オプションを `config.ts` の既定値へマージする。
+ストアは、どのリクエストでも同じ `store.ts` のシングルトンを置く。
 
-設定オブジェクト `dynamicClientRegistrationConfig` はこのファイルが持ち、apply.ts が `applyOidc` のオプションをこの既定へマージする。
-Token Exchange の `tokenExchangeConfig` と同じ「experimental 機能専用の設定を生成コードに置く」パターンである。
+```typescript
+import { defineFeature } from '../feature.js';
+import { dynamicClientRegistrationConfig } from './config.js';
+import { registerApp } from './endpoints/register/pipeline.js';
+import { dynamicClientStore, withDynamicallyRegisteredClients } from './store.js';
 
-検証の呼び出しには、`--scope` でカスタムスコープを宣言した構成でだけ `supportedScopes: SUPPORTED_SCOPES`（`../scopes.js` から import）が渡る。
-デバイス認可ルートの `findUnsupportedScopes` と同じ条件付き生成の形で、掲載したのは宣言なしの hono サンプルの生成結果なので、このオプションは現れない。
+/**
+ * EXPERIMENTAL — OAuth 2.0 Dynamic Client Registration (RFC 7591): POST
+ * /register. The clients it issues are kept in an in-memory store
+ * (store.ts) and resolved after the configured clients, so a static
+ * registration always wins. Registration management (RFC 7592) is not
+ * implemented. Settings are in config.ts.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
+ * may change in a breaking way between releases.
+ */
+export const dynamicClientRegistration = defineFeature({
+  id: 'dynamic-client-registration',
+  routes: [{ path: '/register', app: registerApp, methods: ['POST'], cors: 'protected' }],
+  // OIDC Discovery 1.0 §3: registration_endpoint.
+  discovery: (issuer) => ({ registration_endpoint: `${issuer}/register` }),
+  context: ({ c, options }) => ({
+    dynamicClientStore,
+    dynamicClientRegistrationConfig: { ...dynamicClientRegistrationConfig, ...options.dynamicClientRegistration },
+    // Dynamically registered clients resolve after the configured clients.
+    clientResolver: withDynamicallyRegisteredClients(c.get('clientResolver')),
+    tokenClientResolver: withDynamicallyRegisteredClients(c.get('tokenClientResolver')),
+  }),
+});
+```
+
+#### `features/dynamic-client-registration/config.ts`
+
+動的登録の設定の既定値 `dynamicClientRegistrationConfig` と、それを上書きするオプションの型を置くファイルである。
+`initialAccessToken` が未設定ならオープン登録（RFC 7591 §3.1 SHOULD）で、設定すると `Authorization: Bearer <値>` が必要になる。
+`maxRegisteredClients` は動的登録の総数上限（RFC 7591 §5 の DoS 考慮）、`maxRegistrationBodyBytes` はリクエストボディの UTF-8 バイト数の上限である。
+
+設定を `config` フックではなくこのファイルのオブジェクトに置くのは、`config` フックが与えられるのが基底の設定（`ProviderConfig`）の既定値だけで、この設定はそこに含まれないからである。
+デプロイごとの上書き口は、モジュール拡張（`declare module '../../app.js'`）で基底の `OidcProviderOptions` に加える `dynamicClientRegistration` で、生成ファイルを編集せずに環境変数などから値を渡せる。
+ステップは設定をこのオブジェクトから直接ではなく、`context` フックがマージした値をリクエストコンテキストの `dynamicClientRegistrationConfig` から読む。
 
 ```typescript
 /**
- * EXPERIMENTAL — Dynamic Client Registration (RFC 7591).
- *
- * This route was generated because the OP was created with
- * `--enable dynamic-client-registration`. It is backed by
- * @maronn-openid-connect/experimental, whose API is NOT stable: it may change in a breaking
- * way between releases. Do not build production code on it without pinning the
- * version.
- *
- * The client POSTs its metadata here as JSON and receives a freshly minted
- * client_id (and, for confidential clients, a client_secret) that works on
- * /authorize and /token right away. Registration is open by default
- * (RFC 7591 §3.1 SHOULD); set initialAccessToken to require a Bearer token.
- */
-import { Hono } from 'hono';
-import {
-  ClientRegistrationError,
-  buildClientRegistrationResponse,
-  buildRegisteredClient,
-  validateClientRegistrationRequest,
-  verifyInitialAccessToken,
-} from '@maronn-openid-connect/experimental/dynamic-client-registration';
-import { dynamicClientStore as defaultDynamicClientStore } from '../store.js';
-
-/**
- * Dynamic client registration settings. apply.ts merges the applyOidc option
- * override over these defaults, so change them here or per deployment there.
+ * Dynamic client registration settings. The dynamicClientRegistration option of
+ * createApp() / applyOidc() is merged over these defaults (feature.ts), so change
+ * them here or per deployment there.
  *
  * - initialAccessToken: when set, POST /register requires
  *   `Authorization: Bearer <value>` (OIDC Dynamic Client Registration 1.0 §3).
@@ -1577,117 +1614,36 @@ export const dynamicClientRegistrationConfig = {
   maxRegistrationBodyBytes: 16384,
 };
 
-export const registerApp = new Hono<{ Variables: Record<string, any> }>();
-
-/**
- * RFC 7591 §3.1: the registration request body MUST be application/json.
- * Enforcing the media type also closes the cross-origin text/plain form post
- * that can synthesize a JSON-shaped body without a CORS preflight.
- */
-function isJson(contentType: string): boolean {
-  const [mediaType = ''] = contentType.toLowerCase().split(';');
-  return mediaType.trim() === 'application/json';
+declare module '../../app.js' {
+  interface OidcProviderOptions {
+    /**
+     * EXPERIMENTAL (RFC 7591): override the dynamic client registration
+     * settings (dynamicClientRegistrationConfig in
+     * features/dynamic-client-registration/config.ts) per deployment — for
+     * example from environment variables — without editing the generated
+     * file. Unset fields keep the generated defaults.
+     */
+    dynamicClientRegistration?: Partial<typeof dynamicClientRegistrationConfig>;
+  }
 }
-
-/**
- * Client Registration Endpoint
- * RFC 7591 §3
- *
- * NOTE (RFC 7591 §5): per-IP rate limiting is deliberately left to the
- * deployment layer (reverse proxy / platform); this endpoint only enforces the
- * inventory and body-size caps above. Open registration grants no trust: what
- * an issued client can do stays bounded by the same validation as a static
- * client (PKCE, exact redirect_uri match, client authentication).
- */
-registerApp.post('/', async (c) => {
-  // The 201 body carries the client_secret, so it must never be cached.
-  c.header('Cache-Control', 'no-store');
-  c.header('Pragma', 'no-cache');
-
-  const config = c.get('dynamicClientRegistrationConfig') ?? dynamicClientRegistrationConfig;
-  const store = c.get('dynamicClientStore') ?? defaultDynamicClientStore;
-
-  // (1) Initial access token, checked before the body is read. The two 401
-  // shapes follow RFC 6750 §3.1: no error code without credentials, and
-  // error="invalid_token" for presented-but-wrong ones. Neither reflects
-  // anything about the expected token.
-  if (config.initialAccessToken !== undefined) {
-    const authorization = c.req.header('Authorization');
-    if (authorization === undefined) {
-      c.header('WWW-Authenticate', 'Bearer');
-      return c.body(null, 401);
-    }
-    const accepted = await verifyInitialAccessToken(authorization, config.initialAccessToken);
-    if (!accepted) {
-      c.header('WWW-Authenticate', 'Bearer error="invalid_token"');
-      return c.body(null, 401);
-    }
-  }
-
-  // (2) RFC 7591 §3.1: application/json only (parameters such as charset are fine).
-  if (!isJson(c.req.header('Content-Type') ?? '')) {
-    return c.json(
-      { error: 'invalid_client_metadata', error_description: 'registration requests must use application/json' },
-      400,
-    );
-  }
-
-  const rawBody = await c.req.text();
-  try {
-    // (3)–(8) Body size, JSON shape, allowlist-pick of the understood fields,
-    // value checks and RFC 7591 §2 defaults — pure functions from
-    // @maronn-openid-connect/experimental/dynamic-client-registration. Unknown metadata is
-    // silently ignored (§2 MUST), and every error_description is a fixed ASCII
-    // string that never reflects request values. A registered `scope`
-    // (RFC 7591 §2) becomes the client's per-client allow list: requests for
-    // any other scope fail with invalid_scope, like a static client's.
-    const metadata = validateClientRegistrationRequest(rawBody, {
-      maxBodyBytes: config.maxRegistrationBodyBytes,
-    });
-    const client = buildRegisteredClient(metadata);
-
-    // (9) Inventory cap (RFC 7591 §5). 429 with a fixed body: the metadata is
-    // fine, so answering invalid_client_metadata would invite a retry loop that
-    // amplifies the very DoS surface the cap is here to close. No Retry-After —
-    // the cap is a stock ceiling, not a rate, so no recovery time is promised.
-    if ((await store.count()) >= config.maxRegisteredClients) {
-      return c.json(
-        { error: 'too_many_registrations', error_description: 'registration limit reached' },
-        429,
-      );
-    }
-    await store.save(client);
-
-    // Never log the registration metadata or the issued client_secret.
-
-    // RFC 7591 §3.2.1: 201 Created with the issued values and every registered
-    // metadata value (defaults applied). client_secret_expires_at: 0 means the
-    // secret does not expire.
-    return c.json(buildClientRegistrationResponse(client), 201);
-  } catch (error) {
-    if (error instanceof ClientRegistrationError) {
-      // RFC 7591 §3.2.2: 400 with error / error_description JSON.
-      return c.json({ error: error.error, error_description: error.errorDescription }, 400);
-    }
-    return c.json({ error: 'server_error' }, 500);
-  }
-});
 ```
 
-### store.ts に入るコード
+#### `features/dynamic-client-registration/store.ts`
 
-ファイル先頭の型 import に次の 1 行が加わる。
+動的登録クライアントのストア契約、メモリ上の実装、そのシングルトン、resolver の合成を置くファイルである。
+ストア契約は `get`、`save`、`count` の 3 メソッドで、`count` は総数上限の検査に使う。
+ストアは基底の `ProviderStores`（`--db` でバックエンドが替わるストア群）に加えず、`--db sql` で生成した OP でも動的登録だけはこのメモリ上のストアに入る。
+そのため動的登録は再起動を越えて残らず、別のインスタンスからも見えない（長く動かすデプロイには、この契約の永続化実装が要る）。
+シングルトンを `globalThis` に置くのは、フレームワークがモジュールを複数回読み込む場合（開発時のホットリロード、別のモジュール層）にも、すべてのモジュールが同じストアを見るためである。
+
+`withDynamicallyRegisteredClients()` は基底の resolver を先に引き、見つからないときだけ動的ストアを引く。
+静的に登録したクライアントが常に勝つ順序であり、`/register` が発行する `client_id` には `dcr-` プレフィックスが付くので、衝突そのものも起きない。
+この関数は generic で基底 resolver の型をそのまま返す。
+基底の `createClientResolver()` は `ClientResolver` と `TokenClientResolver` を 1 つの値で担うので、型を潰すと片方としてしか使えなくなるためである。
 
 ```typescript
-import type { RegisteredClient } from './config.js';
-```
+import type { RegisteredClient } from '../../config.js';
 
-末尾には、ストア契約・in-memory 実装・globalThis シングルトン・resolver 合成が加わる。
-ストア契約は `get` / `save` / `count` の 3 メソッドで、`count` は総数上限（RFC 7591 §5 の DoS 考慮）の検査に使う。
-`withDynamicallyRegisteredClients` は generic で基底 resolver の型をそのまま保つ。
-生成コードのクライアント resolver は `ClientResolver` と `TokenClientResolver` の両方を一つの値で担うことがあり、型を潰すと Next.js のように resolver を型付きで公開する生成物がコンパイルできなくなるためである。
-
-```typescript
 /**
  * EXPERIMENTAL — store contract for dynamically registered clients (RFC 7591).
  *
@@ -1729,8 +1685,9 @@ export class InMemoryDynamicallyRegisteredClientStore
   }
 }
 
-// Kept on globalThis for the same reason as the provider stores above: Next.js
-// instantiates route handlers and server actions in separate module layers.
+// Kept on globalThis so every module that asks for the store gets the same one,
+// also where a framework loads a module more than once (dev-mode hot reloads,
+// separate module layers).
 const dynamicClientStoreRegistry = globalThis as typeof globalThis & {
   __oidcDynamicallyRegisteredClientStore?: DynamicallyRegisteredClientStore;
 };
@@ -1765,90 +1722,437 @@ export function withDynamicallyRegisteredClients<
 }
 ```
 
-### apply.ts / app.ts に入るコード
+#### `features/dynamic-client-registration/endpoints/register/pipeline.ts`
 
-クライアント解決の合成は、リクエストごとの依存注入ミドルウェアで基底 resolver を包む形で入る（`--db sql` の生成例）。
-
-```typescript
-// EXPERIMENTAL (RFC 7591): dynamically registered clients resolve after the
-// configured clients, so a static registration always wins.
-const clientResolver = withDynamicallyRegisteredClients(
-  options.clientResolver ?? createSqlClientResolver(createDatabase(c)),
-);
-```
-
-トークンエンドポイント用の resolver も同じ合成を受け、設定と動的ストアがコンテキストへ載る。
+`/register` にマウントされる Hono アプリ `registerApp` で、各ブロックが 1 つのステップを呼ぶ。
+検査の順序は「initial access token → Content-Type → 純関数（ボディ長、形式、値、既定値）→ 総数上限 → 保存」で、最初に失敗した段階のエラーを返す。
+initial access token はボディを読む前に検査し、資格の無いリクエストにはボディの解釈を一切与えない。
+IP 単位のレート制限（RFC 7591 §5）はデプロイ層に任せ、このエンドポイントが持つのは `config.ts` の総数上限とボディ長上限だけである。
 
 ```typescript
-c.set('tokenClientResolver', options.tokenClientResolver
-  ? withDynamicallyRegisteredClients(options.tokenClientResolver)
-  : clientResolver);
-// ...
-c.set('dynamicClientStore', dynamicClientStore);
-c.set('dynamicClientRegistrationConfig', { ...dynamicClientRegistrationConfig, ...options.dynamicClientRegistration });
-```
+import { Hono } from 'hono';
+import { parseRegistrationRequest } from './steps/parse-request.js';
+import { respondRegistrationError } from './steps/respond-error.js';
+import { respondRegistration } from './steps/respond.js';
+import { storeRegisteredClient } from './steps/store-client.js';
+import { validateRegistrationMetadata } from './steps/validate-metadata.js';
+import { verifyRegistrationAccess } from './steps/verify-initial-access-token.js';
 
-`ApplyOidcOptions`（Hono）/ `OidcProviderOptions`（web-standard）にはデプロイごとの上書き口が加わる。
-sample の手書き `app.ts` が環境変数を読んでここへ渡す配線は後述する。
-
-```typescript
 /**
- * EXPERIMENTAL (RFC 7591): override the generated dynamic client registration
- * settings (routes/register.ts) per deployment — for example from environment
- * variables — without editing the generated file. Unset fields keep the
- * generated defaults.
+ * EXPERIMENTAL — Dynamic Client Registration (RFC 7591).
+ *
+ * This endpoint was generated because the OP was created with
+ * `--enable dynamic-client-registration`.
+ * It is backed by @maronn-openid-connect/experimental, whose API is NOT stable: it may
+ * change in a breaking way between releases. Do not build production code on it
+ * without pinning the version.
+ *
+ * The client POSTs its metadata here as JSON and receives a freshly minted
+ * client_id (and, for confidential clients, a client_secret) that works on
+ * /authorize and /token right away. Registration is open by default
+ * (RFC 7591 §3.1 SHOULD); set initialAccessToken to require a Bearer token.
+ * Each block below calls one step (one box of
+ * `maronn-oidc graph --detail steps --endpoint register`).
+ *
+ * NOTE (RFC 7591 §5): per-IP rate limiting is deliberately left to the
+ * deployment layer (reverse proxy / platform); this endpoint only enforces the
+ * inventory and body-size caps of config.ts. Open registration grants no trust:
+ * what an issued client can do stays bounded by the same validation as a static
+ * client (PKCE, exact redirect_uri match, client authentication).
  */
-dynamicClientRegistration?: {
-  initialAccessToken?: string;
-  maxRegisteredClients?: number;
-  maxRegistrationBodyBytes?: number;
-};
-```
+export const registerApp = new Hono<{ Variables: Record<string, any> }>();
 
-ルートのマウントは他のバックチャネル系エンドポイントと同じで、`/register` には `/token` と同じ CORS ポリシーが掛かる。
+registerApp.post('/', async (c) => {
+  try {
+    // [verify-initial-access-token] Check the initial access token, if one is required — OIDC Dynamic Client Registration 1.0 §3 / RFC 6750 §3.1
+    await verifyRegistrationAccess(c);
 
-```typescript
-import { registerApp, dynamicClientRegistrationConfig } from './routes/register.js';
-// ...
-app.use('/register', protectedCors);
-// ...
-app.route('/register', registerApp);
-```
+    // [parse-request] Read the JSON metadata — RFC 7591 §3.1
+    const rawBody = await parseRegistrationRequest(c);
 
-メソッド制限の表には `/register` が POST 専用として加わる。
+    // [validate-metadata] Validate the metadata and build the client — RFC 7591 §2 / §3.1
+    const client = validateRegistrationMetadata(c, rawBody);
 
-```typescript
-const OIDC_ENDPOINT_METHODS: Readonly<Record<string, readonly string[]>> = {
-  // ...
-  '/register': ['POST'],
-  // ...
-};
-```
+    // [store-client] Enforce the inventory cap and store the client — RFC 7591 §5
+    await storeRegisteredClient(c, client);
 
-### routes/discovery.ts に入るコード
-
-`buildProviderMetadata` の引数に `registrationEndpoint` が条件付きで加わる。
-実装済みの他機能が使うスプレッドマージではなく core の既存フィールドを使う理由は、設計方針の節で述べたとおりである。
-
-```typescript
-const metadata = buildProviderMetadata({
-  // ...
-  // EXPERIMENTAL — OIDC Discovery 1.0 §3: the client registration endpoint
-  // (RFC 7591) is advertised only because this OP was generated with
-  // --enable dynamic-client-registration.
-  registrationEndpoint: `${issuer}/register`,
+    // [respond] Respond 201 with the registration response — RFC 7591 §3.2.1
+    return respondRegistration(c, client);
+  } catch (error) {
+    return respondRegistrationError(c, error);
+  }
 });
 ```
 
-### 他フレームワークの生成結果
+#### `features/dynamic-client-registration/endpoints/register/endpoint.ts`
 
-- **web-standard（Express / Fastify が共有）**: hono のルートテンプレートを `WebRouter` 向けに変換して同じ `routes/register.ts` を生成する。Express は `OIDC_ENDPOINTS` へ、Fastify はルート登録へ `/register` が加わる
-- **Next.js（App Router）**: `register/route.ts`（Route Handler）と `register/config.ts`（設定）を生成する。処理の並びは hono 版と同一で、ストアと resolver 合成は `_oidc-provider/provider.ts` が `export const clientResolver = withDynamicallyRegisteredClients(...)` の形で受ける
+`maronn-oidc graph` がエンドポイントの図を描くための記述である。
+`layer: 'api'` のエンドポイントで、ステップは `steps` の順に一直線につながり（`chain: true`）、失敗は `respond-error` へ向かう。
+`rearrangeable: true` なので `--flow` で並べ替えの対象になるが、どのステップも `removable: false` なので外すことはできない。
+`journeys` は、ここで発行した `client_id` を持って認可エンドポイントへ進む流れを図に載せる。
+
+```typescript
+import { defineEndpoint } from '../../../../endpoints/step.js';
+
+/** EXPERIMENTAL — the client registration endpoint. RFC 7591 §3 */
+export const endpoint = defineEndpoint({
+  id: 'register',
+  order: 120,
+  label: 'Client registration endpoint',
+  path: '/register',
+  methods: ['POST'],
+  layer: 'api',
+  group: { id: 'client-registration', label: 'Dynamic Client Registration (RFC 7591)' },
+  spec: 'RFC 7591 §3',
+  feature: 'dynamic-client-registration',
+  rearrangeable: true,
+  steps: [
+    'verify-initial-access-token',
+    'parse-request',
+    'validate-metadata',
+    'store-client',
+    'respond',
+    'respond-error',
+  ],
+  errorStep: 'respond-error',
+  edges: {
+    chain: true,
+  },
+  journeys: [
+    { from: 'register', to: 'authorize', label: 'client_id', kind: 'flow', order: 20 },
+  ],
+});
+```
+
+#### `features/dynamic-client-registration/endpoints/register/response.ts`
+
+登録エンドポイントの応答の形 `RegistrationEndpointResponse`、ステップが固定の応答で失敗するための `RegistrationEndpointError`、応答を HTTP にする `sendRegistrationResponse()` を置くファイルである。
+登録応答のボディは `client_secret` を含むので、成功も失敗も `Cache-Control: no-store` で返す。
+401 のようにボディを持たない応答（`body: null`）は空のボディで返す。
+
+```typescript
+/**
+ * What the client registration endpoint answers, and the failure a step
+ * answers with a fixed response.
+ */
+
+/** What the client registration endpoint answers; respondRegistration() turns it into HTTP. */
+export interface RegistrationEndpointResponse {
+  status: number;
+  body: object | null;
+  headers?: Record<string, string>;
+}
+
+/** A failure a step answers with a fixed response (a malformed request). */
+export class RegistrationEndpointError extends Error {
+  constructor(readonly response: RegistrationEndpointResponse) {
+    const details = (response.body ?? {}) as { error?: unknown; error_description?: unknown };
+    super(String(details.error_description ?? details.error ?? 'client registration endpoint error'));
+    this.name = 'RegistrationEndpointError';
+  }
+}
+
+export function sendRegistrationResponse(c: any, response: RegistrationEndpointResponse): Response {
+  c.header('Cache-Control', 'no-store');
+  c.header('Pragma', 'no-cache');
+  for (const [name, value] of Object.entries(response.headers ?? {})) {
+    c.header(name, value);
+  }
+  if (response.body === null) {
+    return c.body(null, response.status);
+  }
+  return c.json(response.body, response.status);
+}
+```
+
+#### `features/dynamic-client-registration/endpoints/register/steps/verify-initial-access-token.ts`
+
+`initialAccessToken` が設定されているときだけ、ボディを読む前に `Authorization` ヘッダを検査するステップである。
+401 は RFC 6750 §3.1 の 2 形に分け、ヘッダが無いリクエストにはエラーコードを付けず（`WWW-Authenticate: Bearer`）、提示して一致しなかったリクエストには `error="invalid_token"` を返す。
+どちらの応答にも、期待するトークンについての情報は出さない。
+ヘッダの有無を知るのは HTTP を受けるこのステップなので、分岐はここにあり、experimental の `verifyInitialAccessToken()` は「提示された値が期待値と一致するか」だけに答える。
+
+```typescript
+import { verifyInitialAccessToken } from '@maronn-openid-connect/experimental/dynamic-client-registration';
+import { RegistrationEndpointError } from '../response.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'verify-initial-access-token',
+  endpoint: 'register',
+  feature: 'dynamic-client-registration',
+  kind: 'validate',
+  label: 'Check the initial access token, if one is required',
+  spec: 'OIDC Dynamic Client Registration 1.0 §3 / RFC 6750 §3.1',
+  function: 'verifyRegistrationAccess',
+  calls: ['verifyInitialAccessToken'],
+  consumes: [],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * Check the initial access token when one is configured, before the body is
+ * read. OIDC Dynamic Client Registration 1.0 §3 / RFC 6750 §3.1
+ *
+ * The two 401 shapes follow RFC 6750 §3.1: no error code without credentials,
+ * and error="invalid_token" for presented-but-wrong ones. Neither reflects
+ * anything about the expected token.
+ */
+export async function verifyRegistrationAccess(c: any): Promise<void> {
+  const config = c.get('dynamicClientRegistrationConfig');
+  if (config.initialAccessToken === undefined) return;
+  const authorization = c.req.header('Authorization');
+  if (authorization === undefined) {
+    throw new RegistrationEndpointError({ status: 401, body: null, headers: { 'WWW-Authenticate': 'Bearer' } });
+  }
+  const accepted = await verifyInitialAccessToken(authorization, config.initialAccessToken);
+  if (!accepted) {
+    throw new RegistrationEndpointError({
+      status: 401,
+      body: null,
+      headers: { 'WWW-Authenticate': 'Bearer error="invalid_token"' },
+    });
+  }
+}
+```
+
+#### `features/dynamic-client-registration/endpoints/register/steps/parse-request.ts`
+
+`Content-Type` が `application/json` であることを確かめてから、ボディを文字列として読むステップである。
+`charset` などのパラメータは許す。
+メディアタイプの検査は RFC 7591 §3.1 への適合に加え、CORS プリフライトが起きない `text/plain` のクロスオリジン POST で JSON 形のボディを合成する手口を閉じる。
+
+```typescript
+import { RegistrationEndpointError } from '../response.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'parse-request',
+  endpoint: 'register',
+  feature: 'dynamic-client-registration',
+  kind: 'parse',
+  label: 'Read the JSON metadata',
+  spec: 'RFC 7591 §3.1',
+  function: 'parseRegistrationRequest',
+  consumes: [],
+  produces: ['rawBody'],
+  removable: false,
+});
+
+/**
+ * RFC 7591 §3.1: the registration request body MUST be application/json.
+ */
+function isJson(contentType: string): boolean {
+  const [mediaType = ''] = contentType.toLowerCase().split(';');
+  return mediaType.trim() === 'application/json';
+}
+
+/**
+ * RFC 7591 §3.1: the registration request body MUST be application/json
+ * (parameters such as charset are fine). Enforcing the media type also closes
+ * the cross-origin text/plain form post that can synthesize a JSON-shaped body
+ * without a CORS preflight.
+ */
+export async function parseRegistrationRequest(c: any): Promise<string> {
+  if (!isJson(c.req.header('Content-Type') ?? '')) {
+    throw new RegistrationEndpointError({
+      status: 400,
+      body: { error: 'invalid_client_metadata', error_description: 'registration requests must use application/json' },
+    });
+  }
+  return c.req.text();
+}
+```
+
+#### `features/dynamic-client-registration/endpoints/register/steps/validate-metadata.ts`
+
+ボディ長、JSON の形、理解するフィールドの allowlist-pick、値の検査、RFC 7591 §2 の既定値の適用を、experimental の純関数 `validateClientRegistrationRequest()` と `buildRegisteredClient()` に任せるステップである。
+渡すオプションは `maxBodyBytes` だけで、`supportedScopes` は渡さない。
+このため、`--scope` でカスタムスコープを宣言した構成でも、登録時の `scope` は RFC 6749 §3.3 の構文だけが検査される。
+
+```typescript
+import {
+  buildRegisteredClient,
+  validateClientRegistrationRequest,
+  type DynamicallyRegisteredClient,
+} from '@maronn-openid-connect/experimental/dynamic-client-registration';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'validate-metadata',
+  endpoint: 'register',
+  feature: 'dynamic-client-registration',
+  kind: 'validate',
+  label: 'Validate the metadata and build the client',
+  spec: 'RFC 7591 §2 / §3.1',
+  function: 'validateRegistrationMetadata',
+  calls: ['validateClientRegistrationRequest', 'buildRegisteredClient'],
+  consumes: ['rawBody'],
+  produces: ['client'],
+  removable: false,
+});
+
+/**
+ * Body size, JSON shape, allowlist-pick of the understood fields, value checks
+ * and RFC 7591 §2 defaults — pure functions from the experimental package.
+ * Unknown metadata is silently ignored (§2 MUST), and every error_description
+ * is a fixed ASCII string that never reflects request values.
+ */
+export function validateRegistrationMetadata(c: any, rawBody: string): DynamicallyRegisteredClient {
+  const config = c.get('dynamicClientRegistrationConfig');
+  const metadata = validateClientRegistrationRequest(rawBody, {
+    maxBodyBytes: config.maxRegistrationBodyBytes,
+  });
+  return buildRegisteredClient(metadata);
+}
+```
+
+#### `features/dynamic-client-registration/endpoints/register/steps/store-client.ts`
+
+総数上限を検査してから、組み立てた登録レコードをストアに保存するステップである。
+上限に達していたら 429 を返し、`invalid_client_metadata` は流用しない。
+メタデータに不備は無いので、400 を返すとメタデータを直して再試行するループを招き、上限が閉じるはずの DoS の面を逆に広げるためである。
+上限は流量ではなく在庫の天井で回復時期を約束できないので、`Retry-After` も付けない。
+登録メタデータと発行した `client_secret` はログに残さない。
+
+```typescript
+import type { DynamicallyRegisteredClient } from '@maronn-openid-connect/experimental/dynamic-client-registration';
+import { RegistrationEndpointError } from '../response.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'store-client',
+  endpoint: 'register',
+  feature: 'dynamic-client-registration',
+  kind: 'persist',
+  label: 'Enforce the inventory cap and store the client',
+  spec: 'RFC 7591 §5',
+  function: 'storeRegisteredClient',
+  consumes: ['client'],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * Enforce the inventory cap (RFC 7591 §5) and store the client. 429 with a
+ * fixed body: the metadata is fine, so answering invalid_client_metadata would
+ * invite a retry loop that amplifies the very DoS surface the cap is here to
+ * close. No Retry-After — the cap is a stock ceiling, not a rate, so no
+ * recovery time is promised.
+ */
+export async function storeRegisteredClient(c: any, client: DynamicallyRegisteredClient): Promise<void> {
+  const config = c.get('dynamicClientRegistrationConfig');
+  const store = c.get('dynamicClientStore');
+  if ((await store.count()) >= config.maxRegisteredClients) {
+    throw new RegistrationEndpointError({
+      status: 429,
+      body: { error: 'too_many_registrations', error_description: 'registration limit reached' },
+    });
+  }
+  await store.save(client);
+  // Never log the registration metadata or the issued client_secret.
+}
+```
+
+#### `features/dynamic-client-registration/endpoints/register/steps/respond.ts`
+
+`buildClientRegistrationResponse()` が組み立てた RFC 7591 §3.2.1 の応答を 201 で返すステップである。
+応答には発行した値と、既定値を適用した登録メタデータがすべて入り、`client_secret_expires_at: 0` はシークレットが失効しないことを表す。
+
+```typescript
+import {
+  type DynamicallyRegisteredClient,
+  buildClientRegistrationResponse,
+} from '@maronn-openid-connect/experimental/dynamic-client-registration';
+import { sendRegistrationResponse } from '../response.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'respond',
+  endpoint: 'register',
+  feature: 'dynamic-client-registration',
+  kind: 'respond',
+  label: 'Respond 201 with the registration response',
+  spec: 'RFC 7591 §3.2.1',
+  function: 'respondRegistration',
+  calls: ['buildClientRegistrationResponse'],
+  consumes: ['client'],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * RFC 7591 §3.2.1: 201 Created with the issued values and every registered
+ * metadata value (defaults applied). client_secret_expires_at: 0 means the
+ * secret does not expire. The body carries the client_secret, so it is never
+ * cached.
+ */
+export function respondRegistration(c: any, client: DynamicallyRegisteredClient): Response {
+  return sendRegistrationResponse(c, { status: 201, body: buildClientRegistrationResponse(client) });
+}
+```
+
+#### `features/dynamic-client-registration/endpoints/register/steps/respond-error.ts`
+
+パイプラインの catch 節が呼ぶステップである。
+前段のステップが投げた `RegistrationEndpointError`（401、429、Content-Type の 400）はその応答のまま返し、experimental の `ClientRegistrationError` は RFC 7591 §3.2.2 の 400 にする。
+それ以外の例外は 500 の `server_error` で、内容は出さない。
+
+```typescript
+import { ClientRegistrationError } from '@maronn-openid-connect/experimental/dynamic-client-registration';
+import { RegistrationEndpointError, sendRegistrationResponse } from '../response.js';
+import { step } from '../../../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'respond-error',
+  endpoint: 'register',
+  feature: 'dynamic-client-registration',
+  kind: 'respond',
+  label: 'Respond with the registration error',
+  spec: 'RFC 7591 §3.2.2',
+  function: 'respondRegistrationError',
+  consumes: [],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * RFC 7591 §3.2.2: 400 with error / error_description JSON for invalid
+ * metadata; the fixed responses of the earlier steps (401, 429) as they are.
+ */
+export function respondRegistrationError(c: any, error: unknown): Response {
+  if (error instanceof RegistrationEndpointError) {
+    return sendRegistrationResponse(c, error.response);
+  }
+  if (error instanceof ClientRegistrationError) {
+    return sendRegistrationResponse(c, {
+      status: 400,
+      body: { error: error.error, error_description: error.errorDescription },
+    });
+  }
+  return sendRegistrationResponse(c, { status: 500, body: { error: 'server_error' } });
+}
+```
+
+### 他フレームワークの生成コード
+
+Express と Fastify の出力も同じファイル構成である。
+ジェネレータはエンドポイントの `hono` の import を `web-router.ts`（Fetch API の上で動き、`WebRouter` と `WebContext` を持つ小さなルーター）に置き換え、フレームワーク用の `apply.ts`、`web-router.ts`、`node-adapter.ts` を加える。
+これらの元は OSS リポジトリの `apps/hono/src/web/` で、どのファイルをどこへ置くかは `packages/cli/extract.json` が定める。
+この機能で置き換わるのは `endpoints/register/pipeline.ts` のルーター（`new Hono<...>()` が `new WebRouter()` になる）で、他のファイルは `hono` を import しない。
+画面は hono/jsx のまま残るので、Express と Fastify の出力も JSX ランタイムとして `hono` を必要とする（この機能自身は画面を持たない）。
+
+Next.js の出力は、OSS リポジトリの `apps/nextjs`（Next.js App Router のアプリ）から抽出する。
+この機能のルートファイルはルートグループ `app/(dynamic-client-registration)/` に、コードは `app/_oidc-provider/features/dynamic-client-registration/` に入る。
+Express、Fastify、Next.js のコードは、この解説には載せない。
 
 ### サンプルと E2E の配線
 
-全機能有効の `samples/hono-cloudflare` と、`--db sql` の web-standard 経路を代表する `samples/express-flyio` の generate スクリプトへ `--enable dynamic-client-registration` を追加した。
-両 sample の手書き `app.ts` には、E2E が制限付き構成（initial access token と小さい上限）を注入するための環境変数の配線を足した（`XAA_ALLOWED_AUDIENCES` と同じ型の配線である）。
+全機能有効の `samples/hono-cloudflare`（D1）と、Express の `samples/express-flyio`（node:sqlite）は、generate スクリプトで `--enable dynamic-client-registration` を指定する。
+どちらも `--db sql` で生成しているが、前述のとおり動的登録はメモリ上のストアに入る。
+両サンプルの手書き `src/app.ts` は、E2E が制限付き構成（initial access token と小さい上限）を注入するための環境変数を読み、`applyOidc()` の `dynamicClientRegistration` オプションへ渡す。
+次は hono-cloudflare の配線で、express-flyio は同じ形で `process.env` を読む。
 
 ```typescript
 // EXPERIMENTAL (RFC 7591): the E2E suite starts a second instance of this
@@ -1865,39 +2169,43 @@ const dynamicClientRegistration = {
 };
 ```
 
-E2E の `playwright.config.ts` は、オープン登録の本体インスタンスとは別に、制限付き構成の 3 つ目の OP インスタンスを起動する。
-オープン登録の検証と initial access token の検証は同じ OP では両立しないためである。
+E2E の `tests/e2e/playwright.config.ts` は、オープン登録の本体インスタンスとは別に、制限付き構成の OP インスタンスを起動する。
+オープン登録の検証と initial access token の検証は、同じ OP では両立しないためである。
 
 ```typescript
-// EXPERIMENTAL (RFC 7591): the restricted-registration OP instance. It
-// requires the initial access token below on POST /register and caps the
-// dynamic registrations at 3, so the 401 and 429 paths of the
-// dynamic-client-registration spec run against real HTTP. The values are
-// mirrored as constants in specs/dynamic-client-registration.spec.ts.
-...(startDcrOp
-  ? [
-      {
-        command: `pnpm --filter ${opPackage} start`,
-        url: `${dcrIssuer}/.well-known/openid-configuration`,
-        reuseExistingServer: !process.env.CI,
-        timeout: 30_000,
-        env: {
-          HOST: host,
-          PORT: String(dcrOpPort),
-          ISSUER: dcrIssuer,
-          OIDC_SIGNING_KEY_ID: 'e2e-dcr-rs256-key',
-          OIDC_DCR_INITIAL_ACCESS_TOKEN: 'e2e-dcr-initial-access-token',
-          OIDC_DCR_MAX_CLIENTS: '3',
-          OIDC_D1_PERSIST_PATH: process.env.OIDC_D1_PERSIST_PATH
-            ? `${process.env.OIDC_D1_PERSIST_PATH}-dcr`
-            : '.wrangler/state-dcr',
-          ...(process.env.OIDC_SQLITE_PATH
-            ? { OIDC_SQLITE_PATH: `${process.env.OIDC_SQLITE_PATH}-dcr` }
-            : {}),
-        },
-      },
-    ]
-  : []),
+    // EXPERIMENTAL (RFC 7591): the restricted-registration OP instance. It
+    // requires the initial access token below on POST /register and caps the
+    // dynamic registrations at 3, so the 401 and 429 paths of the
+    // dynamic-client-registration spec run against real HTTP. The values are
+    // mirrored as constants in specs/dynamic-client-registration.spec.ts.
+    ...(startDcrOp
+      ? [
+          {
+            command: `pnpm --filter ${opPackage} start`,
+            url: `${dcrIssuer}/.well-known/openid-configuration`,
+            reuseExistingServer: !process.env.CI,
+            timeout: 30_000,
+            env: {
+              HOST: host,
+              PORT: String(dcrOpPort),
+              ISSUER: dcrIssuer,
+              OIDC_SIGNING_KEY_ID: 'e2e-dcr-rs256-key',
+              OIDC_DCR_INITIAL_ACCESS_TOKEN: 'e2e-dcr-initial-access-token',
+              OIDC_DCR_MAX_CLIENTS: '3',
+              OIDC_D1_PERSIST_PATH: process.env.OIDC_D1_PERSIST_PATH
+                ? `${process.env.OIDC_D1_PERSIST_PATH}-dcr`
+                : '.wrangler/state-dcr',
+              // Always a path of its own: the node:sqlite samples default to
+              // .data/oidc.sqlite, and two OP processes writing one SQLite file
+              // (this instance seeding its sample data, the main one handling
+              // flows) fail each other's writes.
+              OIDC_SQLITE_PATH: process.env.OIDC_SQLITE_PATH
+                ? `${process.env.OIDC_SQLITE_PATH}-dcr`
+                : '.data/oidc-e2e-dcr.sqlite',
+            },
+          },
+        ]
+      : []),
 ```
 
 ## E2E テストの全文

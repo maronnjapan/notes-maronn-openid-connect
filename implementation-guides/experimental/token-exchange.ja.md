@@ -8,7 +8,7 @@
 - CLI の `--enable token-exchange` が生成コードへ注入するコードの全文（hono。ファイルごとに TypeScript として示す）
 - Token Exchange の E2E テストスペックの全文
 
-core 本体、E2E 共有ハーネス、他フレームワークの生成差分は全機能で共有される基盤なので、リンクで参照する。
+core 本体、E2E 共有ハーネス、他フレームワークの生成コードは全機能で共有される基盤なので、リンクで参照する。
 
 ## 機能の概要
 
@@ -814,7 +814,9 @@ export {
 
 このスイートが保証できないのは、カスタマイズされたコードにおける合成順そのものである。
 生成 OP の所有者がステップを並べ替えても（たとえばクライアント認可より先にトークンを解決しても）、単体テストは通ってしまう。
-合成順は 1 つ上の層、つまり生成される conformance テストと後述の E2E スペックが固定している。
+出荷時の合成順は 1 つ上の層で固定している。
+生成元の `apps/hono` で `features/token-exchange/` に置いた単体テストと、後述の E2E スペックである。
+テストは抽出されないので生成物には含まれず、利用者が生成後に変えた合成順はどちらも検査しない。
 
 ```typescript
 import { describe, expect, it } from 'vitest';
@@ -2042,65 +2044,121 @@ describe('processTokenExchangeRequest', () => {
 
 ## CLI 統合と生成コードへの寄与
 
-`maronn-oidc generate <framework> --enable token-exchange` を実行すると、生成コードに次が加わる。
+experimental 本体はロジック層であり、トークンエンドポイントで交換を受け付けて応答するのは CLI が生成するコードである。
+生成コードは、全機能を有効にして動かしているアプリ [apps/hono](../../../apps/hono) の `src/oidc-provider/` から、CLI が抜き出したものである。
+`maronn-oidc generate <framework> --enable token-exchange` を指定すると、生成コードに次の 3 つが入る。
 
-- **routes/token.ts（変更）**：トークンエンドポイントの共有クライアント認証の直後、core の `validateGrantTypeSupported` が URN を拒否するより前に、`grant_type === TOKEN_EXCHANGE_GRANT_TYPE` の分岐が入る。分岐は `processTokenExchangeRequest` を呼び、返った素材を core の発行パイプラインへ流し、分岐の中で応答まで済ませる。`tokenExchangeConfig`（既定 `allowedTargets: []` の安全側デフォルト）もこのファイルに入る
-- **routes/discovery.ts（変更）**：`grant_types_supported` に交換の URN が加わる
-- **config.ts（変更）**：サンプルの confidential client の `grantTypes` に交換の URN が加わる
-- **conformance.test.ts（変更）**：交換の成功・失敗の挙動が、delegation と act claim を含めて契約テストとして固定される
+- **`features/token-exchange/` ディレクトリ**：Token Exchange が所有するファイルのすべて。`feature.ts` が `defineFeature()` で機能を宣言し、`token.grants` フックで交換の URN（`urn:ietf:params:oauth:grant-type:token-exchange`）を、トークンエンドポイントが扱う grant の一覧と discovery の `grant_types_supported` に加える。`routes` も `context` も持たない
+- **`features/enabled.ts` の 2 行**：`tokenExchange` の import 行と、機能の一覧 `features` の 1 項目
+- **`endpoints/token/pipeline.ts` の所有者付きブロック 1 つ**：`[dispatch-token-exchange]` ブロックが、base の `[authenticate-client]` と `[validate-grant-type]` のあいだで交換の grant を受け、応答まで済ませる。ブロックが呼ぶステップの import 行も、ファイル先頭に 1 行入る
 
 新しいルートは増えない。
-統合は、既存の `POST /token` の中に grant 分岐が 1 つ増える、という形を取る。
+統合は、既存の `POST /token` のパイプラインに grant の分岐が 1 つ増える、という形を取る。
 
-以前の版は、この寄与を 1 本の長大な unified diff として掲載していた。
-シンタックスハイライトが効かず読みにくかったため、現在はファイルごとに分け、`--enable token-exchange` が追加・変更するコードそのものを TypeScript ブロックで示し、どこに入るかは前後の文で述べる形にしている。
-機械照合可能な diff 形式は、末尾の「関連資料」から辿れる昇格レビューパケットに残っている。
+フックが受け渡すのは、ルート、メタデータ、grant の一覧のように、base が決まった場所で読む宣言的な値である。
+base のパイプラインの途中で動く処理はフックにせず、そのパイプラインの中に、機能の名前を書いた目印のコメントで始まるブロックとして置く。
+目印のコメントは `// [step-id] (feature: <feature-id>)` で始まり、次の目印の直前までがそのブロックになる。
+このブロックを **所有者付きブロック** と呼ぶ。
+`--enable token-exchange` を付けずに生成すると、CLI はこのブロックと、そのブロックだけが使っていた import 行を削除する。
+ブロックが定義する `exchanged` はブロックの中でしか読まれないので、削除した後に残す値はない。
 
-### config.ts に入るもの
+リクエストの経路は次のとおりである。
+`POST /token` は base の `endpoints/token/pipeline.ts` に届き、「リクエストの解析 → クライアント認証 →（Token Exchange のブロック）交換」と進む。
+`grant_type` が交換の URN なら、ブロックが呼ぶ `exchangeToken()` が `processTokenExchangeRequest` で検証と発行素材の導出を済ませ、core の発行関数でアクセストークンを作ってストアへ保存し、`respondToken()` で応答する。
+それ以外の `grant_type` では `undefined` を返し、パイプラインは `[validate-grant-type]` から従来どおり進む。
+交換の失敗は `TokenEndpointError` として投げられ、base の `respondTokenError()` が RFC 6749 §5.2 の形で返す。
 
-サンプルの confidential client（`defaultRegisteredClients` 内）の `grantTypes` に交換の URN が加わる。
-クライアントからこの URN を外すことが、そのクライアントに交換を禁止する操作になる。
+この配置には 3 つの設計判断がある。
+
+第一に、交換の分岐を所有者付きブロックにしたのは、`[validate-grant-type]` より前で動かす必要があるからである。
+core の `validateGrantTypeSupported` は、`authorization_code` と `refresh_token` 以外の値を、渡された一覧に入っていても `unsupported_grant_type` で拒否し、その後ろのステップもこの 2 つの grant の検証しか持たない。
+ステップのメタ情報には `before: ['validate-grant-type']` と `removable: false` があるので、`--flow` のフロー文書がこのステップを `[validate-grant-type]` の後ろへ動かしたり、機能を残したまま外したりすると、CLI は生成を拒否する。
+
+第二に、交換の URN の広告は `token.grants` フックの宣言から生じる。
+discovery の `build-metadata` ステップは `tokenGrantsOf(features)` を `grant_types_supported` に加えるので、機能を外して生成すれば URN の広告も一緒に消える。
+同じ URN は `id-jag` も宣言するが、`tokenGrantsOf()` は重複を 1 つにまとめる。
+
+第三に、設定は `features/token-exchange/config.ts` の `tokenExchangeConfig` に置き、`allowedTargets` の既定は空配列である。
+空のあいだは、`audience` か `resource` を指定した交換がすべて `invalid_target` で拒否され、成功するのは scope を狭める交換と寿命を短くする交換だけになる。
+許可リストに下流サービスの識別子を書かない限り、他のサービス宛てのトークンは発行されない（fail-safe）。
+
+生成コードは既定のクライアントを持たないので、交換を許すクライアントは `grantTypes` に交換の URN を含めて登録する（`db/clients.ts` の `registerClient()` で登録するか、`createApp()` に `clientResolver` を渡す）。
+experimental のクライアント認可ステップは、URN を登録していないクライアントと public client を `unauthorized_client` で拒否する。
+
+サンプルでこの機能を有効にしているのは [samples/hono-cloudflare](../../../samples/hono-cloudflare) だけである。
+他の機能と組み合わせた生成結果は、そのサンプルの `src/oidc-provider/` で確認できる。
+サンプルの `src/app.ts` は `tokenExchangeConfig` に手を加えず、生成された既定値のまま動かしている。
+交換の URN を登録したクライアントは E2E 環境が `OIDC_CLIENTS_JSON` で渡し、サンプルは `registerSampleData()` の中でそれを `registerClient()` に渡して D1 に登録する。
+
+### 生成コードに入るコードの全文（hono）
+
+以下は、デフォルトの機能に `--enable token-exchange` を加えて hono 向けに生成した結果のうち、Token Exchange が加えるもののすべてである。
+`features/enabled.ts` とトークンエンドポイントのパイプラインについては加わる行とブロックを、`features/token-exchange/` についてはファイルの全文を、生成されたファイルからそのまま写している。
+
+#### `features/enabled.ts` に入る行
+
+`features/enabled.ts` は、この OP が持つ機能の一覧である。
+CLI は有効な機能ごとに import 行を 1 行と、配列 `features` の項目を 1 つ書く。
+配列の順序はフックを適用する順序で、Token Exchange は既定の機能（`pkce` から `request-object` まで）の後ろに並ぶ。
 
 ```typescript
-      // RFC 7591 §2: grant_types default is ["authorization_code"]. Registering
-      // refresh_token is the single switch that lets this client receive refresh
-      // tokens at all: an online refresh token (bound to the login session) on every
-      // authorization, and an offline one (usable after logout) when offline_access
-      // is granted per OIDC Core 1.0 §11. Remove it and neither is issued.
-      // EXPERIMENTAL (RFC 8693): registering the token-exchange URN is what lets
-      // this confidential client exchange its access tokens. Remove it to forbid
-      // exchanges for this client; public clients are rejected either way.
-      grantTypes: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:token-exchange'],
-```
-
-### routes/discovery.ts に入るもの
-
-変更は 1 行で、`grantTypesSupported` が交換の URN を広告するようになる。
-
-```typescript
-    grantTypesSupported: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:token-exchange'],
-```
-
-### routes/token.ts に入るもの
-
-ファイル先頭に import が加わる。subject と actor の検証に使うアクセストークン resolver が resolver 群の import に 1 行加わり、交換の関数群が experimental の subpath から入る。
-
-```typescript
-  accessTokenResolver as defaultAccessTokenResolver,
+import { tokenExchange } from './token-exchange/feature.js';
 ```
 
 ```typescript
-import {
-  TOKEN_EXCHANGE_GRANT_TYPE,
-  TokenExchangeError,
-  buildTokenExchangeResponse,
-  processTokenExchangeRequest,
-  type ExchangedAccessTokenInfo,
-} from '@maronn-openid-connect/experimental/token-exchange';
+  tokenExchange,
 ```
 
-import の隣に、モジュールレベルのポリシーオブジェクトが export される。
-既定が空リストなので、運用者が後段サービスをここへ列挙するまで、対象を名指しする交換はすべて `invalid_target` で拒否される。
+#### `endpoints/token/pipeline.ts` の `(feature: token-exchange)` ブロック
+
+トークンエンドポイントのパイプラインは、ファイル先頭で、ブロックが呼ぶ Token Exchange のステップを import する。
+
+```typescript
+import { exchangeToken } from '../../features/token-exchange/steps/dispatch-token-exchange.js';
+```
+
+ブロックは `[authenticate-client]` ブロックの直後、`[validate-grant-type]` ブロックの直前で動く。
+`parse-request` が読んだ `params` と、クライアント認証が解決した `tokenClient` を `exchangeToken()` に渡す。
+交換の grant なら応答が返り、ブロックはそれをそのまま返して、パイプラインの残りを実行しない。
+
+```typescript
+    // [dispatch-token-exchange] (feature: token-exchange) Token Exchange — RFC 8693 §2.1
+    const exchanged = await exchangeToken(c, params, tokenClient);
+    if (exchanged) return exchanged;
+```
+
+#### `features/token-exchange/feature.ts`
+
+Token Exchange が base に差し込むものを宣言するファイルで、`features/enabled.ts` が import するのはこのファイルである。
+宣言は `token.grants` だけで、トークンエンドポイントで答える grant として交換の URN を挙げる。
+discovery はこの一覧を `grant_types_supported` に加える。
+交換の処理そのものはフックではなく、`endpoints/token/pipeline.ts` の所有者付きブロックが呼ぶ。
+
+```typescript
+import { TOKEN_EXCHANGE_GRANT_TYPE } from '@maronn-openid-connect/experimental/token-exchange';
+import { defineFeature } from '../feature.js';
+
+/**
+ * EXPERIMENTAL — OAuth 2.0 Token Exchange (RFC 8693): the token endpoint
+ * answers the urn:ietf:params:oauth:grant-type:token-exchange grant in the
+ * dispatch-token-exchange block of endpoints/token/pipeline.ts, before the
+ * grant_type validation would reject the URN. Settings are in config.ts.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
+ * may change in a breaking way between releases.
+ */
+export const tokenExchange = defineFeature({
+  id: 'token-exchange',
+  token: { grants: [TOKEN_EXCHANGE_GRANT_TYPE] },
+});
+```
+
+#### `features/token-exchange/config.ts`
+
+Token Exchange の設定で、`dispatch-token-exchange` ステップが `processTokenExchangeRequest` に渡す。
+`allowedTargets` は、交換で発行するトークンの宛先として要求してよい `audience` と `resource` の値の一覧である。
+既定は空配列で、宛先を名指しする交換はすべて `invalid_target` になる。
+`createApp()` のオプションには含まれないので、下流サービスを許すときはこのファイルの配列に識別子を書く。
 
 ```typescript
 /**
@@ -2117,860 +2175,193 @@ export const tokenExchangeConfig = {
 };
 ```
 
-grant の分岐本体は、クライアント認証の直後、標準のトークンパイプラインより前に入る。
-検証は `processTokenExchangeRequest`、発行は core の通常パイプライン（audience 合成、payload、署名、ストア保存）で行い、分岐の中で応答する。
-2 箇所の `grant.actor` のスプレッドが delegation の追加分で、act claim を JWT payload とストア metadata の両方に載せる。後者は、このトークンを後日 subject_token として再交換したときにチェーンを繋げるためである。
+#### `features/token-exchange/steps/dispatch-token-exchange.ts`
+
+トークンエンドポイントの所有者付きブロックが呼ぶステップである。
+`meta` の `kind: 'dispatch'` は、別の grant に属するリクエストに答えて止まるステップであることを示し、`before: ['validate-grant-type']` が `--flow` で並べ替えたときの位置を縛る。
+`grant_type` が交換の URN でなければ、何もせず `undefined` を返す。
+交換の検証と発行素材の導出は experimental の `processTokenExchangeRequest` に任せ、ここでは core の `buildAccessTokenAudience`、`buildAccessTokenPayload`、`AccessTokenIssuer` でトークンを作り、`accessTokenStore` に保存する。
+`aud` には通常の grant と同じく UserInfo エンドポイントを残すので、交換したトークンでも UserInfo の audience 検査を通る（RFC 9068 §3）。
+delegation のときは `act` を JWT とストアの metadata の両方に載せ、このトークンを次の交換の subject_token にしたときにチェーンを引き継げるようにする（RFC 8693 §4.1）。
+`TokenExchangeError` は `TokenEndpointError` に写し、base の `respondTokenError()` がそのまま返す。
+同じ名前の `resource` や `audience` を繰り返すことは RFC 8693 §2.1 が許すが、このエンドポイントはパラメータの重複を一律に拒否するので（RFC 6749 §3.2）、それぞれ 1 つの値しか受け付けない。
 
 ```typescript
-    // --- EXPERIMENTAL: OAuth 2.0 Token Exchange (RFC 8693 §2.1) ------------
-    // Dispatched right after client authentication and BEFORE core's
-    // validateGrantTypeSupported, which does not know the URN and would reject
-    // it with unsupported_grant_type. The branch answers the request itself and
-    // never falls through to the standard grants.
-    //
-    // Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it may change
-    // in a breaking way between releases. Do not build production code on it
-    // without pinning the version.
-    //
-    // Known limitation: RFC 8693 §2.1 permits repeated `resource` / `audience`
-    // parameters, but this endpoint rejects any repeated parameter (RFC 6749
-    // §3.2), so only a single value of each is supported.
-    if (params.grant_type === TOKEN_EXCHANGE_GRANT_TYPE) {
-      const accessTokenResolver = c.get('accessTokenResolver') ?? defaultAccessTokenResolver;
-      // config / privateKey / keyId are bound further down for the standard
-      // grants. This branch reads them on its own so the generated output is
-      // unchanged when the feature is off; it returns, so nothing runs twice.
-      const exchangeConfig = c.get('config');
-      const exchangeIssuer: AccessTokenIssuer =
-        exchangeConfig.accessTokenFormat === 'opaque'
-          ? createOpaqueAccessTokenIssuer()
-          : createJwtAccessTokenIssuer();
+import {
+  type TokenClientInfo,
+  type SigningKey,
+  buildAccessTokenAudience,
+  buildAccessTokenPayload,
+  createJwtAccessTokenIssuer,
+  createOpaqueAccessTokenIssuer,
+  type AccessTokenIssuer,
+} from '@maronn-openid-connect/core';
+import {
+  TOKEN_EXCHANGE_GRANT_TYPE,
+  TokenExchangeError,
+  buildTokenExchangeResponse,
+  processTokenExchangeRequest,
+  type ExchangedAccessTokenInfo,
+} from '@maronn-openid-connect/experimental/token-exchange';
+import { type TokenRequestBody, TokenEndpointError } from '../../../endpoints/token/response.js';
+import { respondToken } from '../../../endpoints/token/steps/respond.js';
+import { tokenExchangeConfig } from '../config.js';
+import { step } from '../../../endpoints/step.js';
 
-      // Validate the request and derive the issuing material. Each check inside
-      // is also exported as its own step function, so you can call them one by
-      // one instead and drop or replace individual rules.
-      const grant = await processTokenExchangeRequest({
-        params,
-        client: tokenClient,
-        accessTokenResolver,
-        allowedTargets: tokenExchangeConfig.allowedTargets,
-        configuredExpiresIn: exchangeConfig.accessTokenExpiresIn,
-      });
+export const meta = step({
+  id: 'dispatch-token-exchange',
+  endpoint: 'token',
+  feature: 'token-exchange',
+  kind: 'dispatch',
+  label: 'Token Exchange',
+  spec: 'RFC 8693 §2.1',
+  function: 'exchangeToken',
+  calls: ['processTokenExchangeRequest', 'buildAccessTokenAudience', 'buildAccessTokenPayload', 'buildTokenExchangeResponse'],
+  consumes: ['params', 'tokenClient'],
+  produces: [],
+  removable: false,
+  before: ['validate-grant-type'],
+});
 
-      // Same aud policy as the standard token route: the UserInfo endpoint stays
-      // a permanent member (RFC 9068 §3), so an exchanged token still passes the
-      // UserInfo endpoint's audience check.
-      const exchangeAudience = buildAccessTokenAudience({
-        userInfoEndpoint: `${exchangeConfig.issuer}/userinfo`,
-        requested: grant.requestedAudience,
-        issuer: exchangeConfig.issuer,
-      });
+/**
+ * EXPERIMENTAL — OAuth 2.0 Token Exchange (RFC 8693 §2.1).
+ *
+ * Dispatched right after client authentication and BEFORE the grant_type
+ * validation, which does not know the URN and would reject it with
+ * unsupported_grant_type. Answers the request itself and never falls through
+ * to the standard grants; returns undefined for any other grant_type.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it may change
+ * in a breaking way between releases. Do not build production code on it
+ * without pinning the version.
+ *
+ * Known limitation: RFC 8693 §2.1 permits repeated `resource` / `audience`
+ * parameters, but this endpoint rejects any repeated parameter (RFC 6749
+ * §3.2), so only a single value of each is supported.
+ */
+export async function exchangeToken(
+  c: any,
+  params: TokenRequestBody,
+  tokenClient: TokenClientInfo,
+): Promise<Response | undefined> {
+  if (params.grant_type !== TOKEN_EXCHANGE_GRANT_TYPE) return undefined;
 
-      const exchangeIssuedAt = Math.floor(Date.now() / 1000);
-      const exchangePayload = buildAccessTokenPayload({
-        issuer: exchangeConfig.issuer,
-        subject: grant.subject,
-        clientId: grant.clientId,
-        scope: grant.scope,
-        audience: exchangeAudience,
-        expiresIn: grant.expiresIn,
-        issuedAt: exchangeIssuedAt,
-      });
-      const exchangedToken = await exchangeIssuer.issue({
-        payload: {
-          ...exchangePayload,
-          // RFC 8693 §4.1: a delegation exchange records the current actor in
-          // the act claim (chains already nested by processTokenExchangeRequest).
-          // Impersonation exchanges carry no act claim.
-          ...(grant.actor === undefined ? {} : { act: grant.actor }),
-        },
-        privateKey: c.get('privateKey'),
-        keyId: c.get('keyId'),
-      });
+  try {
+    const accessTokenResolver = c.get('accessTokenResolver');
+    const accessTokenStore = c.get('accessTokenStore');
+    const exchangeConfig = c.get('config');
+    // The first registered key signs new tokens (SigningKeyProvider contract).
+    const exchangeSigningKey: SigningKey = c.get('signingKeys')[0];
+    const exchangeIssuer: AccessTokenIssuer =
+      exchangeConfig.accessTokenFormat === 'opaque'
+        ? createOpaqueAccessTokenIssuer()
+        : createJwtAccessTokenIssuer();
 
-      const exchangeMetadata: ExchangedAccessTokenInfo = {
-        // RFC 8693 §1.1: the exchanged token acts as the same subject, but is
-        // bound to the client that requested the exchange.
-        sub: grant.subject,
-        clientId: grant.clientId,
-        scope: grant.scope,
-        expiresAt: exchangeIssuedAt + grant.expiresIn,
-        // Inherit the subject token's grant so revoking the grant (e.g. on code
-        // reuse detection) also kills every token exchanged from it.
-        grantId: grant.grantId,
-        iat: exchangeIssuedAt,
-        nbf: exchangeIssuedAt,
-        audience: exchangeAudience,
-        issuer: exchangeConfig.issuer,
-        // RFC 9068 §2.2 / RFC 7662 §2.2: the exchanged token gets its own jti,
-        // so it is a distinct store record even when it is exchanged twice from
-        // the same subject_token within one second.
-        jti: exchangePayload.jti,
-        // Persisting act lets a later exchange that presents THIS token as its
-        // subject_token pick up the chain (RFC 8693 §4.1 nesting).
+    // Validate the request and derive the issuing material. Each check inside
+    // is also exported as its own step function, so you can call them one by
+    // one instead and drop or replace individual rules.
+    const grant = await processTokenExchangeRequest({
+      params,
+      client: tokenClient,
+      accessTokenResolver,
+      allowedTargets: tokenExchangeConfig.allowedTargets,
+      configuredExpiresIn: exchangeConfig.accessTokenExpiresIn,
+    });
+
+    // Same aud policy as the standard grants: the UserInfo endpoint stays a
+    // permanent member (RFC 9068 §3), so an exchanged token still passes the
+    // UserInfo endpoint's audience check.
+    const exchangeAudience = buildAccessTokenAudience({
+      userInfoEndpoint: `${exchangeConfig.issuer}/userinfo`,
+      requested: grant.requestedAudience,
+      issuer: exchangeConfig.issuer,
+    });
+
+    const exchangeIssuedAt = Math.floor(Date.now() / 1000);
+    const exchangePayload = buildAccessTokenPayload({
+      issuer: exchangeConfig.issuer,
+      subject: grant.subject,
+      clientId: grant.clientId,
+      scope: grant.scope,
+      audience: exchangeAudience,
+      expiresIn: grant.expiresIn,
+      issuedAt: exchangeIssuedAt,
+    });
+    const exchangedToken = await exchangeIssuer.issue({
+      payload: {
+        ...exchangePayload,
+        // RFC 8693 §4.1: a delegation exchange records the current actor in
+        // the act claim (chains already nested by processTokenExchangeRequest).
+        // Impersonation exchanges carry no act claim.
         ...(grant.actor === undefined ? {} : { act: grant.actor }),
-        // The subject token's stored claims parameter (OIDC Core 1.0 §5.5) is
-        // deliberately NOT inherited: an exchanged token yields scope-based
-        // claims only at the UserInfo endpoint.
-      };
-      await accessTokenStore.set(exchangedToken, exchangeMetadata);
+      },
+      privateKey: exchangeSigningKey.privateKey,
+      keyId: exchangeSigningKey.keyId,
+    });
 
-      // RFC 6749 §5.1: token responses MUST NOT be cached.
-      c.header('Cache-Control', 'no-store');
-      c.header('Pragma', 'no-cache');
-      // RFC 8693 §2.2.1: access_token / issued_token_type / token_type are
-      // REQUIRED; expires_in and scope are always included here.
-      return c.json(buildTokenExchangeResponse({
+    const exchangeMetadata: ExchangedAccessTokenInfo = {
+      // RFC 8693 §1.1: the exchanged token acts as the same subject, but is
+      // bound to the client that requested the exchange.
+      sub: grant.subject,
+      clientId: grant.clientId,
+      scope: grant.scope,
+      expiresAt: exchangeIssuedAt + grant.expiresIn,
+      // Inherit the subject token's grant so revoking the grant (e.g. on code
+      // reuse detection) also kills every token exchanged from it.
+      grantId: grant.grantId,
+      iat: exchangeIssuedAt,
+      nbf: exchangeIssuedAt,
+      audience: exchangeAudience,
+      issuer: exchangeConfig.issuer,
+      // RFC 9068 §2.2 / RFC 7662 §2.2: the exchanged token gets its own jti,
+      // so it is a distinct store record even when it is exchanged twice from
+      // the same subject_token within one second.
+      jti: exchangePayload.jti,
+      // Persisting act lets a later exchange that presents THIS token as its
+      // subject_token pick up the chain (RFC 8693 §4.1 nesting).
+      ...(grant.actor === undefined ? {} : { act: grant.actor }),
+      // The subject token's stored claims parameter (OIDC Core 1.0 §5.5) is
+      // deliberately NOT inherited: an exchanged token yields scope-based
+      // claims only at the UserInfo endpoint.
+    };
+    await accessTokenStore.set(exchangedToken, exchangeMetadata);
+
+    // RFC 8693 §2.2.1: access_token / issued_token_type / token_type are
+    // REQUIRED; expires_in and scope are always included here.
+    return respondToken(c, {
+      status: 200,
+      body: buildTokenExchangeResponse({
         accessToken: exchangedToken,
         expiresIn: grant.expiresIn,
         scope: grant.scope,
-      }));
-    }
-```
-
-最後に、トークンルートの catch ブロックが `TokenExchangeError` の変換を覚える（常に 400 で、RFC 6749 §5.2 の形に `invalid_target` が加わる）。
-
-```typescript
+      }),
+    });
+  } catch (error) {
+    // RFC 8693 §2.2.2: the exchange errors use the RFC 6749 §5.2 shape. They
+    // are always 400 — a 401 can only come from client authentication, which
+    // runs before the branch and throws core's TokenError.
     if (error instanceof TokenExchangeError) {
-      // RFC 8693 §2.2.2: the exchange errors use the RFC 6749 §5.2 shape. They
-      // are always 400 — a 401 can only come from client authentication, which
-      // runs before the branch and throws core's TokenError.
-      c.header('Cache-Control', 'no-store');
-      c.header('Pragma', 'no-cache');
-      return c.json(
-        { error: error.code, error_description: error.errorDescription },
-        error.statusCode,
-      );
+      throw new TokenEndpointError({
+        status: error.statusCode,
+        body: { error: error.code, error_description: error.errorDescription },
+      });
     }
+    throw error;
+  }
+}
 ```
 
-### conformance.test.ts に入るもの
-
-import が 1 行、テスト用クライアントが 2 つ、そして契約テストのブロックが加わる。
-クライアントは、交換 grant を登録した confidential client と、同じく登録した public client の 2 つで、後者は「URN を登録していても public client は拒否される」ことを固定するためにいる。
-
-```typescript
-import { tokenExchangeConfig } from './routes/token.js';
-```
-
-```typescript
-  // EXPERIMENTAL (RFC 8693): a confidential client registered for the exchange
-  // grant, and a public one registered for it as well — the latter pins that a
-  // public client is rejected even when the URN is registered.
-  ['c-exchange', {
-    clientId: 'c-exchange',
-    clientSecret: 's',
-    redirectUris: [REDIRECT_URI],
-    clientType: 'confidential' as const,
-    responseTypes: ['code'],
-    grantTypes: ['authorization_code', 'urn:ietf:params:oauth:grant-type:token-exchange'],
-    tokenEndpointAuthMethod: 'client_secret_post',
-  }],
-  ['c-public-exchange', {
-    clientId: 'c-public-exchange',
-    redirectUris: [REDIRECT_URI],
-    clientType: 'public' as const,
-    responseTypes: ['code'],
-    grantTypes: ['authorization_code', 'urn:ietf:params:oauth:grant-type:token-exchange'],
-    tokenEndpointAuthMethod: 'none',
-  }],
-```
-
-契約テストは、認可コードフローを HTTP で最後まで駆動して生きた subject / actor トークンを取得し（2 人目のシードユーザー `otheruser` が、subject と `sub` の異なる actor を提供する）、成功と失敗の全挙動を固定する。発行された JWT をデコードして `act` claim を検証するテストもここに含まれる。
-
-```typescript
-  // EXPERIMENTAL — OAuth 2.0 Token Exchange (RFC 8693). Generated because this
-  // provider was created with --enable token-exchange. These tests pin the
-  // contract the repository guarantees for the generated exchange grant: change
-  // the behavior and they fail, which is how a customized OP learns it drifted.
-  describe('Token Exchange (RFC 8693)', () => {
-    // RFC 7636 Appendix B example PKCE pair (verifier -> its S256 challenge).
-    const PKCE_VERIFIER = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
-    const PKCE_CHALLENGE_S256 = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
-    const EXCHANGE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:token-exchange';
-    const ACCESS_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:access_token';
-    // The exchange rejects every kind of unusable subject_token / actor_token
-    // with one description each, so the response cannot be used as an existence
-    // oracle.
-    const SUBJECT_INVALID_DESCRIPTION = 'The provided subject_token is not valid';
-    const ACTOR_INVALID_DESCRIPTION = 'The provided actor_token is not valid';
-    const TARGET_REJECTED_DESCRIPTION =
-      'The requested target is not allowed for token exchange';
-
-    // Pure helpers: they fetch and parse only. Every assertion lives in an it().
-    function relativeFrom(location: string | null): string {
-      const url = new URL(location ?? '', 'http://localhost');
-      return url.pathname + url.search;
-    }
-
-    function csrfFrom(html: string): string {
-      return html.match(/name="csrf_token" value="([^"]+)"/)?.[1] ?? '';
-    }
-
-    function postToken(fields: Record<string, string>): Promise<Response> {
-      return app.request('/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(fields).toString(),
-      });
-    }
-
-    function exchangeRequest(overrides: Record<string, string> = {}): Promise<Response> {
-      return postToken({
-        client_id: 'c-exchange',
-        client_secret: 's',
-        grant_type: EXCHANGE_GRANT_TYPE,
-        subject_token_type: ACCESS_TOKEN_TYPE,
-        ...overrides,
-      });
-    }
-
-    // Decode a JWT access token's payload (base64url, RFC 7515 §2) so the act
-    // claim of a delegated token can be pinned. The generated default issues
-    // JWT access tokens (config.accessTokenFormat: 'jwt').
-    function decodeJwtPayload(token: string): Record<string, unknown> {
-      const segment = token.split('.')[1] ?? '';
-      const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
-      const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
-      return JSON.parse(atob(padded)) as Record<string, unknown>;
-    }
-
-    // Drive authorize -> login -> consent over HTTP and hand back the code. No
-    // assertions and no branching here: the flow contract lives in the it()s.
-    async function authorizeFlow(
-      clientId: string,
-      scope: string,
-      claims?: string,
-      username = 'testuser',
-    ): Promise<string> {
-      const authorizeUrl =
-        '/authorize?response_type=code&client_id=' + clientId +
-        '&redirect_uri=' + encodeURIComponent(REDIRECT_URI) +
-        '&scope=' + encodeURIComponent(scope) +
-        '&state=tx-state&nonce=tx-nonce' +
-        (claims === undefined ? '' : '&claims=' + encodeURIComponent(claims)) +
-        '&code_challenge=' + PKCE_CHALLENGE_S256 + '&code_challenge_method=S256';
-
-      const authorizeRes = await app.request(authorizeUrl);
-      const loginPath = relativeFrom(authorizeRes.headers.get('Location'));
-      // Carry forward whatever cookie /authorize set, exactly as a browser would.
-      // With --enable transaction-binding this is the per-transaction binding
-      // secret the later steps require; without it this is '' and the OP ignores
-      // it, so the same flow works in both builds.
-      const bindingCookie = (authorizeRes.headers.get('Set-Cookie') ?? '').split(';')[0] ?? '';
-      const transactionId =
-        new URL(loginPath, 'http://localhost').searchParams.get('transaction_id') ?? '';
-
-      const loginGet = await app.request(loginPath, { headers: { Cookie: bindingCookie } });
-      const loginRes = await app.request('/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-        body: new URLSearchParams({
-          transaction_id: transactionId,
-          csrf_token: csrfFrom(await loginGet.text()),
-          username,
-          password: 'password',
-        }).toString(),
-      });
-      const consentPath = relativeFrom(loginRes.headers.get('Location'));
-
-      const consentGet = await app.request(consentPath, { headers: { Cookie: bindingCookie } });
-      const consentRes = await app.request('/consent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-        body: new URLSearchParams({
-          transaction_id: transactionId,
-          csrf_token: csrfFrom(await consentGet.text()),
-          action: 'approve',
-        }).toString(),
-      });
-      const callback = new URL(consentRes.headers.get('Location') ?? '', 'http://localhost');
-      return callback.searchParams.get('code') ?? '';
-    }
-
-    // A subject_token obtained through the ordinary Authorization Code Flow.
-    async function subjectTokenFor(
-      scope: string,
-      clientId = 'c-exchange',
-      claims?: string,
-      username = 'testuser',
-    ): Promise<string> {
-      const code = await authorizeFlow(clientId, scope, claims, username);
-      const res = await postToken({
-        client_id: clientId,
-        ...(clientId === 'c-public-exchange' ? {} : { client_secret: 's' }),
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: REDIRECT_URI,
-        code_verifier: PKCE_VERIFIER,
-      });
-      return ((await res.json()) as Record<string, string>).access_token;
-    }
-
-    // An actor_token with a sub distinct from the subject: the second seeded
-    // user runs the same flow, so delegation tests can tell subject and actor
-    // apart in the act claim.
-    function actorTokenFor(scope: string): Promise<string> {
-      return subjectTokenFor(scope, 'c-exchange', undefined, 'otheruser');
-    }
-
-    describe('Successful exchange', () => {
-      it('should return every RFC 8693 §2.2.1 response member for a scope-narrowing exchange', async () => {
-        const subjectToken = await subjectTokenFor('openid profile email');
-        const res = await exchangeRequest({ subject_token: subjectToken, scope: 'openid profile' });
-        const body = await res.json();
-
-        expect(res.status).toBe(200);
-        expect(res.headers.get('Cache-Control')).toBe('no-store');
-        expect(res.headers.get('Pragma')).toBe('no-cache');
-        expect(Object.keys(body).sort()).toEqual([
-          'access_token',
-          'expires_in',
-          'issued_token_type',
-          'scope',
-          'token_type',
-        ]);
-        expect(body.issued_token_type).toBe(ACCESS_TOKEN_TYPE);
-        expect(body.token_type).toBe('Bearer');
-        expect(body.scope).toBe('openid profile');
-        expect(body.expires_in).toBe(3600);
-      });
-
-      it('should inherit the subject scope when scope is omitted', async () => {
-        const subjectToken = await subjectTokenFor('openid profile');
-        const res = await exchangeRequest({ subject_token: subjectToken });
-
-        expect(res.status).toBe(200);
-        expect((await res.json()).scope).toBe('openid profile');
-      });
-
-      // RFC 8693 §2.2.1: token exchange does not issue a refresh token here.
-      it('should not issue a refresh token from an exchange', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({ subject_token: subjectToken });
-
-        expect((await res.json()).refresh_token).toBe(undefined);
-      });
-
-      // The exchanged token is an ordinary access token in the store, so every
-      // existing endpoint keeps working with it.
-      it('should return a token that the UserInfo endpoint accepts', async () => {
-        const subjectToken = await subjectTokenFor('openid profile');
-        const exchanged = (await (await exchangeRequest({ subject_token: subjectToken })).json())
-          .access_token as string;
-        const res = await app.request('/userinfo', {
-          headers: { Authorization: 'Bearer ' + exchanged },
-        });
-
-        expect(res.status).toBe(200);
-        expect((await res.json()).sub).toBe('testuser');
-      });
-
-      // RFC 8693 §1.1 impersonation: sub is inherited, client_id is the caller.
-      it('should bind the exchanged token to the requesting client and the original subject', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const exchanged = (await (await exchangeRequest({ subject_token: subjectToken })).json())
-          .access_token as string;
-        const res = await app.request('/introspect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: 'c-exchange',
-            client_secret: 's',
-            token: exchanged,
-          }).toString(),
-        });
-        const body = await res.json();
-
-        expect(body.active).toBe(true);
-        expect(body.sub).toBe('testuser');
-        expect(body.client_id).toBe('c-exchange');
-        expect(body.aud).toEqual(['http://localhost:3000/userinfo']);
-      });
-
-      // The subject token stays usable: RFC 8693 does not make it single use.
-      it('should leave the subject token valid after an exchange', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        await exchangeRequest({ subject_token: subjectToken });
-        const res = await app.request('/userinfo', {
-          headers: { Authorization: 'Bearer ' + subjectToken },
-        });
-
-        expect(res.status).toBe(200);
-      });
-
-      // The exchanged token never outlives the subject token, so a chain of
-      // exchanges cannot launder a token into a longer lifetime.
-      it('should not extend the lifetime beyond the subject token', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const first = (await (await exchangeRequest({ subject_token: subjectToken })).json()) as
-          Record<string, number | string>;
-        const second = (await (
-          await exchangeRequest({ subject_token: first.access_token as string })
-        ).json()) as Record<string, number | string>;
-
-        expect((second.expires_in as number) <= (first.expires_in as number)).toBe(true);
-      });
-
-      // OIDC Core 1.0 §5.5: the consented claims request is NOT carried over, so
-      // an exchanged token yields scope-based claims only.
-      it('should not inherit the claims parameter of the subject token', async () => {
-        const claims = JSON.stringify({ userinfo: { name: { essential: true } } });
-        const subjectToken = await subjectTokenFor('openid', 'c-exchange', claims);
-        const subjectUserInfo = await (
-          await app.request('/userinfo', { headers: { Authorization: 'Bearer ' + subjectToken } })
-        ).json();
-        const exchanged = (await (await exchangeRequest({ subject_token: subjectToken })).json())
-          .access_token as string;
-        const exchangedUserInfo = await (
-          await app.request('/userinfo', { headers: { Authorization: 'Bearer ' + exchanged } })
-        ).json();
-
-        expect(subjectUserInfo.name).toBe('Test User');
-        expect(exchangedUserInfo.name).toBe(undefined);
-      });
-
-      // RFC 9068 §2.2 / RFC 7519 §4.1.7: each exchanged token gets its own jti.
-      // Two exchanges of the same subject_token land in the same wall-clock second
-      // with identical claims; without jti the deterministic RS256 signature
-      // (RFC 8017 §8.2) would make them one string and one store record, so
-      // revoking one would revoke the other.
-      it('should issue a distinct token for each exchange of the same subject token', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const first = (await (await exchangeRequest({ subject_token: subjectToken })).json())
-          .access_token as string;
-        const second = (await (await exchangeRequest({ subject_token: subjectToken })).json())
-          .access_token as string;
-
-        const firstUserInfo = await app.request('/userinfo', { headers: { Authorization: 'Bearer ' + first } });
-        const secondUserInfo = await app.request('/userinfo', { headers: { Authorization: 'Bearer ' + second } });
-
-        expect(first === second).toBe(false);
-        expect(firstUserInfo.status).toBe(200);
-        expect(secondUserInfo.status).toBe(200);
-      });
-    });
-
-    describe('Client authorization', () => {
-      it('should reject an unauthenticated exchange with 401 invalid_client', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await postToken({
-          client_id: 'c-exchange',
-          grant_type: EXCHANGE_GRANT_TYPE,
-          subject_token: subjectToken,
-          subject_token_type: ACCESS_TOKEN_TYPE,
-        });
-
-        expect(res.status).toBe(401);
-        expect((await res.json()).error).toBe('invalid_client');
-      });
-
-      // RFC 6749 §5.2: the exchange URN must be registered on the client.
-      it('should reject a client that has not registered the exchange grant', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await postToken({
-          client_id: 'c-conf',
-          client_secret: 's',
-          grant_type: EXCHANGE_GRANT_TYPE,
-          subject_token: subjectToken,
-          subject_token_type: ACCESS_TOKEN_TYPE,
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'unauthorized_client',
-          error_description: 'The client is not authorized to use the token-exchange grant type',
-        });
-      });
-
-      // RFC 8693 §2.1 notes that skipping client authentication lets a stolen
-      // token be amplified through the STS, so public clients are refused.
-      it('should reject a public client even when it registered the exchange grant', async () => {
-        const subjectToken = await subjectTokenFor('openid', 'c-public-exchange');
-        const res = await postToken({
-          client_id: 'c-public-exchange',
-          grant_type: EXCHANGE_GRANT_TYPE,
-          subject_token: subjectToken,
-          subject_token_type: ACCESS_TOKEN_TYPE,
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'unauthorized_client',
-          error_description: 'Public clients are not allowed to use the token-exchange grant type',
-        });
-      });
-    });
-
-    describe('Parameter validation', () => {
-      it('should reject a missing subject_token with invalid_request', async () => {
-        const res = await exchangeRequest({});
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: 'subject_token is required',
-        });
-      });
-
-      it('should reject an unsupported subject_token_type with invalid_request', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          subject_token_type: 'urn:ietf:params:oauth:token-type:id_token',
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description:
-            'Unsupported subject_token_type. Only urn:ietf:params:oauth:token-type:access_token is supported.',
-        });
-      });
-
-      it('should reject an unsupported requested_token_type with invalid_request', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          requested_token_type: 'urn:ietf:params:oauth:token-type:refresh_token',
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description:
-            'Unsupported requested_token_type. Only urn:ietf:params:oauth:token-type:access_token is supported.',
-        });
-      });
-
-      // RFC 8693 §2.1: actor_token_type is REQUIRED when actor_token is present.
-      it('should reject actor_token without actor_token_type', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          actor_token: subjectToken,
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: 'actor_token_type is required when actor_token is present',
-        });
-      });
-
-      // RFC 8693 §2.1: actor_token_type MUST NOT be included without actor_token.
-      it('should reject actor_token_type without actor_token', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          actor_token_type: ACCESS_TOKEN_TYPE,
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: 'actor_token_type must not be present without actor_token',
-        });
-      });
-
-      it('should reject an unsupported actor_token_type with invalid_request', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          actor_token: subjectToken,
-          actor_token_type: 'urn:ietf:params:oauth:token-type:id_token',
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description:
-            'Unsupported actor_token_type. Only urn:ietf:params:oauth:token-type:access_token is supported.',
-        });
-      });
-
-      // The actor_token failure description is fixed for the same oracle-
-      // elimination reason as the subject_token one.
-      it('should reject an unknown actor_token with the fixed description', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          actor_token: 'not-a-real-token',
-          actor_token_type: ACCESS_TOKEN_TYPE,
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: ACTOR_INVALID_DESCRIPTION,
-        });
-      });
-
-      // RFC 8693 §2.1: resource MUST be an absolute URI without a fragment.
-      it('should reject a relative resource with invalid_request', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({ subject_token: subjectToken, resource: '/api' });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: 'resource must be an absolute URI without a fragment component',
-        });
-      });
-
-      it('should reject a resource carrying a fragment with invalid_request', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          resource: 'https://api.example.com/x#frag',
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: 'resource must be an absolute URI without a fragment component',
-        });
-      });
-
-      // RFC 6749 §3.2: repeated token endpoint parameters are refused, which is
-      // why this OP supports only a single audience / resource value.
-      it('should reject a repeated resource parameter', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await app.request('/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body:
-            'client_id=c-exchange&client_secret=s&grant_type=' +
-            encodeURIComponent(EXCHANGE_GRANT_TYPE) +
-            '&subject_token=' + encodeURIComponent(subjectToken) +
-            '&subject_token_type=' + encodeURIComponent(ACCESS_TOKEN_TYPE) +
-            '&resource=https%3A%2F%2Fa.example.com&resource=https%3A%2F%2Fb.example.com',
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: 'Parameter "resource" must not be repeated',
-        });
-      });
-
-      // RFC 8693 §2.2.2 sends invalid subject tokens to invalid_request, NOT to
-      // invalid_grant as the authorization_code / refresh_token grants would.
-      it('should reject an unknown subject_token with invalid_request', async () => {
-        const res = await exchangeRequest({ subject_token: 'not-a-real-token' });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_request',
-          error_description: SUBJECT_INVALID_DESCRIPTION,
-        });
-      });
-
-      it('should report a revoked subject_token exactly like an unknown one', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        await app.request('/revoke', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: 'c-exchange',
-            client_secret: 's',
-            token: subjectToken,
-          }).toString(),
-        });
-        const revoked = await exchangeRequest({ subject_token: subjectToken });
-        const unknown = await exchangeRequest({ subject_token: 'not-a-real-token' });
-
-        expect(revoked.status).toBe(400);
-        expect(await revoked.json()).toEqual(await unknown.json());
-      });
-    });
-
-    describe('Scope narrowing', () => {
-      it('should reject a scope that exceeds the subject token scope', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({ subject_token: subjectToken, scope: 'openid profile' });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_scope',
-          error_description: 'The requested scope exceeds the scope of the subject_token',
-        });
-      });
-
-      it('should grant exactly the requested subset', async () => {
-        const subjectToken = await subjectTokenFor('openid profile email');
-        const res = await exchangeRequest({ subject_token: subjectToken, scope: 'email' });
-
-        expect(res.status).toBe(200);
-        expect((await res.json()).scope).toBe('email');
-      });
-    });
-
-    describe('Delegation (RFC 8693 §4.1)', () => {
-      // sub stays the subject; the actor appears only in the act claim.
-      it('should record the actor in the act claim of the issued token', async () => {
-        const subjectToken = await subjectTokenFor('openid profile');
-        const actorToken = await actorTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          actor_token: actorToken,
-          actor_token_type: ACCESS_TOKEN_TYPE,
-        });
-        const body = await res.json();
-        const payload = decodeJwtPayload(body.access_token as string);
-
-        expect(res.status).toBe(200);
-        expect(payload.sub).toBe('testuser');
-        expect(payload.act).toEqual({ sub: 'otheruser' });
-      });
-
-      it('should not add an act claim to an impersonation exchange', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const body = await (await exchangeRequest({ subject_token: subjectToken })).json();
-        const payload = decodeJwtPayload(body.access_token as string);
-
-        expect(payload.act).toBe(undefined);
-      });
-
-      // RFC 8693 §4.1: exchanging a delegated token again pushes the prior
-      // actor one level down; the outermost act names the current actor.
-      it('should nest the prior actor when a delegated token is exchanged again', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const firstActor = await actorTokenFor('openid');
-        const delegated = (await (
-          await exchangeRequest({
-            subject_token: subjectToken,
-            actor_token: firstActor,
-            actor_token_type: ACCESS_TOKEN_TYPE,
-          })
-        ).json()).access_token as string;
-        const secondActor = await actorTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: delegated,
-          actor_token: secondActor,
-          actor_token_type: ACCESS_TOKEN_TYPE,
-        });
-        const payload = decodeJwtPayload((await res.json()).access_token as string);
-
-        expect(res.status).toBe(200);
-        expect(payload.act).toEqual({ sub: 'otheruser', act: { sub: 'otheruser' } });
-      });
-
-      // A delegated token is an ordinary access token of the subject: the
-      // UserInfo endpoint answers for the subject, not the actor.
-      it('should answer UserInfo for the subject of a delegated token', async () => {
-        const subjectToken = await subjectTokenFor('openid profile');
-        const actorToken = await actorTokenFor('openid');
-        const delegated = (await (
-          await exchangeRequest({
-            subject_token: subjectToken,
-            actor_token: actorToken,
-            actor_token_type: ACCESS_TOKEN_TYPE,
-          })
-        ).json()).access_token as string;
-        const res = await app.request('/userinfo', {
-          headers: { Authorization: 'Bearer ' + delegated },
-        });
-
-        expect(res.status).toBe(200);
-        expect((await res.json()).sub).toBe('testuser');
-      });
-    });
-
-    describe('Target policy (allowedTargets)', () => {
-      // The generated default is an empty list, so any named target is refused
-      // until the operator opts in. The list is restored after each test.
-      it('should reject an audience that is not in allowedTargets', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          audience: 'https://internal.example.com',
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_target',
-          error_description: TARGET_REJECTED_DESCRIPTION,
-        });
-      });
-
-      it('should reject a resource that is not in allowedTargets', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          resource: 'https://internal.example.com/api',
-        });
-
-        expect(res.status).toBe(400);
-        expect(await res.json()).toEqual({
-          error: 'invalid_target',
-          error_description: TARGET_REJECTED_DESCRIPTION,
-        });
-      });
-
-      it('should issue a token for an allowed audience', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        tokenExchangeConfig.allowedTargets = ['https://internal.example.com'];
-        const res = await exchangeRequest({
-          subject_token: subjectToken,
-          audience: 'https://internal.example.com',
-        });
-        const body = await res.json();
-        tokenExchangeConfig.allowedTargets = [];
-
-        expect(res.status).toBe(200);
-        expect(body.token_type).toBe('Bearer');
-      });
-
-      // The UserInfo endpoint stays a permanent aud member (RFC 9068 §3), so an
-      // exchanged token keeps working against this OP as well as the new target.
-      it('should add the allowed audience alongside the UserInfo endpoint', async () => {
-        const subjectToken = await subjectTokenFor('openid');
-        tokenExchangeConfig.allowedTargets = ['https://internal.example.com'];
-        const exchanged = (await (
-          await exchangeRequest({
-            subject_token: subjectToken,
-            audience: 'https://internal.example.com',
-          })
-        ).json()).access_token as string;
-        tokenExchangeConfig.allowedTargets = [];
-        const introspection = await (
-          await app.request('/introspect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-              client_id: 'c-exchange',
-              client_secret: 's',
-              token: exchanged,
-            }).toString(),
-          })
-        ).json();
-
-        expect(introspection.aud).toEqual([
-          'http://localhost:3000/userinfo',
-          'https://internal.example.com',
-        ]);
-      });
-    });
-
-    describe('Discovery', () => {
-      it('should advertise the exchange grant in grant_types_supported', async () => {
-        const metadata = await (await app.request('/.well-known/openid-configuration')).json();
-
-        expect(metadata.grant_types_supported.includes(EXCHANGE_GRANT_TYPE)).toBe(true);
-      });
-    });
-  });
-```
-
-### 他フレームワークの差分
-
-express と fastify の差分は同一のため 1 ファイルに集約し、nextjs も同等の内容である。
-
-- [express-fastify](../../../tasks/experimental/done/token-exchange/promotion-review/generated-code/express-fastify.md)
-- [nextjs](../../../tasks/experimental/done/token-exchange/promotion-review/generated-code/nextjs.md)
-
-サンプルの中でこの機能を有効化しているのは [samples/hono-cloudflare](../../../samples/hono-cloudflare) だけである。
+### 他フレームワークの生成コード
+
+express と fastify の生成コードは、hono と同じファイルからなる。
+CLI は、エンドポイントが import する `hono` のルーターを Fetch API の小さなルーター `web-router.ts`（`WebRouter` と `WebContext`）に置き換え、フレームワーク向けの `apply.ts`、`web-router.ts`、`node-adapter.ts` を加える。
+加えるファイルの元は [apps/hono/src/web/](../../../apps/hono/src/web) にあり、どのファイルをどこに置くかは [packages/cli/extract.json](../../../packages/cli/extract.json) が定める。
+画面は hono/jsx のままなので、これらの生成物も JSX ランタイムとして `hono` を必要とする。
+`features/token-exchange/` のファイルは `hono` を import しないので、express と fastify でも hono と同じ内容になる。
+
+Next.js の生成コードは、Next.js App Router のアプリ [apps/nextjs](../../../apps/nextjs) から抜き出す。
+機能のルートファイルはルートグループ `app/(<feature-id>)/` に、それ以外のコードは `app/_oidc-provider/features/<feature-id>/` に置かれ、Token Exchange のコードは `app/_oidc-provider/features/token-exchange/` に入る。
+どちらもこの解説には載せず、ディレクトリへのリンクで示す。
 
 ## E2E テストの全文と解説
 

@@ -5,10 +5,10 @@
 この文書が全文を載せるのは次のコードである。
 
 - `packages/experimental/src/jarm/` の実装 3 ファイルとテスト 2 ファイルのすべて
-- CLI の `--enable jarm` が生成コードへ注入する差分の全文（hono）
+- CLI の `--enable jarm` が生成コードへ加えるコードの全文（hono）
 - JARM の E2E テストスペックの全文
 
-core 本体、E2E 共有ハーネス、他フレームワークの生成差分は全機能で共有される基盤なので、リンクで参照する。
+core 本体、E2E 共有ハーネス、他フレームワークの生成コードは全機能で共有される基盤なので、リンクで参照する。
 
 ## 機能の概要
 
@@ -74,7 +74,8 @@ core にも同種の署名コードがあるが、非公開の低レベルヘル
 experimental 機能は独立性を優先して重複を許容する方針に従い、機能内に閉じた実装とした。
 
 第三に、「JARM で応答すべきトランザクションである」という事実の記録は、core の `AuthTransaction` に**相乗り**させる。
-core の interface は閉じているので、交差型 `JarmAuthTransactionFields` を定義し、生成コードが transaction を store へ保存するときに `jarmResponseMode: 'query.jwt'` を追加フィールドとして持たせる。
+core の interface は閉じているので、experimental は交差型 `JarmAuthTransactionFields`（`jarmResponseMode` フィールド）を定義している。
+現在の生成コードはこの型を使わず、base の `endpoints/authorize/response-mode.ts` が定める `ResponseModeTransaction` の `responseMode` フィールドに、応答モードの名前 `query.jwt` を記録する（`create-transaction` ステップ）。
 このため auth transaction store の実装には「未知フィールドを透過的に保存する」ことが契約として要求される。
 オブジェクトを丸ごと JSON 化する通常の実装なら自然に満たされるが、フィールドを列挙してコピーする実装では記録が失われ、JARM を要求したクライアントへ静かに平文クエリで応答してしまう。
 
@@ -883,1025 +884,330 @@ describe('assertJarmLifetimeSeconds', () => {
 
 ## CLI 統合と生成コードへの寄与
 
-`maronn-oidc generate <framework> --enable jarm` を指定すると、生成コードに次が入る。
+experimental 本体はロジック層であり、認可レスポンスを応答 JWT にして返すのは CLI が生成するコードである。
+生成コードは、全機能を有効にして動かしているアプリ [apps/hono](../../../apps/hono) の `src/oidc-provider/` から、CLI が抜き出したものである。
+`maronn-oidc generate <framework> --enable jarm` を指定すると、生成コードに次の 3 つが入る。
 
-- **routes/jarm.ts の追加**：`jarmConfig`（`jarmResponseLifetimeSeconds: 60`）を置き、モジュール読み込み時に `assertJarmLifetimeSeconds` で検証する。新しい HTTP ルートは増えない（JARM は応答の運び方の変更であり、エンドポイントの追加ではない）
-- **routes/authorize.ts の変更**：パラメータ解釈時に `resolveJarmResponseMode` で分類し、`unsupported-jwt-mode` は `redirect_uri` 確定後に `invalid_request` としてエラー化する。JARM モードのときは transaction に `jarmResponseMode: 'query.jwt'` を記録する。即時応答（prompt=none など）では、その場で応答 JWT を生成して `response` パラメータで返す
-- **routes/consent.ts の変更**：同意完了後の最終リダイレクトで、transaction の記録を読み、JARM モードなら応答（成功もエラーも）を JWT 化して返す
-- **routes/discovery.ts の変更**：`response_modes_supported` に `query.jwt` と `jwt` を、`authorization_signing_alg_values_supported` に `RS256` を広告する
-- **conformance.test.ts の変更**：上記の挙動一式を契約テストとして固定する
+- **`features/jarm/` ディレクトリ**：JARM が所有するファイルのすべて。`feature.ts` が `defineFeature()` で機能を宣言し、`authorize.responseModes` フックで `query.jwt` の応答モードを `/consent` に復元させ、`discovery` フックで `response_modes_supported` に `query.jwt` と `jwt` を、`authorization_signing_alg_values_supported` に `RS256` を加える。`routes` は持たないので、新しい HTTP ルートは増えない（JARM は応答の運び方の変更であり、エンドポイントの追加ではない）
+- **`features/enabled.ts` の 2 行**：`jarm` の import 行と、機能の一覧 `features` の 1 項目
+- **`endpoints/authorize/pipeline.ts` の所有者付きブロック 1 つ**：`[resolve-jarm-response-mode]` ブロックが、base の `[resolve-redirect-uri]` と `[validate-request]` のあいだで `response_mode` を解釈し、JWT で応答するリクエストなら応答モード `responseMode` を決める。ブロックが呼ぶステップの import 行も、ファイル先頭に 1 行入る
 
-### 生成コードに入る差分の全文（hono）
+フックが受け渡すのは、ルート、メタデータ、応答モードのハンドラのように、base が決まった場所で読む宣言的な値である。
+base のパイプラインの途中で動く処理はフックにせず、そのパイプラインの中に、機能の名前を書いた目印のコメントで始まるブロックとして置く。
+目印のコメントは `// [step-id] (feature: <feature-id>)` で始まり、次の目印の直前までがそのブロックになる。
+このブロックを **所有者付きブロック** と呼ぶ。
+`--enable jarm` を付けずに生成すると、CLI は JARM のブロックと、そのブロックだけが使っていた import 行を削除する。
+`responseMode` は base が `try` の外で `let` として宣言しているので、ブロックがなければ `undefined`（平文の query 応答）のまま残り、後続のステップも `catch` もその値を読める。
 
-以下は、デフォルト構成（`default-op`）と `--enable jarm`（`with-jarm`）の生成結果の差分そのもので、`--enable jarm` が生成コードに足すもののすべてである。
+応答の経路は次のとおりである。
+`GET /authorize` では、base の `endpoints/authorize/pipeline.ts` が `redirect_uri` を確定した直後に、JARM のブロックが `responseMode` を決める。
+`[create-transaction]` はその名前（`query.jwt`）を transaction に記録し、その場で応答するステップ（prompt=none、SSO、エラー）は `responseMode.redirect()` で応答 JWT を組み立てる。
+ログインと同意を経る応答は別のリクエストで返るので、`/consent` の `[build-authorization-response]` ステップが、`endpoints/authorize/response-mode.ts` の `restoreResponseMode()` で transaction の記録から応答モードを復元し、成功も拒否も JWT で返す。
+discovery では、`features/feature.ts` の `discoveryOf()` が JARM の `discovery` フックの配列を base の配列にまとめ、`response_modes_supported` は `query`、`query.jwt`、`jwt` になる。
 
-````diff
-diff --git a/default-op/conformance.test.ts b/with-jarm/conformance.test.ts
-index 58258e6..9d521b3 100644
---- a/default-op/conformance.test.ts
-+++ b/with-jarm/conformance.test.ts
-@@ -415,10 +415,11 @@ describe('generated provider HTTP conformance', () => {
-         jwks_uri: 'http://localhost:3000/.well-known/jwks.json',
-         userinfo_endpoint: 'http://localhost:3000/userinfo',
-         response_types_supported: ['code'],
--        // OAuth 2.0 Multiple Response Type Encoding Practices §2: the code flow
--        // returns the authorization response via query, so the OP advertises
--        // response_modes_supported as exactly ['query'].
--        response_modes_supported: ['query'],
-+        // OAuth 2.0 Multiple Response Type Encoding Practices §2 + JARM §4: the
-+        // code flow returns the authorization response via query, and this OP was
-+        // generated with --enable jarm, so the JWT-secured query modes are
-+        // advertised alongside it.
-+        response_modes_supported: ['query', 'query.jwt', 'jwt'],
-       });
-     });
- 
-@@ -2529,6 +2530,407 @@ describe('generated provider HTTP conformance', () => {
-     });
-   });
- 
-+  // EXPERIMENTAL — JWT Secured Authorization Response Mode (JARM). Generated
-+  // because this provider was created with --enable jarm. These tests pin the
-+  // contract the repository guarantees for the generated JARM responses: change
-+  // the behavior and they fail, which is how a customized OP learns it drifted.
-+  describe('JWT Secured Authorization Response Mode (JARM)', () => {
-+    // RFC 7636 Appendix B example PKCE pair (verifier -> its S256 challenge).
-+    const PKCE_VERIFIER = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';
-+    const PKCE_CHALLENGE_S256 = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
-+
-+    // Pure helpers: they fetch, parse and verify only. Every assertion lives in
-+    // an it(), and none of them branches on the OP's behavior.
-+    function relativeFrom(location: string | null): string {
-+      const url = new URL(location ?? '', 'http://localhost');
-+      return url.pathname + url.search;
-+    }
-+
-+    function csrfFrom(html: string): string {
-+      return html.match(/name="csrf_token" value="([^"]+)"/)?.[1] ?? '';
-+    }
-+
-+    function firstCookie(res: Response): string {
-+      return (res.headers.get('Set-Cookie') ?? '').split(';')[0] ?? '';
-+    }
-+
-+    function decodeSegment(segment: string): Record<string, unknown> {
-+      const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
-+      const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
-+      const bytes = Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
-+      return JSON.parse(new TextDecoder().decode(bytes));
-+    }
-+
-+    function authorizeUrl(overrides: Record<string, string> = {}): string {
-+      return '/authorize?' + new URLSearchParams({
-+        response_type: 'code',
-+        client_id: 'c-conf',
-+        redirect_uri: REDIRECT_URI,
-+        scope: 'openid',
-+        state: 'jarm-state',
-+        nonce: 'jarm-nonce',
-+        code_challenge: PKCE_CHALLENGE_S256,
-+        code_challenge_method: 'S256',
-+        ...overrides,
-+      }).toString();
-+    }
-+
-+    /**
-+     * Drives authorize -> login -> consent and returns the final Location plus
-+     * the browser session cookie login handed out (used by the SSO / prompt=none
-+     * cases below). The transaction cookie is carried forward exactly as a
-+     * browser would, so this works with or without --enable transaction-binding.
-+     */
-+    async function interactiveFlow(
-+      url: string,
-+      action: 'approve' | 'deny' = 'approve',
-+    ): Promise<{ location: string; sessionCookie: string }> {
-+      const authorizeRes = await app.request(url);
-+      const loginPath = relativeFrom(authorizeRes.headers.get('Location'));
-+      const bindingCookie = firstCookie(authorizeRes);
-+      const transactionId =
-+        new URL(loginPath, 'http://localhost').searchParams.get('transaction_id') ?? '';
-+
-+      const loginGet = await app.request(loginPath, { headers: { Cookie: bindingCookie } });
-+      const loginRes = await app.request('/login', {
-+        method: 'POST',
-+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-+        body: new URLSearchParams({
-+          transaction_id: transactionId,
-+          csrf_token: csrfFrom(await loginGet.text()),
-+          username: 'testuser',
-+          password: 'password',
-+        }).toString(),
-+      });
-+      const sessionCookie = firstCookie(loginRes);
-+
-+      const consentPath = relativeFrom(loginRes.headers.get('Location'));
-+      const consentGet = await app.request(consentPath, { headers: { Cookie: bindingCookie } });
-+      const consentRes = await app.request('/consent', {
-+        method: 'POST',
-+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: bindingCookie },
-+        body: new URLSearchParams({
-+          transaction_id: transactionId,
-+          csrf_token: csrfFrom(await consentGet.text()),
-+          action,
-+        }).toString(),
-+      });
-+
-+      return {
-+        location: consentRes.headers.get('Location') ?? '',
-+        sessionCookie,
-+      };
-+    }
-+
-+    function queryOf(location: string): URLSearchParams {
-+      return new URL(location, 'http://localhost').searchParams;
-+    }
-+
-+    /**
-+     * JARM Section 2.4 / Section 5.1, from the client's side: resolve the key
-+     * from the OP's jwks_uri by kid and verify the RS256 signature before any
-+     * claim is trusted.
-+     */
-+    async function inspectJarmJwt(jwt: string): Promise<{
-+      header: Record<string, unknown>;
-+      payload: Record<string, unknown>;
-+      signatureValid: boolean;
-+    }> {
-+      const [encodedHeader = '', encodedPayload = '', encodedSignature = ''] = jwt.split('.');
-+      const header = decodeSegment(encodedHeader);
-+      const jwks = await (await app.request('/.well-known/jwks.json')).json();
-+      const jwk = (jwks.keys as Array<Record<string, unknown>>).find(
-+        (candidate) => candidate.kid === header.kid,
-+      );
-+      const key = await crypto.subtle.importKey(
-+        'jwk',
-+        { kty: 'RSA', n: jwk?.n as string, e: jwk?.e as string },
-+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-+        false,
-+        ['verify'],
-+      );
-+      const base64 = encodedSignature.replace(/-/g, '+').replace(/_/g, '/');
-+      const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
-+      const signatureValid = await crypto.subtle.verify(
-+        'RSASSA-PKCS1-v1_5',
-+        key,
-+        Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)),
-+        new TextEncoder().encode(encodedHeader + '.' + encodedPayload),
-+      );
-+      return { header, payload: decodeSegment(encodedPayload), signatureValid };
-+    }
-+
-+    describe('Signing key selection (JARM Section 3)', () => {
-+      // A SigningKeyProvider may legitimately return an ES256 active key next to
-+      // a registered set that also holds RS256 — packages/core's
-+      // SigningKeyProvider contract documents alternate-alg key sets, and only
-+      // the SET is required to contain RS256 (OIDC Core 1.0 Section 15.1). The
-+      // JARM response JWT always declares alg RS256, so it must be signed with
-+      // the RS256 key from that set: signing it with whichever key happens to be
-+      // active would make Web Crypto refuse and break the authorization response
-+      // delivery path for every client that asked for a JWT response mode.
-+      it('should sign with the registered RS256 key when the active key is ES256', async () => {
-+        const rs256Pair = await crypto.subtle.generateKey(
-+          { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
-+          true,
-+          ['sign', 'verify'],
-+        );
-+        const es256Pair = await crypto.subtle.generateKey(
-+          { name: 'ECDSA', namedCurve: 'P-256' },
-+          true,
-+          ['sign', 'verify'],
-+        );
-+        const rs256Key: SigningKey = {
-+          privateKey: rs256Pair.privateKey,
-+          publicJwk: await crypto.subtle.exportKey('jwk', rs256Pair.publicKey),
-+          keyId: 'mixed-rs256',
-+        };
-+        const es256Key: SigningKey = {
-+          privateKey: es256Pair.privateKey,
-+          publicJwk: await crypto.subtle.exportKey('jwk', es256Pair.publicKey),
-+          keyId: 'mixed-es256',
-+        };
-+        const mixedProvider: SigningKeyProvider = {
-+          // Active key is the ES256 one; the registered set holds both.
-+          async getSigningKey(): Promise<SigningKey> {
-+            return es256Key;
-+          },
-+          async getSigningKeys(): Promise<SigningKey[]> {
-+            return [rs256Key, es256Key];
-+          },
-+        };
-+        const mixedApp = createApp({
-+          signingKeyProvider: mixedProvider,
-+          clientResolver: createInMemoryClientResolver(testClients),
-+        });
-+
-+        // OIDC Core 1.0 Section 3.1.2.1: prompt=none with no session is
-+        // login_required — a redirectable error, so it is answered in JARM mode
-+        // straight from the authorize route, with no interaction to drive.
-+        const res = await mixedApp.request(
-+          authorizeUrl({ response_mode: 'query.jwt', prompt: 'none' }),
-+        );
-+        const location = res.headers.get('Location') ?? '';
-+        const jwt = queryOf(location).get('response') ?? '';
-+        const [encodedHeader = '', encodedPayload = '', encodedSignature = ''] = jwt.split('.');
-+        const base64 = encodedSignature.replace(/-/g, '+').replace(/_/g, '/');
-+        const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
-+        const signatureValid = await crypto.subtle.verify(
-+          'RSASSA-PKCS1-v1_5',
-+          rs256Pair.publicKey,
-+          Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)),
-+          new TextEncoder().encode(encodedHeader + '.' + encodedPayload),
-+        );
-+
-+        expect([...queryOf(location).keys()]).toEqual(['response']);
-+        expect(decodeSegment(encodedHeader)).toEqual({ alg: 'RS256', kid: 'mixed-rs256' });
-+        expect(signatureValid).toBe(true);
-+        expect(decodeSegment(encodedPayload).error).toBe('login_required');
-+      });
-+    });
-+
-+    describe('Success response (JARM Section 2.3.1)', () => {
-+      it('should deliver the authorization response as the only response query parameter', async () => {
-+        const { location } = await interactiveFlow(authorizeUrl({ response_mode: 'query.jwt' }));
-+
-+        // JARM Section 2.3.1: the response is carried by a single `response`
-+        // parameter. The plain code / state / iss parameters MUST NOT be added —
-+        // the JWT's iss claim replaces RFC 9207's iss parameter.
-+        expect([...queryOf(location).keys()]).toEqual(['response']);
-+      });
-+
-+      it('should sign the response JWT with RS256 under a kid published in JWKS', async () => {
-+        const { location } = await interactiveFlow(authorizeUrl({ response_mode: 'query.jwt' }));
-+        const inspected = await inspectJarmJwt(queryOf(location).get('response') ?? '');
-+
-+        // JARM Section 3: RS256 is the default (and here the only) algorithm.
-+        // No typ header: JARM does not define one and its Section 2.3.1 example
-+        // header carries only kid and alg.
-+        expect(inspected.header).toEqual({ alg: 'RS256', kid: 'test-key' });
-+        expect(inspected.signatureValid).toBe(true);
-+      });
-+
-+      it('should carry exactly iss, aud, exp, code and state as claims', async () => {
-+        const { location } = await interactiveFlow(authorizeUrl({ response_mode: 'query.jwt' }));
-+        const { payload } = await inspectJarmJwt(queryOf(location).get('response') ?? '');
-+
-+        // JARM Section 2.1: iss / aud / exp are REQUIRED and the authorization
-+        // response parameters travel as claims of the same JWT. The claim set is
-+        // pinned whole so an added claim (a PII leak, for instance) fails here.
-+        expect(Object.keys(payload).sort()).toEqual(['aud', 'code', 'exp', 'iss', 'state']);
-+        expect(payload.iss).toBe('http://localhost:3000');
-+        expect(payload.aud).toBe('c-conf');
-+        expect(payload.state).toBe('jarm-state');
-+      });
-+
-+      it('should exchange the code carried by the response JWT for tokens', async () => {
-+        const { location } = await interactiveFlow(authorizeUrl({ response_mode: 'query.jwt' }));
-+        const { payload } = await inspectJarmJwt(queryOf(location).get('response') ?? '');
-+        const res = await app.request('/token', {
-+          method: 'POST',
-+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-+          body: new URLSearchParams({
-+            grant_type: 'authorization_code',
-+            code: String(payload.code ?? ''),
-+            redirect_uri: REDIRECT_URI,
-+            client_id: 'c-conf',
-+            client_secret: 's',
-+            code_verifier: PKCE_VERIFIER,
-+          }).toString(),
-+        });
-+
-+        // JARM changes only how the response is delivered; the code itself is an
-+        // ordinary authorization code and the token endpoint is untouched.
-+        expect(res.status).toBe(200);
-+        expect((await res.json()).token_type).toBe('Bearer');
-+      });
-+
-+      it('should treat the jwt shorthand as query.jwt', async () => {
-+        // JARM Section 2.3.4: for response_type=code the default JWT delivery
-+        // mode is query.jwt, so the `jwt` shorthand means exactly that.
-+        const { location } = await interactiveFlow(authorizeUrl({ response_mode: 'jwt' }));
-+        const { payload, signatureValid } = await inspectJarmJwt(
-+          queryOf(location).get('response') ?? '',
-+        );
-+
-+        expect([...queryOf(location).keys()]).toEqual(['response']);
-+        expect(signatureValid).toBe(true);
-+        expect(Object.keys(payload).sort()).toEqual(['aud', 'code', 'exp', 'iss', 'state']);
-+      });
-+    });
-+
-+    describe('Error response (JARM Section 2.1)', () => {
-+      it('should return a signed error JWT when the End-User denies consent', async () => {
-+        const { location } = await interactiveFlow(
-+          authorizeUrl({ response_mode: 'query.jwt' }),
-+          'deny',
-+        );
-+        const { payload, signatureValid } = await inspectJarmJwt(
-+          queryOf(location).get('response') ?? '',
-+        );
-+
-+        expect([...queryOf(location).keys()]).toEqual(['response']);
-+        expect(signatureValid).toBe(true);
-+        expect(Object.keys(payload).sort()).toEqual(['aud', 'error', 'exp', 'iss', 'state']);
-+        expect(payload.error).toBe('access_denied');
-+        expect(payload.state).toBe('jarm-state');
-+      });
-+
-+      it('should return a signed error JWT for a prompt=none request with no session', async () => {
-+        // OIDC Core 1.0 Section 3.1.2.1: prompt=none without a session is
-+        // login_required. It is a redirectable error, so JARM applies to it.
-+        const res = await app.request(
-+          authorizeUrl({ response_mode: 'query.jwt', prompt: 'none' }),
-+        );
-+        const { payload, signatureValid } = await inspectJarmJwt(
-+          queryOf(res.headers.get('Location') ?? '').get('response') ?? '',
-+        );
-+
-+        expect([...queryOf(res.headers.get('Location') ?? '').keys()]).toEqual(['response']);
-+        expect(signatureValid).toBe(true);
-+        expect(payload.error).toBe('login_required');
-+        expect(payload.state).toBe('jarm-state');
-+      });
-+    });
-+
-+    describe('Unsupported JWT response modes', () => {
-+      // JARM Section 2.3.2 / Section 2.3.3 exist in the specification but are not
-+      // implemented by this OP (response_type=code only, no auto-submitting form).
-+      // The rejection itself is a PLAIN query error: the OP cannot answer in a
-+      // response mode it does not implement.
-+      it('should reject fragment.jwt with a plain invalid_request redirect', async () => {
-+        const res = await app.request(authorizeUrl({ response_mode: 'fragment.jwt' }));
-+        const query = queryOf(res.headers.get('Location') ?? '');
-+
-+        expect(res.status).toBe(302);
-+        expect([...query.keys()].sort()).toEqual(['error', 'error_description', 'iss', 'state']);
-+        expect(query.get('error')).toBe('invalid_request');
-+        expect(query.get('error_description')).toBe('response_mode fragment.jwt is not supported');
-+        expect(query.get('state')).toBe('jarm-state');
-+      });
-+
-+      it('should reject form_post.jwt with a plain invalid_request redirect', async () => {
-+        const res = await app.request(authorizeUrl({ response_mode: 'form_post.jwt' }));
-+        const query = queryOf(res.headers.get('Location') ?? '');
-+
-+        expect(query.get('error')).toBe('invalid_request');
-+        expect(query.get('error_description')).toBe('response_mode form_post.jwt is not supported');
-+      });
-+    });
-+
-+    describe('Unchanged behavior without a JWT response mode', () => {
-+      it('should return the plain query response when response_mode is absent', async () => {
-+        const { location } = await interactiveFlow(authorizeUrl());
-+
-+        // The whole point of the isolation: enabling JARM must not change the
-+        // response for a client that did not ask for it.
-+        expect([...queryOf(location).keys()].sort()).toEqual(['code', 'iss', 'state']);
-+        expect(queryOf(location).get('iss')).toBe('http://localhost:3000');
-+      });
-+
-+      it('should keep ignoring a non-JWT response_mode value', async () => {
-+        // form_post is not implemented and never was; JARM only adds meaning to
-+        // the .jwt family, so this request is answered exactly as before.
-+        const { location } = await interactiveFlow(authorizeUrl({ response_mode: 'form_post' }));
-+
-+        expect([...queryOf(location).keys()].sort()).toEqual(['code', 'iss', 'state']);
-+      });
-+    });
-+
-+    describe('Transaction store round trip', () => {
-+      // The authorize route records the mode on the transaction and the consent
-+      // route reads it back, so a store that drops unknown fields would answer in
-+      // plain query. These paths, by contrast, answer inside the authorize route
-+      // itself and never touch the store round trip.
-+      it('should answer the SSO fast path with a signed JWT', async () => {
-+        const first = await interactiveFlow(
-+          authorizeUrl({ response_mode: 'query.jwt', prompt: 'consent' }),
-+        );
-+        const res = await app.request(authorizeUrl({ response_mode: 'query.jwt' }), {
-+          headers: { Cookie: first.sessionCookie },
-+        });
-+        const { header, payload, signatureValid } = await inspectJarmJwt(
-+          queryOf(res.headers.get('Location') ?? '').get('response') ?? '',
-+        );
-+
-+        expect([...queryOf(res.headers.get('Location') ?? '').keys()]).toEqual(['response']);
-+        // JARM Section 3: the authorize route signs with the RS256 key selected
-+        // from the registered key set, not with whichever key happens to be
-+        // active, so the alg header always matches the key that produced it.
-+        expect(header).toEqual({ alg: 'RS256', kid: 'test-key' });
-+        expect(signatureValid).toBe(true);
-+        expect(Object.keys(payload).sort()).toEqual(['aud', 'code', 'exp', 'iss', 'state']);
-+      });
-+
-+      it('should answer a prompt=none success with a signed JWT', async () => {
-+        const first = await interactiveFlow(
-+          authorizeUrl({ response_mode: 'query.jwt', prompt: 'consent' }),
-+        );
-+        const res = await app.request(
-+          authorizeUrl({ response_mode: 'query.jwt', prompt: 'none' }),
-+          { headers: { Cookie: first.sessionCookie } },
-+        );
-+        const { header, payload, signatureValid } = await inspectJarmJwt(
-+          queryOf(res.headers.get('Location') ?? '').get('response') ?? '',
-+        );
-+
-+        expect([...queryOf(res.headers.get('Location') ?? '').keys()]).toEqual(['response']);
-+        expect(header).toEqual({ alg: 'RS256', kid: 'test-key' });
-+        expect(signatureValid).toBe(true);
-+        expect(Object.keys(payload).sort()).toEqual(['aud', 'code', 'exp', 'iss', 'state']);
-+      });
-+    });
-+
-+    describe('Discovery metadata (JARM Section 4)', () => {
-+      it('should advertise the JWT response modes and the response signing algorithm', async () => {
-+        const metadata = await (await app.request('/.well-known/openid-configuration')).json();
-+
-+        expect(metadata.response_modes_supported).toEqual(['query', 'query.jwt', 'jwt']);
-+        expect(metadata.authorization_signing_alg_values_supported).toEqual(['RS256']);
-+      });
-+    });
-+  });
-+
-   describe('Consent decision value (OIDC Core 1.0 §3.1.2.4)', () => {
-     const DECISION_PKCE_CHALLENGE = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';
- 
-diff --git a/default-op/routes/authorize.ts b/with-jarm/routes/authorize.ts
-index a3ffab2..c9be0d0 100644
---- a/default-op/routes/authorize.ts
-+++ b/with-jarm/routes/authorize.ts
-@@ -29,6 +29,9 @@ import {
-   IdTokenHintError,
-   type AuthorizationRequestParams,
-   type JwkSet,
-+  AuthorizationErrorCode,
-+  selectSigningKeyByAlg,
-+  type SigningKey,
- } from '@maronn-openid-connect/core';
- import { clientResolver as defaultClientResolver } from '../resolvers.js';
- import {
-@@ -37,6 +40,12 @@ import {
-   authSessionStore as defaultAuthSessionStore,
- } from '../store.js';
- import { defaultViews, renderView } from '../views.js';
-+import {
-+  buildJarmRedirectUrl,
-+  createJarmResponseJwt,
-+  resolveJarmResponseMode,
-+} from '@maronn-openid-connect/experimental/jarm';
-+import { jarmConfig } from './jarm.js';
- 
- export const authorizeApp = new Hono<{ Variables: Record<string, any> }>();
- 
-@@ -53,6 +62,19 @@ function isAuthorizationRequestParams(
-   return typeof p['client_id'] === 'string';
- }
- 
-+/**
-+ * EXPERIMENTAL — JARM response context (JARM Section 2.1).
-+ *
-+ * Present only for a request that asked for response_mode=query.jwt (or its
-+ * `jwt` shorthand). undefined means the plain query response this OP has always
-+ * produced, so a client that does not ask for JARM sees no change at all.
-+ */
-+type JarmResponseContext = {
-+  issuer: string;
-+  clientId: string;
-+  signingKey: SigningKey;
-+};
-+
- /**
-  * Builds a redirect URL with an OAuth error response.
-  * OIDC Core 1.0 Section 3.1.2.6 / RFC 6749 Section 4.1.2.1.
-@@ -61,26 +83,84 @@ function isAuthorizationRequestParams(
-  * Section 5.2 allowed character set before being appended so user-controlled
-  * fragments cannot smuggle control bytes into the redirect URL.
-  *
-- * RFC 9207 §2: when issuer is provided, the iss parameter is appended so the
-- * client can pin the issuer that produced this authorization response.
-+ * RFC 9207 Section 2: when issuer is provided, the iss parameter is appended so
-+ * the client can pin the issuer that produced this authorization response.
-+ *
-+ * EXPERIMENTAL (JARM Section 2.1 / 2.3.1): when jarm is present the very same
-+ * parameters travel as claims of one signed JWT in the `response` query
-+ * parameter instead, and no plain error / error_description / state / iss
-+ * parameter is added — the JWT's iss claim identifies the issuer (RFC 9700
-+ * Section 2.1 accepts JARM as the issuer-identification mechanism).
-  */
--function buildErrorRedirect(
-+async function buildErrorRedirect(
-+  jarm: JarmResponseContext | undefined,
-   redirectUri: string,
-   error: string,
-   state?: string,
-   errorDescription?: string,
-   issuer?: string,
--): string {
-+): Promise<string> {
-+  // RFC 6749 Section 5.2: sanitize once, for both response shapes.
-+  const description = errorDescription
-+    ? sanitizeErrorDescription(errorDescription)
-+    : undefined;
-+  if (jarm) {
-+    return buildJarmRedirectUrl(
-+      redirectUri,
-+      await createJarmResponseJwt({
-+        issuer: jarm.issuer,
-+        clientId: jarm.clientId,
-+        parameters: { error, error_description: description, state },
-+        signingKey: jarm.signingKey,
-+        lifetimeSeconds: jarmConfig.jarmResponseLifetimeSeconds,
-+      }),
-+    );
-+  }
-   const url = new URL(redirectUri);
-   url.searchParams.set('error', error);
--  if (errorDescription) {
--    url.searchParams.set('error_description', sanitizeErrorDescription(errorDescription));
-+  if (description) {
-+    url.searchParams.set('error_description', description);
-   }
-   if (state) url.searchParams.set('state', state);
-   if (issuer) url.searchParams.set('iss', issuer);
-   return url.toString();
- }
- 
-+/**
-+ * Builds the success redirect URL carrying the authorization code.
-+ * OIDC Core 1.0 Section 3.1.2.5 / RFC 9207 Section 2 (iss).
-+ *
-+ * EXPERIMENTAL (JARM Section 2.3.1): when jarm is present the code and state
-+ * become claims of a signed JWT delivered as the single `response` parameter;
-+ * no plain code / state / iss parameter is added.
-+ */
-+async function buildSuccessRedirect(
-+  jarm: JarmResponseContext | undefined,
-+  redirectUri: string,
-+  code: string,
-+  state: string | undefined,
-+  issuer: string,
-+): Promise<string> {
-+  if (jarm) {
-+    return buildJarmRedirectUrl(
-+      redirectUri,
-+      await createJarmResponseJwt({
-+        issuer: jarm.issuer,
-+        clientId: jarm.clientId,
-+        parameters: { code, state },
-+        signingKey: jarm.signingKey,
-+        lifetimeSeconds: jarmConfig.jarmResponseLifetimeSeconds,
-+      }),
-+    );
-+  }
-+  const url = new URL(redirectUri);
-+  url.searchParams.set('code', code);
-+  if (state) url.searchParams.set('state', state);
-+  // RFC 9207 Section 2: include iss in success responses.
-+  url.searchParams.set('iss', issuer);
-+  return url.toString();
-+}
-+
- /**
-  * Iterates URLSearchParams and reports the first repeated key, if any.
-  * OIDC Core 1.0 §3.1.2.1 / RFC 6749 §3.1: authorization request parameters
-@@ -148,6 +228,10 @@ const handleAuthorizationRequest = async (c: any) => {
-   }
- 
-   const params = rawParams;
-+  // EXPERIMENTAL — JARM §2.3. Set once redirect_uri is verified; undefined means
-+  // the plain query response. Every authorize-route response site below reads
-+  // this local, so none of them depends on the transaction store round-trip.
-+  let jarmResponse: JarmResponseContext | undefined;
- 
-   try {
-     const clientResolver = c.get('clientResolver') ?? defaultClientResolver;
-@@ -189,6 +273,49 @@ const handleAuthorizationRequest = async (c: any) => {
-     // RFC 6749 §4.1.2.1: state is echoed only on redirectable errors from here on.
-     const state = effectiveParams.state;
- 
-+    // EXPERIMENTAL — JARM §2.3: interpret response_mode now that redirect_uri is
-+    // verified, so an unsupported JWT mode can be reported as a redirectable
-+    // error. Values outside the `.jwt` family stay ignored exactly as before.
-+    const jarmResolution = resolveJarmResponseMode(effectiveParams);
-+    if (jarmResolution.kind === 'unsupported-jwt-mode') {
-+      // JARM §2.3.2 / §2.3.3 (fragment.jwt / form_post.jwt) are not implemented
-+      // here. The rejection itself goes back as a PLAIN query error: the OP
-+      // cannot answer in a response mode it does not implement.
-+      throw new AuthorizationError(
-+        AuthorizationErrorCode.InvalidRequest,
-+        'response_mode ' + jarmResolution.requested + ' is not supported',
-+        redirectUri,
-+        state,
-+      );
-+    }
-+    if (jarmResolution.kind === 'jarm') {
-+      // JARM §3: this OP declares alg RS256 on every response JWT (the default
-+      // for a client that registered no authorization_signed_response_alg), and
-+      // discovery advertises authorization_signing_alg_values_supported:
-+      // ['RS256']. The general-purpose ACTIVE key is not guaranteed to be RS256 —
-+      // SigningKeyProvider may legitimately return ES256 as active alongside an
-+      // RS256 + ES256 registered set — so the key is picked by alg from the
-+      // registered set. Its public half is published at /.well-known/jwks.json
-+      // under the same kid. selectSigningKeyByAlg throws when no RS256 key is
-+      // registered, which surfaces as a server_error here (a configuration
-+      // mistake) rather than as an unverifiable authorization response.
-+      const jarmSigningKeys = (c.get('signingKeys') as SigningKey[] | undefined) ?? [];
-+      jarmResponse = {
-+        issuer,
-+        clientId: client.clientId,
-+        // Falls back to the single-key context so a hand-wired provider that
-+        // never populated the key set keeps working; on the default single
-+        // RS256 key both branches resolve the same key.
-+        signingKey: jarmSigningKeys.length > 0
-+          ? selectSigningKeyByAlg(jarmSigningKeys, 'RS256')
-+          : {
-+              privateKey: c.get('privateKey'),
-+              publicJwk: c.get('publicJwk'),
-+              keyId: c.get('keyId'),
-+            },
-+      };
-+    }
-+
-     // OIDC Core 1.0 §6.3: request_uri / registration are not supported here.
-     rejectUnsupportedRequestParams(params, redirectUri, state);
- 
-@@ -270,7 +397,7 @@ const handleAuthorizationRequest = async (c: any) => {
-     const transactionTtlSeconds = 10 * 60; // 10 minutes TTL
-     await transactionStore.put(
-       'auth_txn:' + transactionId,
--      transaction,
-+      jarmResponse ? { ...transaction, jarmResponseMode: 'query.jwt' } : transaction,
-       transactionTtlSeconds,
-     );
- 
-@@ -280,7 +407,7 @@ const handleAuthorizationRequest = async (c: any) => {
-     // prompt=none must not be combined with other values (OIDC Core 1.0 Section 3.1.2.1)
-     if (promptValues.includes('none') && promptValues.length > 1) {
-       await transactionStore.delete('auth_txn:' + transactionId);
--      return c.redirect(buildErrorRedirect(transaction.redirectUri, 'invalid_request', transaction.state, 'prompt=none must not be combined with other prompt values', issuer));
-+      return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, 'invalid_request', transaction.state, 'prompt=none must not be combined with other prompt values', issuer));
-     }
- 
-     // OIDC Core 1.0 §3.1.2.1: the id_token_hint rule ("if the End-User identified
-@@ -296,7 +423,7 @@ const handleAuthorizationRequest = async (c: any) => {
-       if (!jwksProvider) {
-         // jwksProvider 未提供では hint を検証できない → login_required で拒否
-         await transactionStore.delete('auth_txn:' + transactionId);
--        return c.redirect(buildErrorRedirect(transaction.redirectUri, 'login_required', transaction.state, 'jwksProvider is not configured; cannot verify id_token_hint', issuer));
-+        return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, 'login_required', transaction.state, 'jwksProvider is not configured; cannot verify id_token_hint', issuer));
-       }
-       try {
-         const jwks = await jwksProvider();
-@@ -309,7 +436,7 @@ const handleAuthorizationRequest = async (c: any) => {
-       } catch (hintError) {
-         await transactionStore.delete('auth_txn:' + transactionId);
-         const code = hintError instanceof IdTokenHintError ? hintError.error : 'login_required';
--        return c.redirect(buildErrorRedirect(transaction.redirectUri, code, transaction.state, hintError instanceof Error && hintError.message ? hintError.message : 'id_token_hint verification failed', issuer));
-+        return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, code, transaction.state, hintError instanceof Error && hintError.message ? hintError.message : 'id_token_hint verification failed', issuer));
-       }
-     }
- 
-@@ -322,14 +449,14 @@ const handleAuthorizationRequest = async (c: any) => {
-       // No sessionResolver configured → cannot verify session → login_required
-       if (!sessionResolver) {
-         await transactionStore.delete('auth_txn:' + transactionId);
--        return c.redirect(buildErrorRedirect(transaction.redirectUri, 'login_required', transaction.state, 'sessionResolver is not configured; cannot satisfy prompt=none', issuer));
-+        return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, 'login_required', transaction.state, 'sessionResolver is not configured; cannot satisfy prompt=none', issuer));
-       }
- 
-       // No consentResolver configured → cannot confirm consent → consent_required
-       // (OIDC Core 1.0 Section 3.1.2.1: prompt=none must not display consent screen)
-       if (!consentResolver) {
-         await transactionStore.delete('auth_txn:' + transactionId);
--        return c.redirect(buildErrorRedirect(transaction.redirectUri, 'consent_required', transaction.state, 'consentResolver is not configured; cannot satisfy prompt=none', issuer));
-+        return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, 'consent_required', transaction.state, 'consentResolver is not configured; cannot satisfy prompt=none', issuer));
-       }
- 
-       let session;
-@@ -356,20 +483,20 @@ const handleAuthorizationRequest = async (c: any) => {
-       } catch (promptError) {
-         await transactionStore.delete('auth_txn:' + transactionId);
-         if (promptError instanceof AuthorizationError) {
--          return c.redirect(buildErrorRedirect(transaction.redirectUri, promptError.error, transaction.state, promptError.errorDescription, issuer));
-+          return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, promptError.error, transaction.state, promptError.errorDescription, issuer));
-         }
-         const serverDescription =
-           promptError instanceof Error && promptError.message
-             ? promptError.message
-             : 'Unexpected error while evaluating prompt=none';
--        return c.redirect(buildErrorRedirect(transaction.redirectUri, 'server_error', transaction.state, serverDescription, issuer));
-+        return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, 'server_error', transaction.state, serverDescription, issuer));
-       }
- 
-       // Check max_age: if session is too old, prompt=none cannot trigger re-authentication
-       // OIDC Core 1.0 Section 3.1.2.1
-       if (transaction.maxAge !== undefined && requiresReauthentication(transaction.maxAge, session.authTime)) {
-         await transactionStore.delete('auth_txn:' + transactionId);
--        return c.redirect(buildErrorRedirect(transaction.redirectUri, 'login_required', transaction.state, 'Session exceeds the requested max_age; re-authentication required', issuer));
-+        return c.redirect(await buildErrorRedirect(jarmResponse, transaction.redirectUri, 'login_required', transaction.state, 'Session exceeds the requested max_age; re-authentication required', issuer));
-       }
- 
-       // transaction.scope は認可リクエスト検証時に applyOfflineAccessPolicy を通した
-@@ -401,12 +528,15 @@ const handleAuthorizationRequest = async (c: any) => {
-         authCodeData.grantId,
-       );
- 
--      const redirectUrl = new URL(transaction.redirectUri);
--      redirectUrl.searchParams.set('code', authCodeData.code);
--      if (transaction.state) redirectUrl.searchParams.set('state', transaction.state);
--      // RFC 9207 §2: include iss in success responses too.
--      redirectUrl.searchParams.set('iss', issuer);
--      return c.redirect(redirectUrl.toString());
-+      return c.redirect(
-+        await buildSuccessRedirect(
-+          jarmResponse,
-+          transaction.redirectUri,
-+          authCodeData.code,
-+          transaction.state,
-+          issuer,
-+        ),
-+      );
-     }
- 
-     // OIDC Core 1.0 Section 3.1.2.3: an active OP session enables Single Sign-On.
-@@ -473,12 +603,15 @@ const handleAuthorizationRequest = async (c: any) => {
-               authCodeData.grantId,
-             );
- 
--            const redirectUrl = new URL(transaction.redirectUri);
--            redirectUrl.searchParams.set('code', authCodeData.code);
--            if (transaction.state) redirectUrl.searchParams.set('state', transaction.state);
--            // RFC 9207 §2: include iss in success responses.
--            redirectUrl.searchParams.set('iss', issuer);
--            return c.redirect(redirectUrl.toString());
-+            return c.redirect(
-+              await buildSuccessRedirect(
-+                jarmResponse,
-+                transaction.redirectUri,
-+                authCodeData.code,
-+                transaction.state,
-+                issuer,
-+              ),
-+            );
-           }
- 
-           const authSessionStore = c.get('authSessionStore') ?? defaultAuthSessionStore;
-@@ -503,20 +636,24 @@ const handleAuthorizationRequest = async (c: any) => {
-   } catch (error) {
-     if (error instanceof AuthorizationError) {
-       if (error.redirectUri) {
--        const redirectUrl = new URL(error.redirectUri);
--        redirectUrl.searchParams.set('error', error.error);
--        if (error.errorDescription) {
--          redirectUrl.searchParams.set('error_description', error.errorDescription);
--        }
--        if (error.state) {
--          redirectUrl.searchParams.set('state', error.state);
--        }
-         // RFC 9207 §2: include iss on error redirects so the client can
-         // pin the issuer. config has already been read into context by
-         // middleware; reread it here because the early-bound issuer is
--        // scoped to the try block.
--        redirectUrl.searchParams.set('iss', c.get('config').issuer);
--        return c.redirect(redirectUrl.toString());
-+        // scoped to the try block. EXPERIMENTAL (JARM §2.1): when this request
-+        // asked for a JWT response mode, the same members become claims of a
-+        // signed JWT and no plain parameter is added. jarmResponse is undefined
-+        // for errors thrown before response_mode was interpreted (unknown
-+        // client, unsupported JWT mode), which is why those stay plain.
-+        return c.redirect(
-+          await buildErrorRedirect(
-+            jarmResponse,
-+            error.redirectUri,
-+            error.error,
-+            error.state,
-+            error.errorDescription,
-+            c.get('config').issuer,
-+          ),
-+        );
-       }
-       // OIDC Core 1.0 §3.1.2.2: errors that cannot be redirected (unknown
-       // client_id, unregistered redirect_uri, redirect_uri with a fragment) MUST
-diff --git a/default-op/routes/consent.ts b/with-jarm/routes/consent.ts
-index 41d7d41..83b82e2 100644
---- a/default-op/routes/consent.ts
-+++ b/with-jarm/routes/consent.ts
-@@ -4,6 +4,9 @@ import {
-   validateCsrfToken,
-   completeAuthTransaction,
-   createAuthorizationCode,
-+  selectSigningKeyByAlg,
-+  type AuthTransaction,
-+  type SigningKey,
- } from '@maronn-openid-connect/core';
- import {
-   consentResolver as defaultConsentResolver,
-@@ -14,9 +17,89 @@ import {
-   authSessionStore as defaultAuthSessionStore,
- } from '../store.js';
- import { defaultViews, renderView } from '../views.js';
-+import {
-+  buildJarmRedirectUrl,
-+  createJarmResponseJwt,
-+  type JarmAuthTransactionFields,
-+} from '@maronn-openid-connect/experimental/jarm';
-+import { jarmConfig } from './jarm.js';
- 
- export const consentApp = new Hono<{ Variables: Record<string, any> }>();
- 
-+/**
-+ * EXPERIMENTAL — JARM (JWT Secured Authorization Response Mode).
-+ *
-+ * The authorize route recorded the requested response mode on the transaction
-+ * (jarmResponseMode). This route only ever sees the transaction it read back
-+ * from the store, so the auth transaction store MUST persist fields it does not
-+ * know about — otherwise a client that asked for a JWT response silently gets a
-+ * plain query response instead. conformance.test.ts pins that round trip.
-+ */
-+function resolveJarmResponse(
-+  c: any,
-+  transaction: AuthTransaction & JarmAuthTransactionFields,
-+): JarmResponseContext | undefined {
-+  if (transaction.jarmResponseMode !== 'query.jwt') return undefined;
-+  // JARM Section 3: the response JWT always declares alg RS256, so the key is
-+  // picked by alg from the registered key set rather than taken from the
-+  // general-purpose ACTIVE key, which the SigningKeyProvider contract does not
-+  // guarantee to be RS256. Its public half is published at
-+  // /.well-known/jwks.json under the same kid. The single-key context is kept as
-+  // a fallback for providers that never populated the key set; on the default
-+  // single RS256 key both branches resolve the same key.
-+  const jarmSigningKeys = (c.get('signingKeys') as SigningKey[] | undefined) ?? [];
-+  return {
-+    issuer: c.get('config').issuer,
-+    clientId: transaction.clientId,
-+    signingKey: jarmSigningKeys.length > 0
-+      ? selectSigningKeyByAlg(jarmSigningKeys, 'RS256')
-+      : {
-+          privateKey: c.get('privateKey'),
-+          publicJwk: c.get('publicJwk'),
-+          keyId: c.get('keyId'),
-+        },
-+  };
-+}
-+
-+type JarmResponseContext = {
-+  issuer: string;
-+  clientId: string;
-+  signingKey: SigningKey;
-+};
-+
-+/**
-+ * EXPERIMENTAL — JARM Section 2.3.1: deliver the authorization response as the
-+ * single `response` query parameter holding a signed JWT. Without a JARM
-+ * transaction this is the plain query response the OP has always produced
-+ * (RFC 9207 Section 2 appends iss; in JARM mode the JWT's iss claim carries the
-+ * same statement, so no plain iss parameter is added).
-+ */
-+async function buildConsentRedirect(
-+  jarm: JarmResponseContext | undefined,
-+  redirectUri: string,
-+  parameters: Record<string, string | undefined>,
-+  issuer: string,
-+): Promise<string> {
-+  if (jarm) {
-+    return buildJarmRedirectUrl(
-+      redirectUri,
-+      await createJarmResponseJwt({
-+        issuer: jarm.issuer,
-+        clientId: jarm.clientId,
-+        parameters,
-+        signingKey: jarm.signingKey,
-+        lifetimeSeconds: jarmConfig.jarmResponseLifetimeSeconds,
-+      }),
-+    );
-+  }
-+  const url = new URL(redirectUri);
-+  for (const [name, value] of Object.entries(parameters)) {
-+    if (value !== undefined) url.searchParams.set(name, value);
-+  }
-+  url.searchParams.set('iss', issuer);
-+  return url.toString();
-+}
-+
- /**
-  * Consent Page - GET
-  * Displays the consent form for scope authorization.
-@@ -63,15 +146,17 @@ consentApp.post('/', async (c) => {
-   const issuer = config.issuer;
- 
-   if (action === 'deny') {
--    const redirectUrl = new URL(transaction.redirectUri);
--    redirectUrl.searchParams.set('error', 'access_denied');
--    if (transaction.state) {
--      redirectUrl.searchParams.set('state', transaction.state);
--    }
--    redirectUrl.searchParams.set('iss', issuer);
-     await transactionStore.delete('auth_txn:' + transactionId);
-     await authSessionStore.delete(transactionId);
--    return c.redirect(redirectUrl.toString());
-+    // EXPERIMENTAL (JARM §2.1): a request that asked for response_mode=query.jwt
-+    // gets its error as a signed JWT too, so the client can verify that the OP
-+    // it trusts is the one that denied the request.
-+    return c.redirect(
-+      await buildConsentRedirect(resolveJarmResponse(c, transaction), transaction.redirectUri, {
-+        error: 'access_denied',
-+        state: transaction.state,
-+      }, issuer),
-+    );
-   }
- 
-   // OIDC Core 1.0 Section 3.1.2.4: "the Authorization Server MUST obtain an
-@@ -144,11 +229,10 @@ consentApp.post('/', async (c) => {
-   await authSessionStore.delete(transactionId);
- 
-   // Redirect back to client with authorization code
--  const redirectUrl = new URL(responseParams.redirectUri);
--  redirectUrl.searchParams.set('code', authCodeData.code);
--  if (responseParams.state) {
--    redirectUrl.searchParams.set('state', responseParams.state);
--  }
--  redirectUrl.searchParams.set('iss', issuer);
--  return c.redirect(redirectUrl.toString());
-+  return c.redirect(
-+    await buildConsentRedirect(resolveJarmResponse(c, transaction), responseParams.redirectUri, {
-+      code: authCodeData.code,
-+      state: responseParams.state,
-+    }, issuer),
-+  );
- });
-diff --git a/default-op/routes/discovery.ts b/with-jarm/routes/discovery.ts
-index 72c0758..3eb0040 100644
---- a/default-op/routes/discovery.ts
-+++ b/with-jarm/routes/discovery.ts
-@@ -40,9 +40,10 @@ discoveryApp.get('/', (c) => {
-     responseTypesSupported: ['code'],
-     // OAuth 2.0 Multiple Response Type Encoding Practices §2 / OIDC Discovery 1.0 §3:
-     // the OP only implements the authorization code flow, whose authorization
--    // response is returned via query, so response_modes_supported is pinned to
--    // ['query']. Extend this list when form_post (or other modes) are added.
--    responseModesSupported: ['query'],
-+    // response is returned via query. EXPERIMENTAL (JARM §4): this provider was
-+    // generated with --enable jarm, so the JWT-secured query modes are advertised
-+    // alongside it. Extend this list when form_post (or other modes) are added.
-+    responseModesSupported: ['query', 'query.jwt', 'jwt'],
-     subjectTypesSupported: ['public'],
-     idTokenSigningKeys,
-     userinfoEndpoint: `${issuer}/userinfo`,
-@@ -144,5 +145,9 @@ discoveryApp.get('/', (c) => {
-   return c.json({
-     ...metadata,
-     code_challenge_methods_supported: ['S256'],
-+    // EXPERIMENTAL — JARM §4 metadata. The response JWT is always signed with
-+    // RS256 (JARM §3: the default for a client that registered no
-+    // authorization_signed_response_alg), so exactly one alg is advertised.
-+    authorization_signing_alg_values_supported: ['RS256'],
-   });
- });
-diff --git a/with-jarm/routes/jarm.ts b/with-jarm/routes/jarm.ts
-new file mode 100644
-index 0000000..303064e
---- /dev/null
-+++ b/with-jarm/routes/jarm.ts
-@@ -0,0 +1,29 @@
-+/**
-+ * EXPERIMENTAL — JWT Secured Authorization Response Mode (JARM).
-+ *
-+ * This module was generated because the OP was created with `--enable jarm`.
-+ * It is backed by @maronn-openid-connect/experimental, whose API is NOT stable: it may
-+ * change in a breaking way between releases. Do not build production code on it
-+ * without pinning the version.
-+ *
-+ * Imported by the authorize and consent routes, so keep all three in sync when
-+ * changing these settings.
-+ *
-+ * - jarmResponseLifetimeSeconds: how long the response JWT stays valid (its
-+ *   `exp` claim). JARM Section 2.1 RECOMMENDs a maximum lifetime of 10 minutes,
-+ *   so values outside 5-600 seconds fail fast at module load. Keep it short: the
-+ *   JWT rides in a URL and only needs to survive one browser redirect.
-+ *
-+ * Not configurable: the signing algorithm (RS256, JARM Section 3's default for a
-+ * client with no registered authorization_signed_response_alg), the response
-+ * parameter name (`response`, JARM Section 2.3.1) and the supported response
-+ * modes (`query.jwt` / `jwt` — this OP implements response_type=code only, so
-+ * `fragment.jwt` and `form_post.jwt` are rejected with invalid_request).
-+ */
-+import { assertJarmLifetimeSeconds } from '@maronn-openid-connect/experimental/jarm';
-+
-+export const jarmConfig = {
-+  jarmResponseLifetimeSeconds: 60,
-+};
-+
-+assertJarmLifetimeSeconds(jarmConfig.jarmResponseLifetimeSeconds);
+この配置には 3 つの設計判断がある。
 
-````
+第一に、`response_mode` の解釈を所有者付きブロックにしたのは、置く位置が仕様の要件から決まるからである。
+対応しない `.jwt` 系のモード（`fragment.jwt` と `form_post.jwt`）の拒否はリダイレクトで返すエラーなので、`redirect_uri` の確定より後でなければならない。
+また、`[create-transaction]` より前でなければ記録が残らず、`[validate-request]` より前に置くことで、パラメータ検証のエラーも JWT で返る。
+ブロックの中で投げる拒否そのものは、`responseMode` が決まる前なので平文の query で返る（OP は実装していない応答モードでは応答できない）。
 
-### 他フレームワークの差分
+第二に、`/consent` での復元をフックにしたのは、同意の画面を経る応答が別のリクエストで返るからである。
+認可エンドポイントのパイプラインの局所変数は `/consent` に届かないので、transaction に記録した名前と、名前から応答モードを作り直すハンドラの組で受け渡す。
+`restoreResponseMode()` は有効な機能のハンドラから記録された名前を扱うものを探し、見つからなければ例外を投げるので、`/consent` は 500 のエラーで失敗する。
+transaction を作った後で JARM を外した OP が、JWT を求めたクライアントへ黙って平文の query で応答することはない。
 
-express と fastify は差分が同一なので 1 ファイルに集約されている。
-nextjs も同等の内容である。
-
-- [express-fastify](../../../tasks/experimental/done/jarm/promotion-review/generated-code/express-fastify.md)
-- [nextjs](../../../tasks/experimental/done/jarm/promotion-review/generated-code/nextjs.md)
+第三に、署名鍵は `signingKeys` の先頭ではなく、`selectJarmSigningKey()` が RS256 の鍵を選ぶ。
+応答 JWT の `alg` は常に RS256（JARM §3 の既定）で、discovery もそれだけを広告するので、ES256 の鍵が先頭にある鍵セットでも `alg` と鍵が食い違わない。
+RS256 の鍵が登録されていなければ `selectSigningKeyByAlg` が例外を投げ、応答は検証できない JWT ではなく 500 のエラーになる。
 
 サンプルでこの機能を有効にしているのは [samples/hono-cloudflare](../../../samples/hono-cloudflare) だけである。
+他の機能と組み合わせた生成結果は、そのサンプルの `src/oidc-provider/` で確認できる。
+サンプルの `src/app.ts` は JARM の設定に手を加えず、生成された既定値のまま動かしている。
+
+### 生成コードに入るコードの全文（hono）
+
+以下は、デフォルトの機能に `--enable jarm` を加えて hono 向けに生成した結果のうち、JARM が加えるもののすべてである。
+`features/enabled.ts` と認可エンドポイントのパイプラインについては加わる行とブロックを、`features/jarm/` についてはファイルの全文を、生成されたファイルからそのまま写している。
+
+#### `features/enabled.ts` に入る行
+
+`features/enabled.ts` は、この OP が持つ機能の一覧である。
+CLI は有効な機能ごとに import 行を 1 行と、配列 `features` の項目を 1 つ書く。
+配列の順序はフックを適用する順序で、JARM は既定の機能（`pkce` から `request-object` まで）の後ろに並ぶ。
+
+```typescript
+import { jarm } from './jarm/feature.js';
+```
+
+```typescript
+  jarm,
+```
+
+#### `endpoints/authorize/pipeline.ts` の `(feature: jarm)` ブロック
+
+認可エンドポイントのパイプラインは、ファイル先頭で、ブロックが呼ぶ JARM のステップを import する。
+
+```typescript
+import { resolveJarmResponseContext } from '../../features/jarm/steps/resolve-jarm-response-mode.js';
+```
+
+ブロックは `[resolve-redirect-uri]` ブロックの直後、`[validate-request]` ブロックの直前で動く。
+Request Object を重ねた後のパラメータ（`effectiveParams ?? params`）、確定した `redirectUri` と `state`、issuer を `resolveJarmResponseContext()` に渡し、返った応答モードを base の `responseMode` に代入する。
+JWT の応答を求めないリクエストでは `undefined` が返り、応答は従来どおり平文の query になる。
+
+```typescript
+    // [resolve-jarm-response-mode] (feature: jarm) Interpret response_mode=query.jwt — JARM §2.3 / §3
+    responseMode = resolveJarmResponseContext(c, effectiveParams ?? params, client, redirectUri, state, issuer);
+```
+
+#### `features/jarm/feature.ts`
+
+JARM が base に差し込むものを宣言するファイルで、`features/enabled.ts` が import するのはこのファイルである。
+`authorize.responseModes` に置いた `jarmResponseModeHandler` が、`/consent` で `query.jwt` を記録した transaction の応答モードを作り直す。
+`discovery` は JARM §4 のメタデータを返し、`response_modes_supported` の配列は base の `['query']` にまとめられる。
+`authorization_signing_alg_values_supported` を `RS256` 1 つにしているのは、応答 JWT を常に RS256 で署名するからである。
+`routes` と `context` は持たない。
+
+```typescript
+import { JARM_SUPPORTED_RESPONSE_MODES } from '@maronn-openid-connect/experimental/jarm';
+import { defineFeature } from '../feature.js';
+import { jarmResponseModeHandler } from './response-mode.js';
+
+/**
+ * EXPERIMENTAL — JWT Secured Authorization Response Mode (JARM, OpenID
+ * Foundation Final 2022-11-09): response_mode=query.jwt (and its `jwt`
+ * shorthand) returns the authorization response as one signed JWT. The
+ * resolve-jarm-response-mode block of endpoints/authorize/pipeline.ts reads
+ * the request, and /consent answers in the same mode through
+ * authorize.responseModes. A request that does not ask for a JWT response
+ * mode is answered exactly as before. Settings are in config.ts.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
+ * may change in a breaking way between releases.
+ */
+export const jarm = defineFeature({
+  id: 'jarm',
+  authorize: { responseModes: [jarmResponseModeHandler] },
+  discovery: () => ({
+    // JARM §4: the JWT-secured query modes are advertised alongside query.
+    response_modes_supported: [...JARM_SUPPORTED_RESPONSE_MODES],
+    // JARM §4 metadata. The response JWT is always signed with RS256 (JARM §3:
+    // the default for a client that registered no
+    // authorization_signed_response_alg), so exactly one alg is advertised.
+    authorization_signing_alg_values_supported: ['RS256'],
+  }),
+});
+```
+
+#### `features/jarm/config.ts`
+
+JARM の設定で、`response-mode.ts` が応答 JWT の寿命として読む。
+`jarmResponseLifetimeSeconds` は `exp` までの秒数で、末尾の `assertJarmLifetimeSeconds` が 5〜600 秒の外の値をモジュール読み込み時に拒否する（JARM §2.1 は最大 10 分を推奨している）。
+JWT は URL に載ってブラウザのリダイレクトを 1 回越えれば足りるので、既定は 60 秒である。
+署名アルゴリズム、応答パラメータの名前、対応する応答モードは設定にせず、ヘッダコメントに固定の理由を書いている。
+
+```typescript
+/**
+ * EXPERIMENTAL — JWT Secured Authorization Response Mode (JARM).
+ *
+ * This feature was generated because the OP was created with `--enable jarm`.
+ * It is backed by @maronn-openid-connect/experimental, whose API is NOT stable: it may
+ * change in a breaking way between releases. Do not build production code on it
+ * without pinning the version.
+ *
+ * Read by the response mode of this feature (response-mode.ts), which the
+ * authorize and consent endpoints answer in.
+ *
+ * - jarmResponseLifetimeSeconds: how long the response JWT stays valid (its
+ *   `exp` claim). JARM Section 2.1 RECOMMENDs a maximum lifetime of 10 minutes,
+ *   so values outside 5-600 seconds fail fast at module load. Keep it short: the
+ *   JWT rides in a URL and only needs to survive one browser redirect.
+ *
+ * Not configurable: the signing algorithm (RS256, JARM Section 3's default for a
+ * client with no registered authorization_signed_response_alg), the response
+ * parameter name (`response`, JARM Section 2.3.1) and the supported response
+ * modes (`query.jwt` / `jwt` — this OP implements response_type=code only, so
+ * `fragment.jwt` and `form_post.jwt` are rejected with invalid_request).
+ */
+import { assertJarmLifetimeSeconds } from '@maronn-openid-connect/experimental/jarm';
+
+export const jarmConfig = {
+  jarmResponseLifetimeSeconds: 60,
+};
+
+assertJarmLifetimeSeconds(jarmConfig.jarmResponseLifetimeSeconds);
+```
+
+#### `features/jarm/response-mode.ts`
+
+JARM の応答モードそのものである。
+`jarmResponseMode()` は、base の `AuthorizationResponseMode` を、認可レスポンスのパラメータ（`code` と `state`、またはエラーの項目）を 1 つの署名付き JWT にして `response` クエリパラメータで運ぶ形で実装する（JARM §2.3.1）。
+JWT の `iss` クレームが issuer を示すので、平文の `iss` パラメータは加えない。
+`selectJarmSigningKey()` は登録鍵セットから RS256 の鍵を選び、`jarmResponseModeHandler` は `/consent` で transaction の記録からこの応答モードを作り直す。
+`contribution` は、JARM が `/consent` の `build-authorization-response` ステップにも寄与することを `maronn-oidc graph` に伝えるメタ情報で、その箱に JARM §2.3.1 が加わる。
+
+```typescript
+/**
+ * EXPERIMENTAL — the JWT Secured Authorization Response Mode, as the
+ * authorization endpoint answers in it.
+ *
+ * The authorization response parameters (code and state, or the error
+ * members) become claims of one signed JWT, delivered as the single `response`
+ * query parameter (JARM §2.3.1). The JWT's iss claim identifies the issuer, so
+ * no plain iss parameter is added.
+ */
+import { selectSigningKeyByAlg, type SigningKey } from '@maronn-openid-connect/core';
+import { buildJarmRedirectUrl, createJarmResponseJwt } from '@maronn-openid-connect/experimental/jarm';
+import type {
+  AuthorizationResponseMode,
+  AuthorizationResponseModeHandler,
+} from '../../endpoints/authorize/response-mode.js';
+import { contribute } from '../../endpoints/step.js';
+import { jarmConfig } from './config.js';
+
+/**
+ * What JARM adds to the build-authorization-response box of the consent
+ * endpoint: the response it restores can be the signed JWT of JARM §2.3.1.
+ */
+export const contribution = contribute({
+  endpoint: 'consent',
+  step: 'build-authorization-response',
+  feature: 'jarm',
+  spec: 'JARM §2.3.1',
+});
+
+/** The name the transaction stores: the query.jwt mode (its `jwt` shorthand is answered the same way). */
+export const JARM_RESPONSE_MODE_NAME = 'query.jwt';
+
+/** The JARM response mode for a client, signed with signingKey (RS256, JARM §3). */
+export function jarmResponseMode(input: {
+  issuer: string;
+  clientId: string;
+  signingKey: SigningKey;
+}): AuthorizationResponseMode {
+  return {
+    name: JARM_RESPONSE_MODE_NAME,
+    async redirect(redirectUri, parameters) {
+      return buildJarmRedirectUrl(
+        redirectUri,
+        await createJarmResponseJwt({
+          issuer: input.issuer,
+          clientId: input.clientId,
+          parameters,
+          signingKey: input.signingKey,
+          lifetimeSeconds: jarmConfig.jarmResponseLifetimeSeconds,
+        }),
+      );
+    },
+  };
+}
+
+/**
+ * JARM §3: this OP declares alg RS256 on every response JWT (the default for
+ * a client that registered no authorization_signed_response_alg), and
+ * discovery advertises authorization_signing_alg_values_supported: ['RS256'].
+ * The first key of the general-purpose set is not guaranteed to be RS256 — a
+ * SigningKeyProvider may legitimately put an ES256 key first in an RS256 +
+ * ES256 set — so the key is picked by alg from the set. Its public half is
+ * published at /.well-known/jwks.json under the same kid.
+ * selectSigningKeyByAlg throws when no RS256 key is registered, which surfaces
+ * as a server_error (a configuration mistake) rather than as an unverifiable
+ * authorization response.
+ */
+export function selectJarmSigningKey(c: any): SigningKey {
+  const jarmSigningKeys = (c.get('signingKeys') as SigningKey[] | undefined) ?? [];
+  return selectSigningKeyByAlg(jarmSigningKeys, 'RS256');
+}
+
+/**
+ * The JARM response mode of a stored transaction: /consent answers in it when
+ * the authorization request asked for response_mode=query.jwt (JARM §2.3).
+ */
+export const jarmResponseModeHandler: AuthorizationResponseModeHandler = {
+  names: [JARM_RESPONSE_MODE_NAME],
+  restore(c, { clientId, issuer }) {
+    return jarmResponseMode({ issuer, clientId, signingKey: selectJarmSigningKey(c) });
+  },
+};
+```
+
+#### `features/jarm/steps/resolve-jarm-response-mode.ts`
+
+認可エンドポイントの所有者付きブロックが呼ぶステップである。
+`meta` の `endpoint: 'authorize'` と `feature: 'jarm'` が、どのエンドポイントのどの機能のステップかを示し、`produces: ['responseMode']` が後続のステップに渡す値を示す。
+experimental の `resolveJarmResponseMode` が判別共用体で返す分類を、`redirect_uri` が確定したこの時点でエラーにする。
+`unsupported-jwt-mode` は、確定した `redirectUri` と `state` を持つ `invalid_request` の `AuthorizationError` になり、平文の query でクライアントへ返る。
+`jarm` 以外の分類では `undefined` を返し、`.jwt` 系でない `response_mode` の値は従来どおり無視される。
+
+```typescript
+import {
+  AuthorizationError,
+  AuthorizationErrorCode,
+  type AuthorizationRequestParams,
+  type ClientInfo,
+} from '@maronn-openid-connect/core';
+import { resolveJarmResponseMode } from '@maronn-openid-connect/experimental/jarm';
+import type { AuthorizationResponseMode } from '../../../endpoints/authorize/response-mode.js';
+import { step } from '../../../endpoints/step.js';
+import { jarmResponseMode, selectJarmSigningKey } from '../response-mode.js';
+
+export const meta = step({
+  id: 'resolve-jarm-response-mode',
+  endpoint: 'authorize',
+  feature: 'jarm',
+  kind: 'resolve',
+  label: 'Interpret response_mode=query.jwt',
+  spec: 'JARM §2.3 / §3',
+  function: 'resolveJarmResponseContext',
+  calls: ['resolveJarmResponseMode', 'selectSigningKeyByAlg'],
+  consumes: ['params', 'effectiveParams', 'client', 'redirectUri', 'state', 'issuer'],
+  produces: ['responseMode'],
+  removable: false,
+});
+
+/**
+ * EXPERIMENTAL — JARM §2.3: interpret response_mode now that redirect_uri is
+ * verified, so an unsupported JWT mode can be reported as a redirectable
+ * error. Values outside the `.jwt` family stay ignored exactly as before, and
+ * the result is undefined: the plain query response.
+ */
+export function resolveJarmResponseContext(
+  c: any,
+  params: AuthorizationRequestParams,
+  client: ClientInfo,
+  redirectUri: string,
+  state: string | undefined,
+  issuer: string,
+): AuthorizationResponseMode | undefined {
+  const jarmResolution = resolveJarmResponseMode(params);
+  if (jarmResolution.kind === 'unsupported-jwt-mode') {
+    // JARM §2.3.2 / §2.3.3 (fragment.jwt / form_post.jwt) are not implemented
+    // here. The rejection itself goes back as a PLAIN query error: the OP
+    // cannot answer in a response mode it does not implement.
+    throw new AuthorizationError(
+      AuthorizationErrorCode.InvalidRequest,
+      'response_mode ' + jarmResolution.requested + ' is not supported',
+      redirectUri,
+      state,
+    );
+  }
+  if (jarmResolution.kind !== 'jarm') return undefined;
+  return jarmResponseMode({ issuer, clientId: client.clientId, signingKey: selectJarmSigningKey(c) });
+}
+```
+
+### 他フレームワークの生成コード
+
+express と fastify の生成コードは、hono と同じファイルからなる。
+CLI は、エンドポイントが import する `hono` のルーターを Fetch API の小さなルーター `web-router.ts`（`WebRouter` と `WebContext`）に置き換え、フレームワーク向けの `apply.ts`、`web-router.ts`、`node-adapter.ts` を加える。
+加えるファイルの元は [apps/hono/src/web/](../../../apps/hono/src/web) にあり、どのファイルをどこに置くかは [packages/cli/extract.json](../../../packages/cli/extract.json) が定める。
+画面は hono/jsx のままなので、これらの生成物も JSX ランタイムとして `hono` を必要とする。
+`features/jarm/` のファイルは `hono` を import しないので、express と fastify でも hono と同じ内容になる。
+
+Next.js の生成コードは、Next.js App Router のアプリ [apps/nextjs](../../../apps/nextjs) から抜き出す。
+機能のルートファイルはルートグループ `app/(<feature-id>)/` に、それ以外のコードは `app/_oidc-provider/features/<feature-id>/` に置かれ、JARM のコードは `app/_oidc-provider/features/jarm/` に入る。
+どちらもこの解説には載せず、ディレクトリへのリンクで示す。
 
 ## E2E テストの全文
 

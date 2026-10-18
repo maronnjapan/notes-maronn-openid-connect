@@ -382,6 +382,39 @@ PR ごとの E2E を apps へ向けるので、wrangler や sqlite を使うの�
 
 ## 未決事項
 
-- 所有者付きブロックの印の正確な構文。
-- Next.js でも所有者付きブロックの除去を受け付けるか。並べ替えは非対応のままとする。
-- `refresh-token` を機能ディレクトリにするか、実行時の config に倒すか。token パイプラインのフック数に影響する。
+この節に挙げていた三つは、T-023 の実装で次のとおり決めた。
+実装の途中で決める必要が生じた事項も、決めた内容とあわせて記録する。
+
+### 決めた事項
+
+- **所有者付きブロックの印**：base のブロックは `// [step-id] ラベル — 仕様`、機能のブロックは `// [step-id] (feature: <id>) ラベル — 仕様` とする。
+  ブロックは印の行から次の印の直前までで、印より浅いインデントの行（try の閉じや関数の終わり）が来たらそこで終わる。
+  既定案のまま採用した。
+- **Next.js での所有者付きブロックの除去**：受け付ける。
+  対象は `route.ts` で、除去したブロックが定義し後続が読む値は、`route.ts` の隣の `endpoint.ts`（`defineEndpoint({ steps: [...] })`）の produces から判定して `const <name> = undefined;` を置く。
+  `endpoint.ts` の steps と `route.ts` の印が一致することは import 境界の lint が確かめる。
+  並べ替えは非対応のままで、`--flow` が steps を変えていれば Next.js の生成を拒否する。
+- **refresh-token の扱い**：機能ディレクトリにした。
+  hono では token パイプラインの `(feature: refresh-token)` ブロック四つ（検証、発行判定、発行、ローテーション失効）と `token.grants` フックで足り、フックの種類は増えなかった。
+  Next.js も `_oidc-provider/features/refresh-token/token.ts` を同じ四つのブロックから呼ぶ。
+- **使ったフック**：11 種類の固定集合のうち、hono は routes、discovery、context、config、token の grants、authorize の responseModes、loginMethods の 7 種類、Next.js は routes を除く 6 種類を使う。
+  Next.js のルートは route group そのものが表すので routes を持たず、context は provider.ts が組み立てる値（クライアントの resolver）を置き換えるフックとした。
+  token の grantValidators と issuers、authorize の requestResolvers、introspection の responders に当たる処理は、どれも所有者付きブロックで書けたので、フックにしていない。
+- **base から features/ への import**：base は機能のディレクトリを import しない。
+  例外は、フックの定義（`features/feature.ts`）、機能の一覧（`features/enabled.ts`、Next.js は `_oidc-provider/features.ts`）、所有者付きブロックの中だけで機能の識別子を使うパイプライン（`pipeline.ts`、Next.js は `route.ts`）である。
+  hono のパイプラインは自分のステップと隣のモジュールだけを import し、機能のブロックは自分の機能の識別子だけを使う。
+  Next.js の `route.ts` は App Router の作法どおり core と `_oidc-provider/` の部品を import してよい。
+- **任意入力と寄与**：ある機能が無いと定義されない値を読むステップは、step の meta の `optional` にその値を挙げる。
+  graph はその値を定義するステップが無い構成で入力から外す。
+  機能が base のステップに処理を足すとき（ログイン画面の Google ボタン、JARM の署名）は、`contribute({ endpoint, step, feature })` で寄与を宣言し、graph はそのステップの calls と仕様に足す。
+- **express と fastify の画面**：apps/hono の画面は hono/jsx のまま抽出し、express と fastify の出力も JSX ランタイムとして hono に依存する。
+  WebRouter はマウントの最長一致で振り分け、`use('/x/*')` は Hono と同じく `/x` 自身とその下に効く。
+- **Next.js の設定とモジュールの層**：Next.js はモジュールを層（Route Handler、Server Action、instrumentation.ts）ごとに読み込むので、機能の設定は `shared()` で globalThis に一つだけ置く。
+  これで instrumentation.ts が環境変数から設定した値が Route Handler に届く。
+  また、`features.ts` から届くモジュールは provider.ts を実行時に import しない。
+  provider.ts が `features.ts` を読むので、import すると循環し初期化前の参照になるためで、ログイン方式と応答モードのフックは設定、ストア、鍵の読み込みを引数で受け取る。
+- **Next.js の db**：apps/hono と同じ db のコード（memory、sql、kv）を持ち、`db/index.ts` の export も揃える。
+  `--db` 無しの Next.js 出力は、従来の JSON ストア（node:sqlite か Upstash）からメモリに変わる。
+  `--db kv` の `instance.ts` は、Upstash Redis の環境変数があればそれを、無ければ node:sqlite を使う実装として生成し、そのまま動く。
+- **db/instance.ts の引数**：生成コードは `createDatabase()` をリクエストの文脈付きで呼ぶが、引数を取らない `instance.ts`（プロセスで一つの DB）もそのまま型が合う。
+  既存の利用者が持つ `instance.ts` を書き換えずに再生成できるようにするためである。

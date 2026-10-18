@@ -87,7 +87,7 @@ Every function succeeds as long as its inputs meet the public API contract; a ke
 Fifth, the generated-code branch sits only at the response exit, after client authentication and token resolution have fully completed.
 That structurally prevents the `Accept` header from bypassing either step (§8.2 downgrade prevention), the same shape as JARM joining the authorize route at its response exit.
 The response is returned with hono's `c.body`.
-The specification's open item U2 had planned `c.text`, but the conformance tests during implementation showed that hono's `c.text` overwrites a pre-set `Content-Type` with `text/plain`, so the implementation switched to `c.body`, which preserves prepared headers (as does `WebContext.body`, its web-standard counterpart).
+The specification's open item U2 had planned `c.text`, but the conformance tests during implementation showed that hono's `c.text` overwrites a pre-set `Content-Type` with `text/plain`, so the implementation switched to `c.body`, which preserves prepared headers (as does `WebContext.body`, which takes its place in the Express and Fastify output).
 
 ## Implementation source, in full
 
@@ -730,419 +730,233 @@ Pinning `Object.keys(payload(jwt))` is the check that no top-level `sub` / `exp`
 
 ## CLI integration and the generated-code contribution
 
-Running `maronn-oidc generate <framework> --enable jwt-introspection-response` adds the following to the generated code:
+The experimental package is the logic layer (the `Accept` check, the audience restriction and the response JWT); the HTTP side, receiving the request and building the response, is generated code.
+`maronn-oidc generate <framework> --enable jwt-introspection-response` takes the code this feature owns out of a running app, `apps/hono/src/oidc-provider/`, and adds it to the generated output.
+What is taken and how is defined by [packages/cli/extract.json](../../../packages/cli/extract.json) and carried out by [packages/cli/src/generate.ts](../../../packages/cli/src/generate.ts).
+The feature adds three things:
 
-- **routes/introspection.ts**: the `Accept` check and the JWT response branch at the response exit. No new HTTP route appears
-- **routes/discovery.ts**: the `introspection_signing_alg_values_supported: ['RS256']` advertisement
-- **conformance.test.ts**: contract tests pinning all of the behavior above
+- **`features/jwt-introspection-response/`**: the two files the feature owns. The `defineFeature()` of `feature.ts` declares only the discovery member `introspection_signing_alg_values_supported: ['RS256']`; it has no routes, so no HTTP endpoint is added
+- **one import and one list entry in `features/enabled.ts`**
+- **one `(feature: jwt-introspection-response)` block in `features/introspection/endpoints/introspection/pipeline.ts`**: between the `build-response` and `respond` steps, it answers with the signed response when, and only when, the `Accept` header asks for the JWT
 
-Feature resolution gains one combination check.
-The RFC 9701 response rides on the RFC 7662 endpoint, so `--enable jwt-introspection-response --disable introspection` has nowhere to answer; `resolveFeatures` in `packages/cli/src/features.ts` rejects the combination with a reasoned error (this is the first cross-feature dependency check in the CLI).
+The request flow is as follows.
+The resource server's `POST /introspect` reaches `features/introspection/endpoints/introspection/pipeline.ts`, which the introspection feature's `feature.ts` declares and `app.ts` mounts.
+The pipeline parses the request, authenticates the confidential client, resolves the token and builds the response members, and only then enters the sign-response block.
+The `signIntrospectionResponse()` the block calls returns the JWT response when `Accept` names `application/token-introspection+jwt`, and `undefined` otherwise.
+On `undefined` the following `respond` step answers with JSON exactly as before.
+
+The contribution is a block rather than a hook because the logic runs in the middle of the introspection pipeline and reads what authentication and token resolution produced (`introspection` and `authenticatedClientId`).
+The fixed hooks (`routes`, `discovery`, `context`, and so on) have no way to insert logic into a pipeline.
+With the block pinned after authentication and token resolution, the `Accept` header structurally cannot bypass either (§8.2 downgrade prevention).
+When the feature is disabled, the generator deletes the block and the import only the block uses.
+No later block reads the `signed` value it defines, so no `const signed = undefined;` stand-in is left either.
+
+The pipeline that hosts the block belongs to the stable introspection feature, so this feature depends on introspection.
+The dependency is written as `requires` in the feature list of [packages/cli/src/registry.ts](../../../packages/cli/src/registry.ts).
 
 ```typescript
-  // Cross-feature dependency: the RFC 9701 JWT response rides on the RFC 7662
-  // introspection endpoint, which is not generated when introspection is
-  // disabled — there would be nowhere to answer with the JWT.
-  if (features.jwtIntrospectionResponse && !features.introspection) {
-    throw new Error(
-      'Feature "jwt-introspection-response" requires the introspection feature: ' +
-        'the RFC 9701 JWT response is returned by the RFC 7662 introspection endpoint, ' +
-        'which is not generated when introspection is disabled',
-    );
-  }
+  { id: 'jwt-introspection-response', tier: 'experimental', requires: ['introspection'], packages: EXPERIMENTAL, frameworks: ALL_FRAMEWORKS, runtimes: ALL_RUNTIMES, summary: 'JWT Response for Token Introspection (RFC 9701)', requiresReason: 'the RFC 9701 JWT response is returned by the RFC 7662 introspection endpoint, which is not generated when introspection is disabled' },
 ```
 
-The generated output without the feature is byte-identical to the pre-feature CLI.
-The conformance contract block is also omitted entirely when the feature is off (the disabled contract is the complete absence of the branch and the discovery metadata, which the CLI generator tests pin).
+`--enable jwt-introspection-response --disable introspection` is rejected by `assertFeatureDependencies()`, which runs after feature resolution and adds `requiresReason` to the error.
 
-### Code added to routes/introspection.ts
+```typescript
+export function assertFeatureDependencies(features: OidcFeatureConfig): void {
+  for (const entry of FEATURE_REGISTRY) {
+    if (!features[featureKeyOf(entry.id)]) continue;
+    for (const required of entry.requires) {
+      if (features[featureKeyOf(required)]) continue;
+      throw new Error(
+        `Feature "${entry.id}" requires the ${required} feature` +
+          (entry.requiresReason === undefined ? '' : `: ${entry.requiresReason}`),
+      );
+    }
+  }
+}
+```
 
-The imports gain two names from core (`selectSigningKeyByAlg` and the `SigningKey` type) and four from the experimental subpath.
+The import-boundary lint reads the same `requires`: `features/<a>/` may import `features/<b>/` only when the entry of `a` lists `b`.
+That declaration is what lets `steps/sign-response.ts` import the introspection feature's `respondIntrospection()`.
+
+The generated output contains no tests.
+In `apps/hono`, the source of the extraction, tests placed next to the feature's files (the `*.test.ts` of [apps/hono/src/oidc-provider/features/jwt-introspection-response](../../../apps/hono/src/oidc-provider/features/jwt-introspection-response)) pin the behavior, and the extraction leaves them out.
+
+### The generated code in full (hono)
+
+The code below is what this feature adds to the hono output generated with the default features plus `--enable jwt-introspection-response`.
+
+#### The lines added to `features/enabled.ts`
+
+`features/enabled.ts` lists the enabled features, with one import and one list entry per feature.
+The hooks apply in the order of that array.
+
+```typescript
+import { jwtIntrospectionResponse } from './jwt-introspection-response/feature.js';
+```
+
+```typescript
+  jwtIntrospectionResponse,
+```
+
+#### The `(feature: jwt-introspection-response)` block of `features/introspection/endpoints/introspection/pipeline.ts`
+
+The import of the step the block calls joins the top of the pipeline.
+
+```typescript
+import { signIntrospectionResponse } from '../../../jwt-introspection-response/steps/sign-response.js';
+```
+
+The block runs right after the `build-response` step (which builds the response members) and right before the `respond` step.
+The pipeline returns there only when the step returns a `Response`; on `undefined` it goes on to `respond`.
+
+```typescript
+    // [sign-response] (feature: jwt-introspection-response) Answer as a signed JWT when asked for one — RFC 9701 §4 / §5
+    const signed = await signIntrospectionResponse(c, introspection, authenticatedClientId);
+    if (signed) return signed;
+```
+
+#### `features/jwt-introspection-response/feature.ts`
+
+The declaration of the feature.
+Its only hook is `discovery`, which advertises exactly `RS256` in the RFC 9701 §7 metadata member `introspection_signing_alg_values_supported`.
+The response JWT's alg is pinned to RS256 (the §6 default; there is no per-client `introspection_signed_response_alg`), so exactly one value is advertised.
+The feature has no routes, no context and no settings, so enabling it changes neither the HTTP paths nor the shape of the configuration.
+
+```typescript
+import { defineFeature } from '../feature.js';
+
+/**
+ * EXPERIMENTAL — JWT Response for OAuth Token Introspection (RFC 9701): the
+ * introspection endpoint answers a request whose Accept header names
+ * application/token-introspection+jwt with a signed JWT, in the
+ * sign-response block of the introspection pipeline. It needs the
+ * introspection feature, whose endpoint carries the response. A request
+ * that does not name that media type is answered exactly as before.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
+ * may change in a breaking way between releases.
+ */
+export const jwtIntrospectionResponse = defineFeature({
+  id: 'jwt-introspection-response',
+  // RFC 9701 §7 metadata. The introspection response JWT is always signed with
+  // RS256 (§6: the default for a client that registered no
+  // introspection_signed_response_alg), so exactly one alg is advertised.
+  discovery: () => ({ introspection_signing_alg_values_supported: ['RS256'] }),
+});
+```
+
+#### `features/jwt-introspection-response/steps/sign-response.ts`
+
+The step the sign-response block calls.
+Its `meta` describes the step as a box of the `maronn-oidc graph` diagram, and `after: ['build-response']` declares that a `--flow` reordering can never move it before the response members are built.
+
+The step works in four stages.
+First, `acceptsIntrospectionJwt()` checks `Accept`; when the JWT is not named explicitly the step returns `undefined` and the request goes the classic way.
+Next, `restrictIntrospectionResponseToCaller()` replaces the response with `{ "active": false }` when the caller is neither the client the token was issued to nor listed in its `aud`.
+Then `selectSigningKeyByAlg()` picks the RS256 key from the registered key set (`c.get('signingKeys')`), and `createIntrospectionResponseJwt()` signs.
+Finally, the introspection feature's `respondIntrospection()` builds the response from the JWT string (`text`) and the dedicated `Content-Type`.
+
+The key is chosen by alg rather than taken from the front of the set because, under the `SigningKeyProvider` contract, an RS256 + ES256 set with the ES256 key first is legitimate, and a JWT that declares `alg: RS256` must be signed with the RS256 key.
+With no RS256 key registered, `selectSigningKeyByAlg()` throws and the pipeline's `respond-error` step answers 500 `server_error`.
+An unverifiable JWT with a misdeclared `alg` is never returned.
+`setRequestContext()` in `app.ts` stops the request with 503 when a key set is empty, so the `signingKeys` that reach the step are never empty.
+
+The way the response is sent reflects a finding made during implementation: hono's `c.text` overwrites a pre-set `Content-Type` with `text/plain`.
+[`respondIntrospection()`](../../../apps/hono/src/oidc-provider/features/introspection/endpoints/introspection/steps/respond.ts) sends a `text` with `c.body`, which keeps the `Content-Type` of `headers` and the `Cache-Control: no-store` as they are.
+The `text` member of the introspection feature's response type (`IntrospectionEndpointResponse`) exists for this JWT response.
 
 ```typescript
 import {
-  extractClientCredentials,
-  resolveAuthenticatedTokenClient,
-  validateClientAuthMethod,
-  verifyClientSecret,
-  requireIntrospectionToken,
-  requireIntrospectionClient,
-  requireConfidentialIntrospectionCaller,
-  resolveIntrospectionToken,
-  isIntrospectionTokenActive,
-  buildIntrospectionResponse,
-  INACTIVE_INTROSPECTION_RESPONSE,
-  IntrospectionError,
-  TokenError,
+  type IntrospectionResponse,
   selectSigningKeyByAlg,
   type SigningKey,
-  type IntrospectionResponse,
 } from '@maronn-openid-connect/core';
-```
-
-```typescript
 import {
   TOKEN_INTROSPECTION_JWT_MEDIA_TYPE,
   acceptsIntrospectionJwt,
   createIntrospectionResponseJwt,
   restrictIntrospectionResponseToCaller,
 } from '@maronn-openid-connect/experimental/jwt-introspection-response';
-```
+import { respondIntrospection } from '../../introspection/endpoints/introspection/steps/respond.js';
+import { step } from '../../../endpoints/step.js';
 
-The `requireConfidentialIntrospectionCaller` visible in the import list is not part of this feature: it is a step every generated introspection route now runs (`tasks/done/p1-introspection-reject-public-client-caller.md`).
-Right after the client authentication pipeline it rejects a caller registered with `token_endpoint_auth_method: 'none'` with `invalid_client` (401), because a public client's client_id is public information and presenting it alone is not authentication (RFC 7662 §2.1 / RFC 9701 §5).
-The JWT branch sits after that rejection, so the Accept header can never bypass it.
+export const meta = step({
+  id: 'sign-response',
+  endpoint: 'introspection',
+  feature: 'jwt-introspection-response',
+  kind: 'dispatch',
+  label: 'Answer as a signed JWT when asked for one',
+  spec: 'RFC 9701 §4 / §5',
+  function: 'signIntrospectionResponse',
+  calls: ['acceptsIntrospectionJwt', 'restrictIntrospectionResponseToCaller', 'selectSigningKeyByAlg', 'createIntrospectionResponseJwt'],
+  consumes: ['introspection', 'authenticatedClientId'],
+  produces: [],
+  removable: false,
+  after: ['build-response'],
+});
 
-In the handler body, right after the response object `response` is built and immediately before the classic `return c.json(response)`, the following branch is inserted.
+/**
+ * EXPERIMENTAL — RFC 9701 §4 / §5: a caller whose Accept header names
+ * application/token-introspection+jwt receives the introspection response as
+ * a signed JWT. Any other request (no Accept, application/json, a wildcard)
+ * returns undefined and is answered as before. The step sits AFTER client
+ * authentication and token resolution so the Accept header can never bypass
+ * either (§8.2 downgrade prevention).
+ */
+export async function signIntrospectionResponse(
+  c: any,
+  introspection: IntrospectionResponse,
+  authenticatedClientId: string,
+): Promise<Response | undefined> {
+  if (!acceptsIntrospectionJwt(c.req.header('Accept'))) return undefined;
 
-```typescript
-    // EXPERIMENTAL — RFC 9701 §4 / §5: a caller whose Accept header names
-    // application/token-introspection+jwt receives the introspection response
-    // as a signed JWT. Any other request (no Accept, application/json, a
-    // wildcard) is answered exactly as before, and the branch sits AFTER client
-    // authentication and token resolution so the Accept header can never
-    // bypass either (§8.2 downgrade prevention).
-    if (acceptsIntrospectionJwt(c.req.header('Accept'))) {
-      // RFC 9701 §3 / §5: before the response leaves as a signed assertion its
-      // members are restricted to what the authenticated caller may see — a
-      // caller that is neither the client the token was issued to nor listed in
-      // its aud gets { active: false }, indistinguishable from an unknown token.
-      const restrictedResponse = restrictIntrospectionResponseToCaller(
-        response,
-        authenticatedClientId,
-      );
-      // RFC 9701 §6: alg is pinned to RS256 (the default for a client that
-      // registered no introspection_signed_response_alg). The general-purpose
-      // ACTIVE key is not guaranteed to be RS256 — SigningKeyProvider may
-      // legitimately return ES256 as active alongside an RS256 + ES256
-      // registered set — so the key is picked by alg from the registered set.
-      // Its public half is published at /.well-known/jwks.json under the same
-      // kid. selectSigningKeyByAlg throws when no RS256 key is registered,
-      // which surfaces as a server_error below (a configuration mistake)
-      // rather than as an unverifiable introspection response.
-      const introspectionSigningKeys = (c.get('signingKeys') as SigningKey[] | undefined) ?? [];
-      const introspectionSigningKey = introspectionSigningKeys.length > 0
-        ? selectSigningKeyByAlg(introspectionSigningKeys, 'RS256')
-        : {
-            // Falls back to the single-key context so a hand-wired provider
-            // that never populated the key set keeps working; on the default
-            // single RS256 key both branches resolve the same key.
-            privateKey: c.get('privateKey'),
-            publicJwk: c.get('publicJwk'),
-            keyId: c.get('keyId'),
-          };
-      const responseJwt = await createIntrospectionResponseJwt({
-        issuer: c.get('config').issuer,
-        audience: authenticatedClientId,
-        introspection: restrictedResponse,
-        signingKey: introspectionSigningKey,
-      });
-      // RFC 9701 §5: the success response is the compact JWS itself under its
-      // own media type. c.body (unlike c.text, which forces text/plain) keeps
-      // the explicitly set Content-Type, and the cache-busting headers set at
-      // the top of the handler still apply.
-      c.header('Content-Type', TOKEN_INTROSPECTION_JWT_MEDIA_TYPE);
-      return c.body(responseJwt);
-    }
-```
-
-The key is selected by algorithm from the registered key set rather than taking the active key, for the same reason as JARM.
-Under the `SigningKeyProvider` contract it is legitimate for the active key to be ES256 while the registered set holds RS256 + ES256, and a JWT declaring `alg: RS256` must be signed with the RS256 key.
-In a configuration with no RS256 key, `selectSigningKeyByAlg` throws and the existing catch answers `server_error` (an unverifiable JWT with a misdeclared `alg` is never produced).
-
-### Code added to routes/discovery.ts
-
-One entry joins the spread merge on discovery's final `c.json` (the same spot as the PAR / Device / CIBA / JARM / ID-JAG metadata).
-
-```typescript
-    // EXPERIMENTAL — RFC 9701 §7 metadata. The introspection response JWT is
-    // always signed with RS256 (§6: the default for a client that registered no
-    // introspection_signed_response_alg), so exactly one alg is advertised.
-    introspection_signing_alg_values_supported: ['RS256'],
-```
-
-### Code added to conformance.test.ts
-
-The test client registrations gain one caller that is neither an issuee nor an audience.
-
-```typescript
-  // EXPERIMENTAL (RFC 9701 §3): a registered confidential client that is
-  // neither the issuee nor an audience of the introspected test tokens, so the
-  // caller restriction on the JWT response path can be pinned.
-  ['c-introspect-other', {
-    clientId: 'c-introspect-other',
-    clientSecret: 's',
-    redirectUris: [REDIRECT_URI],
-    clientType: 'confidential' as const,
-    responseTypes: ['code'],
-    grantTypes: ['authorization_code'],
-    tokenEndpointAuthMethod: 'client_secret_post',
-  }],
-```
-
-The contract tests themselves follow.
-The helper that resolves the key from the JWKS by `kid` and verifies RS256 has a twin in JARM's conformance block, but following the policy that features do not share helpers (duplication tolerated), it is duplicated locally in this block.
-
-```typescript
-  // EXPERIMENTAL — JWT Response for OAuth Token Introspection (RFC 9701).
-  // Generated because this provider was created with --enable
-  // jwt-introspection-response. These tests pin the contract the repository
-  // guarantees for the JWT-shaped introspection response: change the behavior
-  // and they fail, which is how a customized OP learns it drifted.
-  describe('JWT introspection response (RFC 9701)', () => {
-    const INTROSPECTION_JWT_MEDIA_TYPE = 'application/token-introspection+jwt';
-
-    function introspectWith(body: Record<string, string>, accept?: string): Promise<Response> {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      };
-      if (accept !== undefined) headers.Accept = accept;
-      return app.request('/introspect', {
-        method: 'POST',
-        headers,
-        body: new URLSearchParams(body).toString(),
-      });
-    }
-
-    // Pure helpers: they fetch, parse and verify only. Every assertion lives in
-    // an it(), and none of them branches on the OP's behavior. The JWKS-based
-    // verifier is deliberately local to this block (features do not share
-    // conformance helpers).
-    function decodeIntrospectionJwtSegment(segment: string): Record<string, unknown> {
-      const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
-      const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
-      const bytes = Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
-      return JSON.parse(new TextDecoder().decode(bytes));
-    }
-
-    async function inspectIntrospectionJwt(jwt: string): Promise<{
-      header: Record<string, unknown>;
-      payload: Record<string, unknown>;
-      signatureValid: boolean;
-    }> {
-      const [encodedHeader = '', encodedPayload = '', encodedSignature = ''] = jwt.split('.');
-      const header = decodeIntrospectionJwtSegment(encodedHeader);
-      const jwks = await (await app.request('/.well-known/jwks.json')).json();
-      const jwk = (jwks.keys as Array<Record<string, unknown>>).find(
-        (candidate) => candidate.kid === header.kid,
-      );
-      const key = await crypto.subtle.importKey(
-        'jwk',
-        { kty: 'RSA', n: jwk?.n as string, e: jwk?.e as string },
-        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-        false,
-        ['verify'],
-      );
-      const base64 = encodedSignature.replace(/-/g, '+').replace(/_/g, '/');
-      const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
-      const signatureValid = await crypto.subtle.verify(
-        'RSASSA-PKCS1-v1_5',
-        key,
-        Uint8Array.from(atob(padded), (char) => char.charCodeAt(0)),
-        new TextEncoder().encode(encodedHeader + '.' + encodedPayload),
-      );
-      return { header, payload: decodeIntrospectionJwtSegment(encodedPayload), signatureValid };
-    }
-
-    describe('Signed JWT response (RFC 9701 §4 / §5)', () => {
-      it('should answer a JWT-accepting caller with a verifiable signed introspection JWT', async () => {
-        const now = Math.floor(Date.now() / 1000);
-        accessTokenStore.set('rfc9701-active', {
-          sub: 'testuser',
-          clientId: 'c-conf',
-          scope: ['openid'],
-          expiresAt: now + 3600,
-          iat: now,
-        });
-        const res = await introspectWith(
-          { client_id: 'c-conf', client_secret: 's', token: 'rfc9701-active' },
-          INTROSPECTION_JWT_MEDIA_TYPE,
-        );
-
-        expect(res.status).toBe(200);
-        // RFC 9701 §5: the compact JWS travels under its own media type, and the
-        // RFC 7662 §2.2 cache-busting headers still apply.
-        expect(res.headers.get('Content-Type')).toBe(INTROSPECTION_JWT_MEDIA_TYPE);
-        expect(res.headers.get('Cache-Control')).toBe('no-store');
-        expect(res.headers.get('Pragma')).toBe('no-cache');
-
-        const { header, payload, signatureValid } = await inspectIntrospectionJwt(await res.text());
-        // §5 REQUIRED typ (the §8.1 cross-JWT confusion defense) + §6 default alg.
-        expect(header).toEqual({ typ: 'token-introspection+jwt', alg: 'RS256', kid: 'test-key' });
-        expect(signatureValid).toBe(true);
-        // §5: iss / aud / iat at the top level, the RFC 7662 members inside
-        // token_introspection — and nothing else (no top-level sub / exp, which
-        // would let the JWT pass for an access token).
-        expect(Object.keys(payload).sort()).toEqual(['aud', 'iat', 'iss', 'token_introspection']);
-        expect(payload.iss).toBe('http://localhost:3000');
-        expect(payload.aud).toBe('c-conf');
-        expect(payload.token_introspection).toEqual({
-          active: true,
-          scope: 'openid',
-          client_id: 'c-conf',
-          token_type: 'Bearer',
-          sub: 'testuser',
-          exp: now + 3600,
-          iat: now,
-        });
-      });
-
-      it('should wrap an unknown token as token_introspection with active false only', async () => {
-        const res = await introspectWith(
-          { client_id: 'c-conf', client_secret: 's', token: 'rfc9701-unknown' },
-          INTROSPECTION_JWT_MEDIA_TYPE,
-        );
-
-        expect(res.status).toBe(200);
-        expect(res.headers.get('Content-Type')).toBe(INTROSPECTION_JWT_MEDIA_TYPE);
-        const { payload, signatureValid } = await inspectIntrospectionJwt(await res.text());
-        expect(signatureValid).toBe(true);
-        expect(payload.token_introspection).toEqual({ active: false });
-      });
-    });
-
-    describe('RFC 7662 JSON path is unchanged', () => {
-      it('should keep answering RFC 7662 JSON when the caller sends no Accept header', async () => {
-        const now = Math.floor(Date.now() / 1000);
-        accessTokenStore.set('rfc9701-json', {
-          sub: 'testuser',
-          clientId: 'c-conf',
-          scope: ['openid'],
-          expiresAt: now + 3600,
-          iat: now,
-        });
-        const res = await introspectWith({
-          client_id: 'c-conf',
-          client_secret: 's',
-          token: 'rfc9701-json',
-        });
-
-        expect(res.status).toBe(200);
-        expect(res.headers.get('Content-Type')).toBe('application/json');
-        expect(await res.json()).toEqual({
-          active: true,
-          scope: 'openid',
-          client_id: 'c-conf',
-          token_type: 'Bearer',
-          sub: 'testuser',
-          exp: now + 3600,
-          iat: now,
-        });
-      });
-
-      it('should not treat a wildcard Accept as a JWT request', async () => {
-        // A generic HTTP client's default Accept must not flip the response
-        // format — only the explicitly named RFC 9701 media type does.
-        const res = await introspectWith(
-          { client_id: 'c-conf', client_secret: 's', token: 'rfc9701-unknown' },
-          '*/*',
-        );
-
-        expect(res.status).toBe(200);
-        expect(res.headers.get('Content-Type')).toBe('application/json');
-        expect(await res.json()).toEqual({ active: false });
-      });
-    });
-
-    describe('Caller audience restriction (RFC 9701 §3 / §5)', () => {
-      it('should answer a caller that is neither issuee nor audience with active false', async () => {
-        const now = Math.floor(Date.now() / 1000);
-        accessTokenStore.set('rfc9701-foreign', {
-          sub: 'testuser',
-          clientId: 'c-conf',
-          scope: ['openid'],
-          expiresAt: now + 3600,
-          iat: now,
-        });
-        const res = await introspectWith(
-          { client_id: 'c-introspect-other', client_secret: 's', token: 'rfc9701-foreign' },
-          INTROSPECTION_JWT_MEDIA_TYPE,
-        );
-
-        expect(res.status).toBe(200);
-        const { payload, signatureValid } = await inspectIntrospectionJwt(await res.text());
-        expect(signatureValid).toBe(true);
-        // The withheld response is indistinguishable from an unknown token, and
-        // the JWT is addressed to the caller that asked.
-        expect(payload.aud).toBe('c-introspect-other');
-        expect(payload.token_introspection).toEqual({ active: false });
-      });
-
-      it('should disclose the response to a caller listed in the token audience', async () => {
-        const now = Math.floor(Date.now() / 1000);
-        accessTokenStore.set('rfc9701-audience', {
-          sub: 'testuser',
-          clientId: 'c-conf',
-          scope: ['openid'],
-          expiresAt: now + 3600,
-          iat: now,
-          audience: ['c-introspect-other'],
-        });
-        const res = await introspectWith(
-          { client_id: 'c-introspect-other', client_secret: 's', token: 'rfc9701-audience' },
-          INTROSPECTION_JWT_MEDIA_TYPE,
-        );
-
-        expect(res.status).toBe(200);
-        const { payload, signatureValid } = await inspectIntrospectionJwt(await res.text());
-        expect(signatureValid).toBe(true);
-        expect(payload.token_introspection).toEqual({
-          active: true,
-          scope: 'openid',
-          client_id: 'c-conf',
-          token_type: 'Bearer',
-          sub: 'testuser',
-          exp: now + 3600,
-          iat: now,
-          aud: ['c-introspect-other'],
-        });
-      });
-    });
-
-    describe('Downgrade prevention (RFC 9701 §8.2)', () => {
-      it('should refuse an unauthenticated request no matter what the Accept header asks for', async () => {
-        const res = await introspectWith({ token: 'rfc9701-active' }, INTROSPECTION_JWT_MEDIA_TYPE);
-
-        // Client authentication runs before the response-format branch, so the
-        // Accept header can never bypass it; the error stays RFC 7662 JSON.
-        expect(res.status).toBe(401);
-        expect(res.headers.get('Content-Type')).toBe('application/json');
-        expect(await res.json()).toMatchObject({ error: 'invalid_client' });
-      });
-
-      // RFC 9701 §5: an unauthenticated request must be refused, and a public
-      // client_id alone is not authentication. Without this rejection the
-      // signed assertion would vouch for a caller identity that was never
-      // verified.
-      it('should reject a public client introspection request even when it asks for the JWT response', async () => {
-        const res = await introspectWith(
-          { client_id: 'c-public', token: 'rfc9701-active' },
-          INTROSPECTION_JWT_MEDIA_TYPE,
-        );
-
-        expect(res.status).toBe(401);
-        expect(res.headers.get('Content-Type')).toBe('application/json');
-        expect(await res.json()).toEqual({
-          error: 'invalid_client',
-          error_description: 'Introspection requires an authenticated confidential client',
-        });
-      });
-    });
-
-    describe('Provider metadata (RFC 9701 §7)', () => {
-      it('should advertise introspection_signing_alg_values_supported as exactly RS256', async () => {
-        const metadata = await (await app.request('/.well-known/openid-configuration')).json();
-
-        expect(metadata.introspection_signing_alg_values_supported).toEqual(['RS256']);
-      });
-    });
+  // RFC 9701 §3 / §5: before the response leaves as a signed assertion its
+  // members are restricted to what the authenticated caller may see — a
+  // caller that is neither the client the token was issued to nor listed in
+  // its aud gets { active: false }, indistinguishable from an unknown token.
+  const restrictedResponse = restrictIntrospectionResponseToCaller(
+    introspection,
+    authenticatedClientId,
+  );
+  // RFC 9701 §6: alg is pinned to RS256 (the default for a client that
+  // registered no introspection_signed_response_alg). The first key of the
+  // general-purpose set is not guaranteed to be RS256 — a SigningKeyProvider
+  // may legitimately put an ES256 key first in an RS256 + ES256 set — so the
+  // key is picked by alg from the set. Its public half is published at
+  // /.well-known/jwks.json under the same kid. selectSigningKeyByAlg throws
+  // when no RS256 key is registered, which surfaces as a server_error
+  // (a configuration mistake) rather than as an unverifiable introspection
+  // response.
+  const introspectionSigningKeys = (c.get('signingKeys') as SigningKey[] | undefined) ?? [];
+  const introspectionSigningKey = selectSigningKeyByAlg(introspectionSigningKeys, 'RS256');
+  const responseJwt = await createIntrospectionResponseJwt({
+    issuer: c.get('config').issuer,
+    audience: authenticatedClientId,
+    introspection: restrictedResponse,
+    signingKey: introspectionSigningKey,
   });
+  // RFC 9701 §5: the success response is the compact JWS itself under its
+  // own media type.
+  return respondIntrospection(c, {
+    status: 200,
+    text: responseJwt,
+    headers: { 'Content-Type': TOKEN_INTROSPECTION_JWT_MEDIA_TYPE },
+  });
+}
 ```
 
-### Generated output for the other frameworks
+### The other frameworks
 
-The introspection route is generated for every framework from the shared hono template through the `toWebRouteTemplate` conversion, so the express / fastify / nextjs output is equivalent to the above.
-See [packages/cli/src/frameworks/web-standard](../../../packages/cli/src/frameworks/web-standard) for the conversion.
+The Express and Fastify output has the same files.
+The generator replaces the `hono` imports of the endpoints with `WebRouter` / `WebContext` of `web-router.ts` (a small router on the Fetch API) and adds an `apply.ts` for the framework, `web-router.ts` and `node-adapter.ts`.
+What is replaced and which files are added is defined in [packages/cli/extract.json](../../../packages/cli/extract.json); the router and the adapters live in [apps/hono/src/web/](../../../apps/hono/src/web/).
+The screens stay hono/jsx, so these outputs still need `hono` as the JSX runtime.
+`WebContext.body` keeps the prepared headers too, so the JWT response's `Content-Type` is the same under Express and Fastify.
+
+The Next.js output is extracted from [apps/nextjs](../../../apps/nextjs), a Next.js App Router app.
+A feature's route files live in the route group `app/(<feature-id>)/` and its code in `app/_oidc-provider/features/<feature-id>/`.
+This feature has no routes, so its code goes to `app/_oidc-provider/features/jwt-introspection-response/`.
+
 The only sample that enables this feature is [samples/hono-cloudflare](../../../samples/hono-cloudflare).
 
 ## E2E test spec, in full
