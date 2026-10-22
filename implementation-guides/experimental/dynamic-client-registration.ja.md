@@ -253,10 +253,11 @@ export function validateClientRegistrationRequest(
 /**
  * redirect_uris は REQUIRED（OIDC Dynamic Client Registration 1.0 §2）。
  * URI の規則そのもの（フラグメント禁止・危険スキーム拒否・非ループバック
- * 平文 http 拒否）は core の validateRegisteredRedirectUris に委ね、静的
- * クライアントと同一の登録基準を適用する。core の例外は違反 URI を
- * メッセージへ埋め込んだ server_error なので、コードを invalid_redirect_uri
- * （RFC 7591 §3.2.2）へ、文言を URI を含まない固定 ASCII へ差し替える。
+ * 平文 http 拒否。ネイティブアプリ向けのカスタムスキームは通る）は core の
+ * validateRegisteredRedirectUris に委ね、静的クライアントと同一の登録基準を
+ * 適用する。core の例外は違反 URI をメッセージへ埋め込んだ server_error
+ * なので、コードを invalid_redirect_uri（RFC 7591 §3.2.2）へ、文言を URI を
+ * 含まない固定 ASCII へ差し替える。
  */
 function validateRedirectUris(value: unknown): string[] {
   if (
@@ -274,7 +275,7 @@ function validateRedirectUris(value: unknown): string[] {
   } catch {
     throw new ClientRegistrationError(
       'invalid_redirect_uri',
-      'redirect_uris must only contain https or loopback http URIs without fragments',
+      'each redirect_uri must be an absolute URI without a fragment and must not use a dangerous scheme or non-loopback http',
     );
   }
   return [...value];
@@ -413,12 +414,15 @@ function pickClientName(value: unknown): { clientName?: string } {
       'client_name must be at most 128 characters',
     );
   }
-  // C0 制御文字と DEL。改行やエスケープでログ・画面を汚す値を登録させない。
+  // C0 / C1 制御文字と DEL、bidi 制御文字（U+200E–U+200F / U+202A–U+202E /
+  // U+2066–U+2069）、ゼロ幅文字（U+200B–U+200D / U+FEFF）。改行やエスケープで
+  // ログ・画面を汚す値に加え、表示順の反転や見えない文字で表示名を偽装する
+  // 値も登録させない。
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
+  if (/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/.test(value)) {
     throw new ClientRegistrationError(
       'invalid_client_metadata',
-      'client_name must not contain control characters',
+      'client_name must not contain control or invisible formatting characters',
     );
   }
   return { clientName: value };
@@ -887,7 +891,7 @@ describe('validateClientRegistrationRequest', () => {
       ).toThrowError(
         new ClientRegistrationError(
           'invalid_redirect_uri',
-          'redirect_uris must only contain https or loopback http URIs without fragments',
+          'each redirect_uri must be an absolute URI without a fragment and must not use a dangerous scheme or non-loopback http',
         ),
       );
     });
@@ -898,7 +902,7 @@ describe('validateClientRegistrationRequest', () => {
       ).toThrowError(
         new ClientRegistrationError(
           'invalid_redirect_uri',
-          'redirect_uris must only contain https or loopback http URIs without fragments',
+          'each redirect_uri must be an absolute URI without a fragment and must not use a dangerous scheme or non-loopback http',
         ),
       );
     });
@@ -909,7 +913,7 @@ describe('validateClientRegistrationRequest', () => {
       ).toThrowError(
         new ClientRegistrationError(
           'invalid_redirect_uri',
-          'redirect_uris must only contain https or loopback http URIs without fragments',
+          'each redirect_uri must be an absolute URI without a fragment and must not use a dangerous scheme or non-loopback http',
         ),
       );
     });
@@ -921,7 +925,7 @@ describe('validateClientRegistrationRequest', () => {
       ).toThrowError(
         new ClientRegistrationError(
           'invalid_redirect_uri',
-          'redirect_uris must only contain https or loopback http URIs without fragments',
+          'each redirect_uri must be an absolute URI without a fragment and must not use a dangerous scheme or non-loopback http',
         ),
       );
     });
@@ -943,6 +947,17 @@ describe('validateClientRegistrationRequest', () => {
         'http://[::1]:8080/cb',
         'https://app.example.com/cb',
       ]);
+    });
+
+    // RFC 8252 §7.1: native apps register private-use (custom) URI schemes.
+    // The registration rule equals the static one (core
+    // validateRegisteredRedirectUris), which accepts any scheme outside its
+    // dangerous-scheme list.
+    it('should accept a private-use scheme redirect_uri', () => {
+      const validated = validateClientRegistrationRequest(
+        body({ redirect_uris: ['com.example.app:/oauth2redirect'] }),
+      );
+      expect(validated.redirectUris).toEqual(['com.example.app:/oauth2redirect']);
     });
   });
 
@@ -1176,7 +1191,42 @@ describe('validateClientRegistrationRequest', () => {
       ).toThrowError(
         new ClientRegistrationError(
           'invalid_client_metadata',
-          'client_name must not contain control characters',
+          'client_name must not contain control or invisible formatting characters',
+        ),
+      );
+    });
+
+    it('should reject a client_name containing a C1 control character', () => {
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, client_name: 'bad\u0085name' })),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'client_name must not contain control or invisible formatting characters',
+        ),
+      );
+    });
+
+    // U+202E (RIGHT-TO-LEFT OVERRIDE) can reverse the rendered order of a
+    // display name and disguise what the user approves.
+    it('should reject a client_name containing a bidi override character', () => {
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, client_name: 'bad\u202ename' })),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'client_name must not contain control or invisible formatting characters',
+        ),
+      );
+    });
+
+    it('should reject a client_name containing a zero-width character', () => {
+      expect(() =>
+        validateClientRegistrationRequest(body({ ...MINIMAL, client_name: 'bad\u200bname' })),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'client_name must not contain control or invisible formatting characters',
         ),
       );
     });
@@ -1522,7 +1572,7 @@ export const EXPERIMENTAL_FEATURES = [
 ### routes/register.ts（新規ファイル全文）
 
 登録エンドポイントの本体である。
-検証は「initial access token → Content-Type → 純関数（ボディ長・形式・値・既定値）→ 上限 → 保存」の順で、最初に失敗した段階のエラーを返す。
+検証は「initial access token → Content-Type → Content-Length の事前検査 → 純関数（ボディ長・形式・値・既定値）→ 上限 → 保存（client_secret はハッシュ化して保存し、保存後に上限を再検査する）」の順で、最初に失敗した段階のエラーを返す。
 initial access token はボディを読む前に検査し、資格の無いリクエストにボディの解釈を一切与えない。
 `Content-Type` の検査は RFC 7591 §3.1 への適合に加え、CORS プリフライトが発生しない `text/plain` のクロスオリジン POST で JSON 形のボディを合成する手口を閉じる。
 
@@ -1548,6 +1598,7 @@ Token Exchange の `tokenExchangeConfig` と同じ「experimental 機能専用�
  * (RFC 7591 §3.1 SHOULD); set initialAccessToken to require a Bearer token.
  */
 import { Hono } from 'hono';
+import { hashClientSecret } from '@maronn-openid-connect/core';
 import {
   ClientRegistrationError,
   buildClientRegistrationResponse,
@@ -1632,8 +1683,24 @@ registerApp.post('/', async (c) => {
     );
   }
 
-  const rawBody = await c.req.text();
+  // A Content-Length that already declares more than maxRegistrationBodyBytes
+  // is refused before the body is read, so an oversized request is not
+  // buffered first. The header can lie, so the authoritative check stays the
+  // UTF-8 byte count on the body itself (validateClientRegistrationRequest).
+  const declaredLength = Number(c.req.header('Content-Length') ?? '0');
+  if (Number.isFinite(declaredLength) && declaredLength > config.maxRegistrationBodyBytes) {
+    return c.json(
+      { error: 'invalid_client_metadata', error_description: 'request body must not exceed the configured maximum size' },
+      400,
+    );
+  }
+
   try {
+    // The body read sits inside the try so that an aborted or malformed
+    // transfer still gets the fixed server_error JSON with no-store instead of
+    // the framework's default 500.
+    const rawBody = await c.req.text();
+
     // (3)–(8) Body size, JSON shape, allowlist-pick of the understood fields,
     // value checks and RFC 7591 §2 defaults — pure functions from
     // @maronn-openid-connect/experimental/dynamic-client-registration. Unknown metadata is
@@ -1656,7 +1723,24 @@ registerApp.post('/', async (c) => {
         429,
       );
     }
-    await store.save(client);
+    // The stored record keeps the client_secret only as its hash, like the
+    // statically registered clients: the 201 response below is built from the
+    // in-memory record, so the plaintext never needs to rest in the store.
+    const { clientSecret, ...registration } = client;
+    await store.save({
+      ...registration,
+      ...(clientSecret === undefined ? {} : { clientSecretHash: await hashClientSecret(clientSecret) }),
+    });
+    // Concurrent requests can pass the cap check together (the awaits above let
+    // them interleave), so re-check after saving and withdraw this registration
+    // when the save overshot the cap: the cap is never exceeded, only approached.
+    if ((await store.count()) > config.maxRegisteredClients) {
+      await store.delete(client.clientId);
+      return c.json(
+        { error: 'too_many_registrations', error_description: 'registration limit reached' },
+        429,
+      );
+    }
 
     // Never log the registration metadata or the issued client_secret.
 
@@ -1683,7 +1767,7 @@ import type { RegisteredClient } from './config.js';
 ```
 
 末尾には、ストア契約・in-memory 実装・globalThis シングルトン・resolver 合成が加わる。
-ストア契約は `get` / `save` / `count` の 3 メソッドで、`count` は総数上限（RFC 7591 §5 の DoS 考慮）の検査に使う。
+ストア契約は `get` / `save` / `count` / `delete` の 4 メソッドで、`count` は総数上限（RFC 7591 §5 の DoS 考慮）の検査に、`delete` は並行リクエストが上限を越えて保存してしまったときに自分の登録を取り下げる再検査に使う。
 `withDynamicallyRegisteredClients` は generic で基底 resolver の型をそのまま保つ。
 生成コードのクライアント resolver は `ClientResolver` と `TokenClientResolver` の両方を一つの値で担うことがあり、型を潰すと Next.js のように resolver を型付きで公開する生成物がコンパイルできなくなるためである。
 
@@ -1695,6 +1779,8 @@ import type { RegisteredClient } from './config.js';
  * - save(client): persist the registration under client.clientId.
  * - count(): how many dynamic registrations exist, for the
  *   maxRegisteredClients inventory cap (RFC 7591 §5 DoS consideration).
+ * - delete(clientId): remove one registration — the register endpoint
+ *   withdraws its own save when concurrent requests overshot the cap.
  */
 export interface DynamicallyRegisteredClientStore {
   get(clientId: string): Promise<RegisteredClient | undefined>;
@@ -2108,7 +2194,7 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
     expect(await response.json()).toEqual({
       error: 'invalid_redirect_uri',
       error_description:
-        'redirect_uris must only contain https or loopback http URIs without fragments',
+        'each redirect_uri must be an absolute URI without a fragment and must not use a dangerous scheme or non-loopback http',
     });
   });
 
