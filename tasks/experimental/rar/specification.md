@@ -19,7 +19,7 @@
 - **Experimental隔離の妥当性**: 認可リクエストの追加パラメータとして独立しており、無効時は未知パラメータとして無視される現行挙動と一致する。
 - **core無変更で実装できるか**: 可能。認可エンドポイントのパース処理は未知パラメータを保持し（`apps/hono/src/oidc-provider/endpoints/authorize/steps/parse-request.ts` の `collectUniqueParams` は重複キーのみ拒否）、core の `rejectUnsupportedRequestParams` が拒否するのは `request` / `request_uri` / `registration` だけである。保持と伝搬は feature の所有ブロックと副ストアで行う（「配置案」参照）。
 - **CLIの `--enable` で提供できるか**: 可能。既存 9 機能と同じ registry 追加と feature ディレクトリで統合する。
-- **一次資料の有無と成熟度**: RFC 9396（Proposed Standard、2023-05）。IANA レジストリ（パラメータ、エラーコード、メタデータ、claim)も整備済み。
+- **一次資料の有無と成熟度**: RFC 9396（Proposed Standard、2023-05）。IANA レジストリ（パラメータ、エラーコード、メタデータ、claim）も整備済み。
 - **セキュリティ影響**: 機微情報（金額、口座、識別子）を運ぶパラメータであり、ログ禁止、エラーへの非反映、未知 type の fail-closed を要件化する（「セキュリティ要件」参照）。
 - **テスト可能性**: 純関数の単体テスト、CLI 生成テスト、デモ型定義を使った Playwright E2E で検証できる。
 - **実装規模**: 中。experimental パッケージは純関数と in-memory ストアのみで、apps 側は所有ブロック 5 箇所と小さな base 変更 3 点に収まる。
