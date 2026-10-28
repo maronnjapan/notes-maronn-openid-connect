@@ -18,8 +18,11 @@
 - 各 sample の login/consent ルート（`validateCsrfToken` を `async` 化する場合の波及先）
 - `packages/experimental/src/device-authorization-grant/verification.ts`（`validateVerificationCsrfToken` の `csrfToken !== record.csrfToken`）
 - `packages/experimental/src/ciba/verification.ts`（`input.csrfToken !== record.csrfToken` の 2 箇所）
+- `apps/hono/src/oidc-provider/features/rp-initiated-logout/endpoints/logout/steps/approve-logout.ts`（`confirmation.csrfSecret !== csrfToken`）
+- `apps/nextjs/src/app/(rp-initiated-logout)/logout/approve/route.ts`（同上。apps を直すと CLI 生成と samples へ波及する）
 
 experimental 側の 2 ファイルは 2026-09-16 の実装レビューで見つかった同型の非定数時間比較である。
+rp-initiated-logout の 2 箇所は 2026-10-28 の実装レビューで見つけた同型比較で、主防御は HttpOnly の確認 Cookie ペアリングと SameSite=Lax（device の binding cookie と同じモデル）。defense in depth の位置づけも core 側と同じ。
 いずれの箇所も主防御は別にあり（Device と CIBA の code 照合経路は binding cookie、CIBA の承認一覧経路はセッション subject の一致）、CSRF トークンは defense in depth の位置づけだが、「秘密値は定数時間比較」という方針の対象であることは core 側と変わらない。
 core の `timingSafeEqual` は公開 API ではないため、experimental 側の対応は「機能ディレクトリ内に定数時間比較を複製する（重複許容の運用方針）」か「core が `timingSafeEqual` を公開 API に昇格する」のどちらかを本タスク着手時に選ぶ。
 Device 側の `validateVerificationCsrfToken` は実装コメントで「定数時間比較への変更時は本機能にも同じ方針を適用する」と本タスクへの追随を予告しており、この追記はその予告の受け皿である。
