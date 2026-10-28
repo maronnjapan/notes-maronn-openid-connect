@@ -19,7 +19,7 @@
 - **Experimental隔離の妥当性**: 認可リクエストの追加パラメータとして独立しており、無効時は未知パラメータとして無視される現行挙動と一致する。
 - **core無変更で実装できるか**: 可能。認可エンドポイントのパース処理は未知パラメータを保持し（`apps/hono/src/oidc-provider/endpoints/authorize/steps/parse-request.ts` の `collectUniqueParams` は重複キーのみ拒否）、core の `rejectUnsupportedRequestParams` が拒否するのは `request` / `request_uri` / `registration` だけである。保持と伝搬は feature の所有ブロックと副ストアで行う（「配置案」参照）。
 - **CLIの `--enable` で提供できるか**: 可能。既存 9 機能と同じ registry 追加と feature ディレクトリで統合する。
-- **一次資料の有無と成熟度**: RFC 9396（Proposed Standard、2023-05）。IANA レジストリ（パラメータ、エラーコード、メタデータ、claim）も整備済み。
+- **一次資料の有無と成熟度**: RFC 9396（Proposed Standard、2023-05）。IANA レジストリ（パラメータ、エラーコード、メタデータ、claim)も整備済み。
 - **セキュリティ影響**: 機微情報（金額、口座、識別子）を運ぶパラメータであり、ログ禁止、エラーへの非反映、未知 type の fail-closed を要件化する（「セキュリティ要件」参照）。
 - **テスト可能性**: 純関数の単体テスト、CLI 生成テスト、デモ型定義を使った Playwright E2E で検証できる。
 - **実装規模**: 中。experimental パッケージは純関数と in-memory ストアのみで、apps 側は所有ブロック 5 箇所と小さな base 変更 3 点に収まる。
@@ -92,7 +92,7 @@ Client                                   OP                                    U
 
 - パラメータ名: `authorization_details`（`application/x-www-form-urlencoded` でシリアライズされた JSON 配列。§3）。
 - 受理経路と優先順位:
-  1. **Request Object（request-object 機能有効時）**: core の `mergeRequestObjectParams` は固定キーしか `effectiveParams` へ写さないため（`packages/core/src/authorization-request.ts` の `REQUEST_OBJECT_OVERRIDE_KEYS` に `authorization_details` は無い）、`requestObjectClaims` から読む。Request Object 内に存在する場合はクエリ値より優先する（OIDC Core 1.0 §6.1 の supersede 規則に合わせる）。
+  1. **Request Object（request-object 機能有効時）**: core の `mergeRequestObjectParams` は固定キーしか `effectiveParams` へ写さないため（`packages/core/src/authorization-request.ts` の `REQUEST_OBJECT_OVERRIDE_KEYS` に `authorization_details` は無い）、`requestObjectClaims` から読む。Request Object 内に存在する場合はクエリ値より優先する（OIDC Core 1.0 §6.1 の supersede 規則に合わせる）。`requestObjectClaims` は `parseRequestObject`（`packages/core/src/request-object.ts`）が JWT ペイロードを JSON デコードした `Record<string, unknown>` なので、claim 値はパース済みの JSON 値（通常は配列）として届く。クエリ / PAR 経由は文字列で届く。両経路の違いはパース関数の入口で吸収する（「公開API案」の `parseAuthorizationDetailsInput`）。
   2. **PAR（par 機能有効時）**: PAR のパラメータ検証は未知パラメータを保持するため、`/par` へ送られた値が `resolve-pushed-request` 後の `params` に現れる。追加の配線は不要。
   3. **クエリパラメータ**: `params['authorization_details']`。
 - `scope` との併存: 可能（§3.1）。`openid` scope の必須要件（core の `validateAuthorizationScope`）は変わらない。同意画面では scope と details を併記する（§3.1 の merged set の MUST）。
@@ -101,19 +101,19 @@ Client                                   OP                                    U
 
 | # | 検査 | 違反時 |
 |---|---|---|
-| 1 | パラメータの UTF-8 バイト長が `maxAuthorizationDetailsBytes` 以下（TextEncoder 基準） | `invalid_authorization_details` |
-| 2 | JSON としてパースでき、値が配列である | `invalid_authorization_details` |
+| 1 | UTF-8 バイト長が `maxAuthorizationDetailsBytes` 以下（TextEncoder 基準。文字列で届いた場合は生文字列、Request Object 経由のパース済み値は `JSON.stringify` した文字列で測る） | `invalid_authorization_details` |
+| 2 | 値が配列である（文字列で届いた場合は JSON としてパースできること。文字列でも配列でもない値は拒否） | `invalid_authorization_details` |
 | 3 | 配列が空でない、要素数が `maxAuthorizationDetailsEntries` 以下 | `invalid_authorization_details` |
 | 4 | 各要素がプレーンなオブジェクトである（配列、文字列、null などを拒否） | `invalid_authorization_details` |
 | 5 | 各要素の `type` が非空文字列である（§2 REQUIRED） | `invalid_authorization_details` |
 | 6 | 共通フィールドの型（§2.2）: `locations` / `actions` / `datatypes` / `privileges` は文字列配列、`identifier` は文字列。存在する場合のみ検査 | `invalid_authorization_details` |
 | 7 | `type` が設定済み型定義（`rarTypes`）に含まれる（§5 の未知 type MUST refuse） | `invalid_authorization_details` |
 | 8 | 型定義の `validate(detail)` が通る（型固有の必須フィールド、値域） | `invalid_authorization_details` |
-| 9 | `prompt` に `none` が含まれない（details には新規同意が必要という本機能のポリシー） | `consent_required` |
+| 9 | `prompt` が `none` 単独でない（details には新規同意が必要という本機能のポリシー）。`none` が他の値と組む場合は本検査をスキップし、prompt も変更しない（base の `[validate-prompt-combination]` が OIDC Core 1.0 §3.1.2.1 違反として `invalid_request` で拒否する） | `consent_required` |
 
 - 同じ `type` の要素が複数あってよい（§2 MAY）。
 - エラーは `resolve-redirect-uri` 後に投げるため、通常の認可エラー応答としてクライアントへリダイレクトされる。`error_description` は固定 ASCII 文言とし、details の値を反映しない。
-- 検査 9 を通過した場合、`prompt` に `consent` を加えて以降のステップへ渡す。これにより prompt=none 以外のすべての経路（SSO の同意スキップを含む）が同意画面を必ず経由する。
+- 検査 9 を通過した場合（`prompt` に `none` が含まれない場合）、`prompt` に `consent` を加えて以降のステップへ渡す。これにより prompt=none 以外のすべての経路（SSO の同意スキップを含む）が同意画面を必ず経由する。ログイン画面経由の経路はもともと hand-off で必ず consent へ進むため（`endpoints/login/steps/hand-off-to-consent.ts`）、同意スキップが起きるのは `authenticate-silently` と `reuse-session` の 2 経路だけであり、どちらも prompt 値で塞がる。
 
 ### 同意画面
 
@@ -125,7 +125,7 @@ Client                                   OP                                    U
 
 - 成功応答の JSON に `authorization_details`（承認された配列そのまま）を含める（§7 MUST）。
 - refresh_token grant では、同じ grant に紐づく details を変更せず引き継いで返す。
-- トークンリクエストに `authorization_details` パラメータが含まれていた場合、grant の種別を問わず `invalid_authorization_details` で拒否する（非目標の明示拒否。エラー形式は RFC 6749 §5.2 の 400 応答）。
+- トークンリクエストに `authorization_details` パラメータが含まれていた場合、`invalid_authorization_details` で拒否する（非目標の明示拒否。エラー形式は RFC 6749 §5.2 の 400 応答）。拒否は専用ステップ `[reject-token-request-details]` で行い、feature grant の dispatch（id-jag / token-exchange / device-authorization-grant / ciba）の後、`[validate-grant-type]` の前に置く。これにより (a) 他機能が応答する grant では各機能の既存拒否（id-jag / token-exchange の `invalid_request`）が従来どおり先に効き、(b) authorization_code / refresh_token grant ではトークン発行・保存・リフレッシュトークンのローテーションというすべての副作用より前に拒否が確定する。
 - details を持たない grant のトークン応答は一切変更しない。
 
 ### Introspection（introspection 機能有効時）
@@ -166,9 +166,15 @@ export class RarError extends Error {
   readonly code: 'invalid_authorization_details';
 }
 
-/** 検査 1〜6（構造検証）。生の文字列から AuthorizationDetail[] を得る。 */
-export function parseAuthorizationDetailsParam(
-  raw: string,
+/**
+ * 検査 1〜6（構造検証）。クエリ / PAR 経由の文字列と、Request Object 経由の
+ * パース済み JSON 値の両方を受ける。
+ * - 文字列: 生文字列のバイト長を検査してから JSON.parse する
+ * - それ以外: JSON.stringify した文字列でバイト長を測り、配列であることを検査する
+ *   （stringify できない値、文字列でも配列でもない値は拒否）
+ */
+export function parseAuthorizationDetailsInput(
+  input: unknown,
   limits: { maxBytes: number; maxEntries: number },
 ): AuthorizationDetail[];
 
@@ -231,6 +237,7 @@ declare module '../../config.js' {
 ## バリデーション / エラー処理
 
 - エラーコードは認可エンドポイントで `invalid_authorization_details`（`AuthorizationError` として投げ、リクエストの response mode で返す）と `consent_required`、トークンエンドポイントで `invalid_authorization_details`（`TokenEndpointError`、400）を使う。
+- `invalid_authorization_details` は core の `AuthorizationErrorCode` enum に無いが、enum は string-valued であり、PAR の `resolve-pushed-request.ts` が `error.code as AuthorizationErrorCode` で enum 外コードを投げる先例に倣う。core への enum 追加はしない（core 無変更の原則）。`AuthorizationError` / `TokenError` の error_description は `sanitizeErrorDescription` を通る。
 - `error_description` は固定 ASCII 文言とし、details の内容（type 名を含む）をエラーへ反映しない。どの要素が落ちたかはクライアント側で再現可能であり、反映による情報価値よりログ・リファラ経由の漏えい面を減らす方を取る。
 - 型定義の `validate` が投げた `RarError` 以外の例外は `server_error` として既存のエラーハンドリングに委ねる（握りつぶさない）。
 
@@ -242,8 +249,9 @@ declare module '../../config.js' {
 - **表示の安全**: `describe` はプレーン文字列を返し、HTML を組み立てない。エスケープは view 層の既存機構に委ねる。
 - **インジェクション対策（§12 MUST sanitize）**: details は不透明な JSON 値として保持・転記のみ行い、深いマージ、`eval` 相当、動的キーアクセスによる書き込みをしない。
 - **DoS**: バイト長と要素数の上限。上限値は応答に反映しない。
+- **副作用前の拒否**: トークンリクエストの `authorization_details` 拒否は、アクセストークンの発行・保存、ID トークンの発行、リフレッシュトークンの発行、提示されたリフレッシュトークンのローテーション失効のすべてに先行するステップで行う。応答組み立て時の拒否は、拒否済みリクエストの副作用（トークンが保存済み、提示リフレッシュトークンが失効済み）を残すため禁止する。
 - **改ざん（§12）**: パラメータ自体の完全性保護は request object / PAR の既存機構の併用に委ね、本機能では追加しない（Docs に記載）。
-- **トランザクション保持の寿命**: transactionId 紐付けの details は認可トランザクションの TTL と同じ寿命で破棄する。
+- **保持の寿命**: transactionId 紐付けの details は認可トランザクションの TTL と同じ寿命で破棄する。grantId 紐付けの details は `発行時刻 + refreshTokenAbsoluteLifetime` を `expiresAt` とし、書き込み時の lazy eviction（`packages/experimental/src/ciba/store.ts` の in-memory ストアと同じ方式）で掃除する。リフレッシュトークンのローテーションは `originalIssuedAt` 起点で絶対寿命を固定するため（`features/refresh-token/steps/issue-refresh-token.ts`）、有効なリフレッシュトークンが存在する間にエントリが先に消えることはなく、§7 の MUST は grant の正規の生存期間全体で満たされる。
 
 ## プライバシー考慮
 
@@ -273,7 +281,8 @@ packages/experimental/src/rar/
 - `steps/record-authorization-details.ts`: `[record-authorization-details]`（`create-transaction` 後）。transactionId へ details を保持。
 - `steps/describe-authorization-details.ts`: consent の `prepareConsent` 内ブロック。表示行を produce。
 - `steps/record-granted-details.ts`: `submitConsent` の `[issue-authorization-code]` 後。`authCodeData.grantId` へ details を紐付け、transactionId 側を破棄。
-- `steps/append-token-response-details.ts`: token パイプラインの `[build-token-response]` と `[respond]` の間。`validatedRequest.grantId` から details を引き、`tokenResponse` を再構築する。トークンリクエストの `authorization_details` 拒否もここで行う。
+- `steps/reject-token-request-details.ts`: token パイプラインの feature grant dispatch 群（`[dispatch-ciba]`）の後、`[validate-grant-type]` の前。トークンリクエストに `authorization_details` があれば `TokenEndpointError`（400、`invalid_authorization_details`）で拒否する。トークン発行・保存・ローテーションのどの副作用よりも前に置くことが要件（「セキュリティ要件」の副作用前の拒否）。
+- `steps/append-token-response-details.ts`: `[build-token-response]` と `[respond]` の間。`validatedRequest.grantId` から details を引き、`tokenResponse` を再構築する。
 - `steps/append-introspection-details.ts`: introspection パイプラインの `[build-response]` と `[sign-response]` の間（`after` / `before` を明示）。
 
 apps/nextjs は route group `(rar)` を持たず、`_oidc-provider/features/rar/` と各 route.ts への同名の所有ブロックで同じ流れを実装する（authorize / consent decision / token / introspect の各 route）。nextjs の `context` はストアを差し替えられないため、ストアは feature ディレクトリのモジュールシングルトンとして持つ（par の nextjs 配線と同型）。
@@ -311,6 +320,7 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 異常系・境界値:
 
 - 非 JSON、JSON だが配列でない、空配列、要素がオブジェクトでない（文字列、配列、null）
+- パース済み JSON 値の入力（Request Object 経由想定）: 配列の受理、文字列でも配列でもない値（オブジェクト、数値、undefined）の拒否、stringify 後のバイト長上限
 - `type` 欠落、空文字列、非文字列
 - 共通フィールドの型違反（`locations` が文字列、`identifier` が配列、配列内に非文字列）
 - 未知 type（型定義が空、型定義にない type）
@@ -323,7 +333,8 @@ packages/cli  ─────> @maronn-openid-connect/experimental（許可・�
 ### apps の単体テスト（steps の隣に配置）
 
 - validate ステップ: 検証順序、prompt=none で `consent_required`、通過時に `prompt` へ `consent` が加わること、request object 値の優先、パラメータ無しで何もしないこと
-- token ステップ: grantId に details があるとき応答へ含まれ、無いとき応答が不変であること、トークンリクエストの `authorization_details` 拒否
+- token ステップ: grantId に details があるとき応答へ含まれ、無いとき応答が不変であること
+- reject ステップ: トークンリクエストの `authorization_details` が 400 の `invalid_authorization_details` で拒否され、アクセストークン・リフレッシュトークンが保存されず、提示したリフレッシュトークンが失効していないこと（副作用前拒否の検証）
 - introspection ステップ: member 追加と不変ケース
 
 ### CLIテスト（`packages/cli/src/__tests__`）
@@ -370,9 +381,12 @@ apps/hono と apps/nextjs の開発サーバーにデモ型定義（U2 参照）
 
 ## 未解決事項
 
-- **U1: grant 紐付けストアの掃除**: `rarGrantStore` のエントリは grant の失効（refresh token の revoke、ローテーション連鎖の終端）を自動では知れない。容量上限つき in-memory（最古破棄）とするか、TTL を持たせるか。どちらも fail-closed（details が消えたら応答に含めない）で、セキュリティ上の懸念はないが、§7 の MUST との兼ね合いで Review 2 で確定する。
 - **U2: E2E 用デモ型定義の形**: apps の開発サーバー（`apps/hono/src/server.ts`、`apps/nextjs/src/instrumentation.ts`）へ登録するデモ型の名前とフィールド。RFC 9396 §2 の例（`payment_initiation`）に寄せるか、リポジトリ固有の名前空間にするかを Review 3 までに確定する。
-- **U3: `requestObjectClaims` 内の値の型**: request object の claim として届く `authorization_details` が JSON 配列（パース済み）か文字列かを実装で確認し、パース関数の入口を確定する（Review 2 で実測する）。
+
+### 解決済み
+
+- **U1: grant 紐付けストアの掃除**（Review 2 で確定）: `expiresAt = 発行時刻 + refreshTokenAbsoluteLifetime` の TTL と、書き込み時の lazy eviction（ciba の in-memory ストアの方式）とする。ローテーションは `originalIssuedAt` 起点で絶対寿命を固定するため、有効なリフレッシュトークンより先にエントリが消えることはなく、§7 の MUST と両立する。リフレッシュトークンを発行しない grant では TTL まで過剰保持になるが、in-memory の experimental として許容し、利用者向け Docs の既知の制約に記載する。
+- **U3: `requestObjectClaims` 内の値の型**（Review 2 で実測）: `parseRequestObject` は JWT ペイロードを JSON デコードした `Record<string, unknown>` を返すため、claim 値はパース済み JSON 値（通常は配列）として届く。パース関数は `unknown` を受ける `parseAuthorizationDetailsInput` とし、文字列（クエリ / PAR）とパース済み値（Request Object）の両方を入口で吸収する。
 
 ## 将来の昇格考慮
 

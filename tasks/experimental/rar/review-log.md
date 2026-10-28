@@ -28,3 +28,28 @@
   - prompt 制御方式が `offline_access`（`prompt=consent` 必須）や `max_age` と干渉しないことは論理上の確認のみで、実測は Review 2 のセキュリティ観点で行う
 - **判定**: Pass with changes（修正は本レビュー内で反映済み）
 - **次回可能日**: 2026-10-22
+
+## Review 2
+
+- **日付**: 2026-10-28
+- **観点**: セキュリティと適合性（認証認可上の脅威、トークン・機微データの扱い、ログ禁止情報、有効期限、エラー情報の露出、package 境界との整合、CLI 後方互換、明示的有効化、生成コードの安全性、セキュリティ要件のテスト検証可能性）。Review 1 の残リスク 3 点（prompt 制御の干渉実測、U1、U3）の決着を含む
+- **確認資料**:
+  - RFC 9396 §12 / §13 を再取得し、MUST（改ざん保護は client 側、AS の sanitize）と非規範（リファラ漏えい防止、同意画面でのデータ露出、need-to-know）の別、§5 の未知 type MUST refuse、§6 のトークンリクエスト拒否時の `invalid_authorization_details`、§14.6 のエラーコード登録（authorization / token 両エンドポイント）を確認
+  - リポジトリ現状（main = a5e4f70、2026-10-28 取得）。`packages/core/src/request-object.ts`（`parseRequestObject` がペイロードを JSON デコードして返す。64〜101 行）、`packages/core/src/authorization-request.ts`（`AuthorizationError` / `AuthorizationErrorCode` enum と `sanitizeErrorDescription`、276〜298 行）、`packages/core/src/token-error.ts`（`TokenError` の enum と sanitize）、`apps/hono/src/oidc-provider/endpoints/token/pipeline.ts`（dispatch 群 48〜66 行 → validate → 発行・保存 90〜113 行 → ローテーション失効 116 行 → 応答 119〜122 行の順序）、`endpoints/token/steps/respond-error.ts`（`TokenEndpointError` 素通し）、`features/par/steps/resolve-pushed-request.ts`（`as AuthorizationErrorCode` キャストの先例、64 行）、`endpoints/authorize/pipeline.ts`（rar 検証ステップ位置と `[validate-prompt-combination]` の順序、93〜97 行）、`endpoints/authorize/steps/reuse-session.ts`（`promptValues.includes('consent')` で同意スキップが止まる、87 行）、`steps/authenticate-silently.ts`（prompt=none 経路）、`endpoints/login/steps/hand-off-to-consent.ts` / `discard-session-for-fresh-login.ts`（ログイン経路は常に consent へ進み、prompt=consent はセッションを破棄しない）、`features/refresh-token/steps/decide-refresh-token-issuance.ts` と core / apps の `offline_access` 全参照（prompt を条件にしない）、`features/refresh-token/steps/issue-refresh-token.ts`（絶対寿命が `originalIssuedAt` 起点、73 行）、`config.ts`（`refreshTokenAbsoluteLifetime` 既定 7776000）、`packages/core/src/token-request.ts`（grantId が authorization_code / refresh_token 両 grant を貫通する）、`packages/experimental/src/ciba/store.ts`（lazy eviction の先例）、`endpoints/consent/steps/`（validate-csrf-token / reject-cross-origin-post の既存 CSRF 防御）
+- **指摘**:
+  1. **（重大）トークンリクエスト拒否の位置が fail-closed でない**: 仕様書は `authorization_details` 付きトークンリクエストの拒否を `[build-token-response]` 後の `append-token-response-details` で行うとしていたが、token パイプラインの実測ではその時点でアクセストークンの発行・保存、ID トークン発行、リフレッシュトークンの発行、提示トークンのローテーション失効がすべて完了している。応答直前の拒否は、拒否したリクエストの副作用（保存済みトークン、失効済みリフレッシュトークン）を残す
+  2. 検査 9（prompt=none → `consent_required`）が `none` と他値の不正な組み合わせにも先に発火し、base の `[validate-prompt-combination]` が返すべき `invalid_request`（OIDC Core 1.0 §3.1.2.1）を覆い隠す。どちらもエラーで fail-closed は保たれるが、RAR 無関係の既存エラー意味論を変えるべきでない
+  3. `invalid_authorization_details` は core の `AuthorizationErrorCode` / `TokenErrorCode` enum に無く、仕様書が投げ方を特定していなかった（core 変更へ誘導されるリスク）。PAR の `as AuthorizationErrorCode` キャストと `TokenEndpointError`（応答全体を運ぶ）という既存の器で実現できることを実測で確認
+- **修正**（いずれも本レビュー内で仕様書・理解資料へ反映済み）:
+  1. 拒否を専用ステップ `[reject-token-request-details]` として feature grant dispatch 群の後・`[validate-grant-type]` の前に移動。他機能（id-jag / token-exchange）の既存拒否が先に効く順序を保ちつつ、すべての副作用に先行させる。セキュリティ要件に「副作用前の拒否」を追加し、reject ステップのテストに「トークンが保存されず提示リフレッシュトークンが失効していないこと」を追加
+  2. 検査 9 を「`none` 単独のときだけ `consent_required`、`none` が他値と組む場合はスキップして prompt も変更しない（base が `invalid_request` で拒否）」に修正
+  3. バリデーション / エラー処理の節に PAR のキャスト先例と `TokenEndpointError` の器、`sanitizeErrorDescription` の通過を明記
+- **U1 の確定**: grantId 紐付けストアは `expiresAt = 発行時刻 + refreshTokenAbsoluteLifetime` の TTL と書き込み時 lazy eviction（ciba の先例）とする。ローテーションが絶対寿命を `originalIssuedAt` 起点で固定するため、有効なリフレッシュトークンが存在する間にエントリは消えず §7 MUST と両立。リフレッシュトークン非発行 grant の TTL までの過剰保持は Docs の既知の制約に記載
+- **U3 の確定**: `parseRequestObject` はペイロードを JSON デコードした `Record<string, unknown>` を返すため、Request Object 経由の値はパース済み JSON 配列、クエリ / PAR 経由は文字列。公開 API を `parseAuthorizationDetailsInput(input: unknown, limits)` に変更し、文字列は生文字列でバイト長検査後にパース、パース済み値は `JSON.stringify` でバイト長を測る入口に統一
+- **確認して問題なしとした項目**: prompt への `consent` 付与は `offline_access` の発行条件を広げない（発行判断は grant の scope と client の grant_types のみで、prompt を参照する箇所が core / apps に無い）。`max_age` の鮮度検査は silent / SSO 両経路で prompt と独立しており干渉しない。ログイン経路は常に consent へ hand-off するため、同意スキップは silent / SSO の 2 経路だけで、どちらも prompt 制御で塞がる。同意画面への details 表示は既存の CSRF 防御（validate-csrf-token / reject-cross-origin-post）と JSX エスケープの上に乗る。grantId は authorization_code / refresh_token 両 grant を貫通するため、ローテーション後も details の紐付けが保たれる。エラー文言は両エラークラスの `sanitizeErrorDescription` と固定 ASCII 文言の要件で入力値の反映を防ぐ。package 境界・明示的有効化・CLI 後方互換は Review 1 の確認から変更なし（仕様の変更はステップ分割のみで境界に影響しない）
+- **残リスク**:
+  - U2（E2E デモ型定義の形）が未確定。Review 3 までに確定する
+  - base 変更 3 点（同意画面 optional フィールド、token / introspection 応答の `let` 化）の生成テンプレートへの具体的な波及（nextjs の route.ts 該当行、generator の対象）は Review 3 で実測する
+  - `[reject-token-request-details]` の nextjs 側の配置（route.ts のどの位置に入れるか）は Review 3 の実装着手可否確認で特定する
+- **判定**: Pass with changes（修正は本レビュー内で反映済み。重大指摘 1 は仕様段階で解消したため Blocked にしない）
+- **次回可能日**: 2026-10-29

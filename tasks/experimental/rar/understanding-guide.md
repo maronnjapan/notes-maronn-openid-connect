@@ -8,7 +8,7 @@ RFC 9396 の考え方と、このリポジトリの構造への対応付けを�
 `scope` は空白区切りの文字列の集合で、認可の粒度が「API 全体」や「操作の種類」で止まる。
 「口座 X から 123.50 ユーロを 1 回だけ送金する」のような要求を scope で表すには、値の中に構造を埋め込む独自規約（`payment:123.50:EUR` のような文字列）を発明するしかなく、相互運用できない。
 
-**Rich Authorization Requests（RAR）** は、この構造を `authorization_details` という JSON 配列パラメータとして標準化した。
+**Rich Authorization Requests(RAR)** は、この構造を `authorization_details` という JSON 配列パラメータとして標準化した。
 各要素は `type` フィールドで意味を宣言するオブジェクトで、金額、口座、操作、期間のような型固有フィールドを持てる。
 OP の仕事は、要素を検証し、ユーザーに見せ、承認された内容をトークンと一緒に資源サーバーへ届けることである。
 
@@ -45,8 +45,8 @@ OP の仕事は、要素を検証し、ユーザーに見せ、承認された�
 ## 失敗フロー
 
 - 不正な JSON、未知 type、上限超過 → `error=invalid_authorization_details` でクライアントへリダイレクト。
-- `prompt=none` と details の併用 → `error=consent_required`。details は毎回ユーザーの同意を要するという本機能のポリシーによる。
-- トークンリクエストに `authorization_details` を載せる → 400 の `invalid_authorization_details`。narrowing（§6）は非対応で、黙殺せず明示拒否する。
+- `prompt=none` と details の併用 → `error=consent_required`。details は毎回ユーザーの同意を要するという本機能のポリシーによる。`none` が他の prompt 値と組むリクエストはもともと OIDC Core 違反なので、本機能は手を出さず、base の検査が従来どおり `invalid_request` で拒否する。
+- トークンリクエストに `authorization_details` を載せる → 400 の `invalid_authorization_details`。narrowing（§6）は非対応で、黙殺せず明示拒否する。拒否はトークンの発行・保存やリフレッシュトークンのローテーションが起きる前のステップで確定する。id-jag や token-exchange など他機能が応答する grant では、各機能の既存拒否（`invalid_request`）が先に効く。
 - 型定義が一つも設定されていない OP へ details を送る → すべて拒否。discovery に `authorization_details_types_supported` が無いことが「送るな」の合図になる（§10）。
 
 ## セキュリティモデルと脅威対策

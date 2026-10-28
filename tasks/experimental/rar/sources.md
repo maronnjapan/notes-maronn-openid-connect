@@ -18,7 +18,7 @@
 
 | タイトル | 発行元 | URL | 種別 | 使用内容 | 確認日 |
 |---|---|---|---|---|---|
-| RFC 9396 §12 Security Considerations / §13 Privacy Considerations | IETF | https://datatracker.ietf.org/doc/html/rfc9396#section-12 | Normative 内 | sanitize の MUST、改ざん保護に request object / PAR を使う示唆、RFC 8259 準拠の文字列比較（正規化しない）、機微データのログ・リファラ漏えい防止、同意画面でのデータ露出への注意 | 2026-10-21 |
+| RFC 9396 §12 Security Considerations / §13 Privacy Considerations | IETF | https://datatracker.ietf.org/doc/html/rfc9396#section-12 | Normative 内 | sanitize の MUST、改ざん保護に request object / PAR を使う示唆、RFC 8259 準拠の文字列比較（正規化しない）、機微データのログ・リファラ漏えい防止、同意画面でのデータ露出への注意 | 2026-10-21 / 2026-10-28（Review 2 で §12・§13 の MUST / 非規範の別を再確認） |
 
 ## 相互運用性情報
 
@@ -40,6 +40,14 @@
 | `packages/cli/src/registry.ts`（`FEATURE_REGISTRY` 51〜68 行、`EXPERIMENTAL_FEATURES` 161 行） | CLI 統合の追加先と、既存 9 機能の登録形式 |
 | `packages/experimental/src/id-jag/issue-id-jag.ts`（434 行）ほか | id-jag / token-exchange が `authorization_details` を明示拒否していることの実測（本機能との整合確認） |
 | `tasks/T-019-dpop.md` / `tasks/experimental/done/*` | 候補の重複確認（DPoP は core タスクとして予約済み、実装済み 9 機能と非重複） |
+| `packages/core/src/request-object.ts`（`parseRequestObject` 64〜101 行。2026-10-28 時点の main） | ペイロードを JSON デコードした `Record<string, unknown>` を返すことの実測（U3 の確定根拠） |
+| `apps/hono/src/oidc-provider/endpoints/token/pipeline.ts`（dispatch 群 48〜66 行、発行・保存・ローテーション 90〜116 行） | feature grant dispatch と副作用ステップの順序の実測（`[reject-token-request-details]` の配置根拠） |
+| `apps/hono/src/oidc-provider/endpoints/token/steps/respond-error.ts` | `TokenEndpointError` が応答全体を運び `respondTokenError` が素通しすることの実測（トークンエンドポイントの `invalid_authorization_details` の器） |
+| `apps/hono/src/oidc-provider/features/par/steps/resolve-pushed-request.ts`（64 行） | `error.code as AuthorizationErrorCode` で enum 外コードを投げる先例（認可エンドポイントの `invalid_authorization_details` の投げ方） |
+| `apps/hono/src/oidc-provider/features/refresh-token/steps/issue-refresh-token.ts`（73 行）と `config.ts`（`refreshTokenAbsoluteLifetime` 既定 7776000） | 絶対寿命が `originalIssuedAt` 起点で固定されることの実測（U1 の TTL 設計の根拠） |
+| `packages/experimental/src/ciba/store.ts`（lazy eviction 133〜197 行） | in-memory ストアの書き込み時 lazy eviction の先例（U1 の掃除方式） |
+| `apps/hono/src/oidc-provider/endpoints/login/steps/hand-off-to-consent.ts` / `discard-session-for-fresh-login.ts` | ログイン経路が常に consent へ hand-off し、prompt=consent がセッションを破棄しないことの実測（prompt 制御方式が max_age / 再認証系と干渉しないことの確認） |
+| `apps/hono/src/oidc-provider/features/refresh-token/steps/decide-refresh-token-issuance.ts` ほか offline_access 参照箇所（core / apps を grep） | `offline_access` の付与が `prompt=consent` を前提条件にしていないことの確認（`consent` 付与が refresh token 発行条件を広げないことの根拠） |
 
 ## 二次資料
 
