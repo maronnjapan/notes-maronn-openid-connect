@@ -7,7 +7,7 @@
 ## 背景
 
 `validateRedirectUrisForApplicationType` の JSDoc 最終段落が「application_type を省略した登録には、core の規則（validateRegisteredRedirectUris）だけが掛かる」と説明している。
-しかし PR #160（コミット 936hd05 ではなく 936df05）で `validateClientMetadata` は省略時を `web` として扱い、同関数で種別制約を検査するようになった。
+しかし PR #160（コミット 936df05）で `validateClientMetadata` は省略時を `web` として扱い、同関数で種別制約を検査するようになった。
 これは OIDC Dynamic Client Registration 1.0 §2 の MUST（省略時の既定 web、redirect_uris の種別制約の確認）に合わせた変更で、コードが正しい。
 コメントを信じて「省略時は種別検査を飛ばす」よう修正されると仕様違反へ戻るため、コメント側を直す。
 
