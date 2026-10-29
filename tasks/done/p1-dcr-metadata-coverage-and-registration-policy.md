@@ -15,10 +15,10 @@ Dynamic Client Registration（RFC 7591、PR #131）は、理解するメタデ�
 ## 対象ファイル
 
 - `packages/experimental/src/dynamic-client-registration/`（`registration-error.ts`、`metadata-values.ts`、`registration-request.ts`、`software-statement.ts`、`registered-client.ts`、`index.ts`、各テスト、`test-helpers.ts`）
-- `apps/hono/src/oidc-provider/features/dynamic-client-registration/`（`config.ts`、`policy.ts`、`store.ts`、`feature.ts`、`endpoints/register/` のステップ）と `apps/hono/src/settings.ts`
+- `apps/hono/src/oidc-provider/features/dynamic-client-registration/`（`config.ts`、`store.ts`、`feature.ts`、`endpoints/register/` のステップ）と `apps/hono/src/settings.ts`
 - `apps/nextjs/src/app/(dynamic-client-registration)/register/route.ts`、`apps/nextjs/src/app/_oidc-provider/features/dynamic-client-registration/`、`apps/nextjs/src/app/_oidc-provider/feature.ts`（`ProviderContext.clientKeyResolver`）、`provider.ts`、`settings.ts`
-- `samples/hono-cloudflare` と `samples/express-flyio` の手書き `app.ts`（`OIDC_DCR_TRUSTED_SOFTWARE_PUBLISHERS_JSON`）、全 sample の再生成
-- `tests/e2e/specs/dynamic-client-registration.spec.ts`、`tests/e2e/support/software-publisher.ts`、`tests/e2e/playwright.config.ts`
+- `samples/hono-cloudflare` と `samples/express-flyio` の手書き `app.ts`（`OIDC_DCR_MAX_CLIENTS` だけを読む）、全 sample の再生成
+- `tests/e2e/specs/dynamic-client-registration.spec.ts`、`tests/e2e/playwright.config.ts`
 - `docs/library-document/src/content/docs/experimental/dynamic-client-registration.md`、`.changeset/cli-dcr-metadata-and-policy.md`
 - notes リポジトリ: `implementation-guides/experimental/dynamic-client-registration.{ja,en}.md`、`tasks/experimental/done/dynamic-client-registration/specification.md` の追補
 
@@ -39,8 +39,8 @@ Dynamic Client Registration（RFC 7591、PR #131）は、理解するメタデ�
 - [x] 受理するメタデータを RFC 7591 §2 と OIDC Registration 1.0 §2 のうち OP が解釈または表示用に保持できるものへ広げる（`scope`、`client_uri`、`logo_uri`、`tos_uri`、`policy_uri`、`contacts`、`software_id`、`software_version`、`application_type`、`default_max_age`、`id_token_signed_response_alg`、`userinfo_signed_response_alg`、`jwks`）。URL を取得しに行くメタデータは引き続き無視する
 - [x] `grant_types` と `response_types` の整合（RFC 7591 §2.1 / OIDC Registration §2）を検査し、生成コードは OP が答える response_type（`supportedResponseTypes()` / `responseTypesOf(features)`）と grant（`tokenGrantsOf(features)`、implicit を答えるときの `implicit`）を渡す
 - [x] 標準外のメタデータを `customMetadata`（名前と検証関数の表）で受理する。値は 201 応答と `RegisteredClient.registrationMetadata` に現れる
-- [x] software statement を `verifySoftwareStatement`（core の `parseRequestObject` で署名検証。発行者の承認、`iss`、`exp` / `nbf`）と `applySoftwareStatement` で扱い、`ClientRegistrationError` に 2 つのコードを足す。既定では発行者を承認せず、statement を送る登録は `unapproved_software_statement` になる
-- [x] 登録の判定を生成コードの `policy.ts` に関数として生成し（`verifyRegistrationInitialAccessToken`、`verifyRegistrationSoftwareStatement`、`customClientMetadata`）、`config.ts` の既定値として持たせる。Hono / Express / Fastify は `applyOidc` の `dynamicClientRegistration` オプション、Next.js は `extendDynamicClientRegistrationConfig()` から差し込める
+- [x] software statement は、設定の省略可能な関数 `verifySoftwareStatement` が検証して返した主張を `applySoftwareStatement` で平文の値へ優先して適用し、`ClientRegistrationError` に 2 つのコードを足す。関数が無い既定では statement を無視し（RFC 7591 §3.1.1）、関数がある OP は `software_statement` の無い登録を `invalid_client_metadata` で断る。statement の中身は RFC 7591 が `iss` 以外の必須項目を定めないため、生成コードは検査しない
+- [x] initial access token の判定を設定の省略可能な関数 `verifyInitialAccessToken` に委ねる。関数がある OP は Bearer トークン（RFC 6750 §2.1）の無い登録を 401 で断り、トークンの可否は関数が決める。生成コードに検証の既定実装（固定文字列の定数時間比較、発行者リストによる署名検証）は置かない。信頼の基準は配備ごとに違い、本番の形になり得ないためである。`customClientMetadata` と合わせて `config.ts` の設定にあり、Hono / Express / Fastify は `applyOidc` の `dynamicClientRegistration` オプション、Next.js は `extendDynamicClientRegistrationConfig()` から渡せる
 - [x] オプションで渡した一覧（認証方式、grant、`jwks` の用途、信頼する発行者）とカスタムメタデータの表は既定に追加し、数値や文字列と判定関数は置き換える（`extendDynamicClientRegistrationConfig`）。利用者が生成コードの許す値を書き写さずに足せるようにする
 - [x] `client_secret` を secret 系の認証方式にだけ発行し、`tokenEndpointAuthMethods` の拡張で `private_key_jwt` などを登録できるようにする
 - [x] ストアのレコードを `db/` の `ClientRegistration` と同じ形にし、`jwks` の鍵を用途別に持ち、`withDynamicallyRegisteredClientKeys` で鍵解決に合成する。Next.js の `ProviderContext` に `clientKeyResolver` を加える
@@ -57,7 +57,7 @@ statement 自体は `software_statement` としてそのまま応答に返し、
 | 要件 | 出典 | 実装 |
 |---|---|---|
 | 理解しないメタデータは無視する | RFC 7591 §2、OIDC Registration §3.2 | `validateClientMetadata` の allowlist-pick |
-| software statement は署名された JWT で `iss` を持つ | RFC 7591 §2.3 | `verifySoftwareStatement`（3 セグメント、`iss`、発行者の鍵で署名検証、`alg: none` を許さない） |
+| software statement は署名された JWT で `iss` を持つ | RFC 7591 §2.3 | 設定に渡した `verifySoftwareStatement` の責務（生成コードは検証しない。関数が無ければ statement を無視する） |
 | statement の値は平文の値に優先する | RFC 7591 §3.1.1 | `applySoftwareStatement` |
 | 登録した全メタデータを返し、statement はそのまま、使った要素はトップレベルにも返す | RFC 7591 §3.2.1 | `buildClientRegistrationResponse`（発行値 + `metadata`） |
 | `client_secret` を発行したら `client_secret_expires_at` を返す | RFC 7591 §3.2.1、OIDC Registration §3.2 | `buildClientRegistrationResponse`（0 = 無期限） |
@@ -69,7 +69,7 @@ statement 自体は `software_statement` としてそのまま応答に返し、
 | AS が適用した既定値は応答に含める | OIDC Registration §3.2 | `token_endpoint_auth_method`、`grant_types`、`response_types`、`application_type`、`id_token_signed_response_alg` を `metadata` に書き込む |
 | `client_id` は他のクライアントに有効でない。`client_secret` を複数クライアントに割り当てない | OIDC Registration §3.2 | `dcr-` 名前空間 + 128 ビット乱数、256 ビット乱数の secret |
 | `registration_client_uri` と `registration_access_token` は両方返すか両方返さない | OIDC Registration §3.2 | どちらも返さない（RFC 7592 は非目標） |
-| initial access token は Bearer トークンとして受け付ける | OIDC Registration §3 | `verifyRegistrationInitialAccessToken`（`Authorization: Bearer`） |
+| initial access token は Bearer トークンとして受け付ける | OIDC Registration §3 | `readBearerToken`（RFC 6750 §2.1 の形式）で読み、設定に渡した `verifyInitialAccessToken` が可否を決める |
 | 登録エンドポイントとの通信は TLS | RFC 7591 §5、OIDC Registration §9 | 配備側（リバースプロキシ / プラットフォーム）の責務 |
 
 `sector_identifier_uri`（OIDC Registration §5 の登録時検証）は、`subject_types_supported` が `public` だけの OP では効果が無いため理解せず無視する。

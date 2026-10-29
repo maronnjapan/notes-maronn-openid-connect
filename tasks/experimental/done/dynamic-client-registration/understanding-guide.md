@@ -179,7 +179,7 @@ curl -X POST http://localhost:3000/register \
 # 返ってきた client_id / client_secret でそのまま Authorization Code Flow を実行する
 ```
 
-initial access token を要求したい場合は、生成された `dynamicClientRegistrationConfig` の `initialAccessToken` に値を設定し、登録リクエストへ `Authorization: Bearer <値>` を付ける。
+initial access token を要求したい場合は、生成された `dynamicClientRegistrationConfig` の `verifyInitialAccessToken` にトークンを判定する関数を設定し、登録リクエストへ `Authorization: Bearer <トークン>` を付ける。生成コードはトークンを自分では検証しない。
 
 ## 一次資料の読み方ガイド
 

@@ -20,12 +20,12 @@ An OP generated with `--enable dynamic-client-registration` serves `POST /regist
 ```text
 Client                                 OP (generated code + experimental/dynamic-client-registration + core)
  |                                       |
- |-- POST /register -------------------->| (1) registration policy (policy.ts): constant-time comparison of the
- |   Content-Type: application/json      |     initial access token by default; a refusal is 401 (nothing registered)
+ |-- POST /register -------------------->| (1) may the request register? with verifyInitialAccessToken in the config,
+ |   Content-Type: application/json      |     a Bearer token is required and handed to it; a refusal is 401. Open otherwise
  |   {"redirect_uris": [...],            | (2) Content-Type, body size and JSON shape (400 on a violation);
  |    "software_statement": "...", ...}  |     the software_statement is split from the plain metadata
- |                                       | (3) with a software statement: verify the publisher's signature and
- |                                       |     apply the asserted metadata over the plain values
+ |                                       | (3) with verifySoftwareStatement in the config, a statement is required and
+ |                                       |     handed to it; its claims go over the plain values. Ignored otherwise
  |                                       | (4) allowlist-pick of the understood fields, value checks, defaults,
  |                                       |     grant_types / response_types consistency, custom metadata
  |                                       | (5) mint client_id (and client_secret for secret-based auth methods)
@@ -50,10 +50,10 @@ Everything that validates a registered client (PKCE, exact `redirect_uri` match,
 
 Implemented:
 
-- `POST /register` (RFC 7591 §3), open by default, with the registration policy decided by the generated `policy.ts`
+- `POST /register` (RFC 7591 §3), open by default; whether an initial access token is required depends on whether the config holds a verifier function
 - Validation and defaults for the metadata of RFC 7591 §2 and OIDC Dynamic Client Registration 1.0 §2 that the OP interprets or keeps for display: `redirect_uris`, `token_endpoint_auth_method`, `grant_types`, `response_types`, `scope`, `client_name`, `client_uri`, `logo_uri`, `tos_uri`, `policy_uri`, `contacts`, `software_id`, `software_version`, `application_type`, `default_max_age`, `id_token_signed_response_alg`, `userinfo_signed_response_alg`, `jwks`
 - The consistency of `grant_types` and `response_types` (RFC 7591 §2.1); every response type this OP answers, Implicit Flow and Hybrid Flow included, is registrable
-- Software statements (RFC 7591 §2.3 / §3.1.1): signature verification, application, and the `invalid_software_statement` / `unapproved_software_statement` answers (§3.2.2)
+- Software statements (RFC 7591 §2.3 / §3.1.1): the claims a configured verifier function returns are applied over the plain values, and the `invalid_software_statement` / `unapproved_software_statement` it throws are answered (§3.2.2); without a function the statement is ignored
 - Custom metadata beyond the standard fields, validated by functions supplied from outside the package
 - The issued values (`dcr-`-prefixed `client_id`, 256-bit `client_secret`) and the §3.2.1 201 response
 - An in-memory store of dynamic registrations, composed into the configured client resolution and key resolution
@@ -62,39 +62,42 @@ Implemented:
 Non-goals:
 
 - RFC 7592 (reading, updating and deleting a registration). OIDC Dynamic Client Registration 1.0 §3.2 requires `registration_access_token` and `registration_client_uri` to be returned both or neither; this feature returns neither
-- Issuing initial access tokens or software statements; both are only verified
+- Issuing or verifying initial access tokens and software statements; both are the job of functions supplied through the OP's config, and the feature only reads the Bearer token and applies the asserted claims
 - Metadata the OP would have to fetch: `jwks_uri`, `sector_identifier_uri`, `request_uris` and the like are ignored as metadata the OP does not understand, because fetching opens an SSRF surface (only `jwks` next to `jwks_uri` is refused, per the §2 MUST NOT)
 - Per-IP rate limiting (a MAY of RFC 7591 §5); the feature only has the inventory cap and the body size cap, and leaves flow control to the deployment layer
 
 ## Design approach
 
 The implementation separates decision from execution.
-The experimental package holds pure functions that touch neither HTTP nor a store: parsing the registration request, verifying and applying a software statement, validating the metadata and applying defaults, building the registration record and the 201 response, and comparing the initial access token.
+The experimental package holds pure functions that touch neither HTTP nor a store: parsing the registration request, applying a software statement, validating the metadata and applying defaults, building the registration record and the 201 response, and reading the Bearer token of the Authorization header.
 The HTTP entry point, the store, the inventory cap, and the decision of *what this OP lets a client register* belong to the generated code; the experimental functions always receive the allowed values as options.
 That split keeps OP-specific facts (the response types and grants it answers, the algorithms of its signing keys) out of the experimental package.
 
 Core is unchanged.
-The feature uses only its public API: `validateRegisteredRedirectUris`, `normalizeResponseType`, `responseTypeIncludes`, `parseRequestObject` and `generateRandomString`.
-`validateRegisteredRedirectUris` applies the same `redirect_uris` rules as for static clients; `parseRequestObject` parses a compact JWS and verifies it against a JWK Set, which is exactly what a software statement needs.
-The constant-time comparison duplicates core's internal `timingSafeEqual` (core does not export it, and duplication between experimental features is the accepted policy).
+The feature uses only its public API: `validateRegisteredRedirectUris`, `normalizeResponseType`, `responseTypeIncludes` and `generateRandomString`.
+`validateRegisteredRedirectUris` applies the same `redirect_uris` rules as for static clients.
+Verifying an initial access token or a software statement is not part of the feature.
+RFC 7591 defines the trust criteria of neither (§2.3: "beyond the scope of this specification"), so both are the job of functions supplied through the OP's config.
 
 The threat model is one fact: an endpoint anyone can write to without authentication.
 Most design decisions follow from it.
 
 - **Understood fields are allowlist-picked, and prototype-path keys stay inert.** The RFC 7591 §2 MUST ("ignore metadata it does not understand") is met by picking the known fields into a new object, never by spreading the parsed body. Wherever an object is built from request-supplied names (reading the body, applying a software statement, registering custom metadata) the value is defined as an own property with `Object.defineProperty`, so a `__proto__` key cannot swap the prototype
 - **Only values this OP answers are registrable.** `response_types` is bounded to what discovery advertises as `response_types_supported`, `grant_types` to the configured list filtered by what the OP answers (`authorization_code`, the grants of the generated features, `implicit` while a feature answers an implicit response type), and `*_signed_response_alg` to the algs of the signing keys. A client that registers but cannot use what it registered is never created, and the RFC 7591 §2.1 SHOULD (do not let a client register an inconsistent state) is enforced as `invalid_client_metadata` for the same reason
-- **A software statement starts with the publisher.** The `iss` is read before the signature is verified; an issuer that is not approved gets `unapproved_software_statement`. Key selection is never left to the statement's header: only the keys and algorithms configured for that publisher verify it. No publisher is approved as generated, so a registration carrying a `software_statement` is refused. RFC 7591 §3.1.1 lets an OP that does not support statements ignore them, but an OP that has the machinery and silently passes a statement it cannot verify would let the client believe the asserted metadata was registered
+- **An initial access token and a software statement are required only when the config holds a function for them, and that function alone verifies them.** RFC 7591 §3.1 recommends open registration by default, and §3.1.1 lets an OP that does not support statements ignore them. Without a function, that plain behavior is what the OP does; with one, a request lacking the corresponding value (the Bearer token, the `software_statement`) is refused, and the function decides whether the presented value is acceptable. RFC 7591 requires nothing inside a statement but `iss` (§2.3), and the feature examines its content not at all. No default verifier is generated because the trust criteria differ per deployment: a fixed-string comparison or a publisher list can never be the production shape
 - **`client_id` is a `dcr-`-prefixed random value the request cannot choose.** Static client ids are named by people (`example-client` in the samples), so the fixed prefix separates the namespaces and an existing client can never be overwritten
 - **`scope` is registered and becomes the client's allow list.** Core rejects, with `invalid_scope`, any scope outside `ClientInfo.scope` of a client that has one; validating and storing the registered scope gives dynamic registrations the same least privilege as static clients. When custom scopes are declared with `--scope`, a value outside the standard and declared scopes is refused, so the 201 response never promises what discovery does not advertise
 - **A `client_secret` is minted for secret-based methods only.** `none` is a public client with no secret, and a key-based method such as `private_key_jwt` is confidential without one. The list of methods that get a secret (`client_secret_basic`, `client_secret_post`, `client_secret_jwt` by default) is an option
 - **The inventory cap answers 429, not `invalid_client_metadata`.** The RFC 7591 §3.2.2 vocabulary describes faulty metadata. A 400 for a full inventory would tell the client "fix the metadata and retry", and the retry loop would amplify the very DoS surface the cap closes. No `Retry-After` either: the cap is a stock ceiling, not a rate, so no recovery time can be promised
-- **401 follows the two shapes of RFC 6750 §3.1.** A request without an `Authorization` header gets a bare challenge (the SHOULD NOT of §3.1), one that presented credentials gets `error="invalid_token"`. What matters is that nothing about the expected token (its length, a partial match) reaches the response
+- **401 follows the two shapes of RFC 6750 §3.1.** A request without a Bearer token gets a bare challenge (the SHOULD NOT of §3.1), one whose token the function refused gets `error="invalid_token"`. What matters is that nothing about the expected token (its length, a partial match) reaches the response
 - **`error_description` is fixed ASCII.** No request URI, metadata value or JWT header value is ever reflected, so a validation failure gives an attacker nothing to probe with. The messages that list allowed values (`token_endpoint_auth_method must be one of ...`) only contain configuration
 
-The registration policy lives in the generated `policy.ts` as three functions: initial access token verification, software statement verification, and the custom metadata validator table.
-A project edits that file, or passes functions of the same shape through the `dynamicClientRegistration` option of `applyOidc` (`extendDynamicClientRegistrationConfig()` of `config.ts` in Next.js).
+The registration decisions live in the generated `config.ts` as three settings.
+`verifyInitialAccessToken` and `verifySoftwareStatement` are optional functions, `undefined` as generated.
+A project writes them in `config.ts`, or passes functions of the same shape through the `dynamicClientRegistration` option of `applyOidc` (`extendDynamicClientRegistrationConfig()` of `config.ts` in Next.js).
+`customClientMetadata` is the table of validators for metadata beyond the standard fields.
 A configuration object holding functions that an option can replace follows the precedent of ID-JAG's `actorTokenResolver`.
-`extendDynamicClientRegistrationConfig` applies the option: the lists (auth methods, grants, `jwks` purposes, trusted publishers) and the custom metadata table gain the given values, while the scalar settings and the policy functions are replaced.
+`extendDynamicClientRegistrationConfig` applies the option: the lists (auth methods, grants, `jwks` purposes) and the custom metadata table gain the given values, while the numeric settings and the verifier functions are replaced.
 A deployment therefore only adds what it allows instead of repeating what the generated code allows; taking a value out of a generated list stays an edit of the generated file.
 
 The store follows precedent too.
@@ -492,7 +495,7 @@ Its §2 requires the AS to verify that every registered `redirect_uris` value co
  *
  * 1. parseClientRegistrationBody: ボディ長・JSON・オブジェクト形式の検査。
  *    software_statement（RFC 7591 §2.3）を平文のメタデータから切り離す
- * 2. （software-statement.ts）verifySoftwareStatement で発行者の署名を検証し、
+ * 2. （software-statement.ts）OP の設定に渡した検証関数で statement を検証し、
  *    applySoftwareStatement で主張されたメタデータを平文の値へ優先して重ねる
  * 3. validateClientMetadata: 理解するフィールドの値検査と既定値の適用、
  *    grant_types と response_types の整合検査、カスタムメタデータの検証
@@ -546,9 +549,11 @@ const DEFAULT_MAX_BODY_BYTES = 16384;
  * 登録リクエストボディ（文字列）を読み取る。
  *
  * ボディ長、JSON 構文、オブジェクト形式を検査し、software_statement メンバー
- * （文字列でなければ invalid_software_statement）を平文のメタデータから切り離して
- * 返す。返す metadata はパース結果そのものではなく、software_statement 以外の
- * 自身のプロパティを選び取った新しいオブジェクトである。
+ * （RFC 7591 §3.1.1 は JWT の文字列と定める。文字列でなければ
+ * invalid_software_statement）を平文のメタデータから切り離して返す。文字列の
+ * 中身は見ない。検証は OP の設定に渡した関数の責務である。返す metadata は
+ * パース結果そのものではなく、software_statement 以外の自身のプロパティを
+ * 選び取った新しいオブジェクトである。
  */
 export function parseClientRegistrationBody(
   rawBody: string,
@@ -581,11 +586,8 @@ export function parseClientRegistrationBody(
   if (softwareStatement === undefined) {
     return { metadata };
   }
-  if (typeof softwareStatement !== 'string' || softwareStatement.length === 0) {
-    throw new ClientRegistrationError(
-      'invalid_software_statement',
-      'software_statement must be a JWS compact serialization',
-    );
+  if (typeof softwareStatement !== 'string') {
+    throw new ClientRegistrationError('invalid_software_statement', 'software_statement must be a string');
   }
   return { metadata, softwareStatement };
 }
@@ -838,10 +840,7 @@ export function validateClientMetadata(
     // RFC 7591 §3.2.1: 登録に使った software_statement は、そのまま応答に返す。
     const softwareStatement = metadata['software_statement'];
     if (typeof softwareStatement !== 'string') {
-      throw new ClientRegistrationError(
-        'invalid_software_statement',
-        'software_statement must be a JWS compact serialization',
-      );
+      throw new ClientRegistrationError('invalid_software_statement', 'software_statement must be a string');
     }
     registered['software_statement'] = softwareStatement;
   }
@@ -868,8 +867,8 @@ export interface ValidateClientRegistrationOptions
  *
  * parseClientRegistrationBody と validateClientMetadata を直結し、
  * software_statement は検証せずに無視する（RFC 7591 §3.1.1）。software statement
- * を受け付ける OP は、両関数の間に verifySoftwareStatement と
- * applySoftwareStatement（software-statement.ts）を挟む。
+ * を受け付ける OP は、両関数の間に設定の検証関数と applySoftwareStatement
+ * （software-statement.ts）を挟む。
  */
 export function validateClientRegistrationRequest(
   rawBody: string,
@@ -987,137 +986,41 @@ function validateGrantAndResponseTypeConsistency(grantTypes: readonly string[], 
 }
 ```
 
-### software-statement.ts (verification and application of software statements)
+### software-statement.ts (application of software statements)
 
-`verifySoftwareStatement` checks the compact JWS shape and the `iss`, selects the approved publisher by `iss`, and lets core's `parseRequestObject` verify the signature with that publisher's keys and algorithms.
-No publisher means `unapproved_software_statement`; every other failure is `invalid_software_statement`, worded without the header's `alg` or `kid`.
-`applySoftwareStatement` lays the verified claims over the plain metadata and keeps the statement as the `software_statement` member (RFC 7591 §3.1.1 / §3.2.1).
+The feature verifies no statement.
+`VerifiedSoftwareStatement` is the return type of the verifier function supplied through the OP's config; it holds only the metadata the statement asserts.
+`applySoftwareStatement` lays those claims over the plain metadata and keeps the statement as the `software_statement` member (RFC 7591 §3.1.1 / §3.2.1).
+Any JWT claim left among them is ignored by `validateClientMetadata` as metadata it does not understand.
 
 ```typescript
 /**
  * OAuth 2.0 Dynamic Client Registration (RFC 7591) — software statement
- * （§2.3 / §3.1.1）の検証と適用。
+ * （§2.3 / §3.1.1）の適用。
  *
  * Experimental: このモジュールの API は安定していない。破壊的変更があり得る。
  *
- * software statement は、ソフトウェアの発行者（publisher）が署名した JWT で、
- * クライアントメタデータの集合をひとまとめに主張する。OP は発行者の公開鍵で
- * 署名を検証し（§3.1.1）、主張されたメタデータを平文の値へ優先して適用する。
- * 署名検証は core 公開の parseRequestObject（compact JWS の解析と JWKS による
- * 検証）に委ね、software statement 固有の判断（発行者の承認、iss の必須、
- * exp / nbf、JWT 標準クレームの除去）だけをここに持つ。
+ * software statement は、ソフトウェアの発行者が署名した JWT で、クライアント
+ * メタデータの集合をひとまとめに主張する。どの発行者を信頼し、どう署名を
+ * 確かめるかは RFC 7591 の対象外で（§2.3「信頼の基準は本仕様の範囲外」）、
+ * 本機能は検証を持たない。検証は OP の設定に渡した関数の責務で、その関数が
+ * 返した主張（VerifiedSoftwareStatement）を applySoftwareStatement が平文の
+ * メタデータへ優先して重ねる（§3.1.1 MUST）。検証関数が無い OP は statement
+ * を無視する（§3.1.1 は対応しない AS が無視することを許す）。
  */
 
-import { parseRequestObject, type JwkSet } from '@maronn-openid-connect/core';
-import { defineOwnProperty, isJsonObject } from './metadata-values.js';
-import { ClientRegistrationError } from './registration-error.js';
-
-/** この OP が software statement を受け入れる発行者。 */
-export interface SoftwareStatementPublisher {
-  /** software statement の iss クレームと一致する発行者識別子。 */
-  issuer: string;
-  /** 署名検証に使う発行者の公開鍵。RSA 鍵には alg（RS256 など）が要る。 */
-  jwks: JwkSet;
-  /**
-   * この発行者に受理する JWS アルゴリズム。省略時は RS256 と ES256
-   * （RFC 7591 §2.3 は RS256 を推奨する）。none は受理しない。
-   */
-  algorithms?: readonly string[];
-}
-
-export interface VerifySoftwareStatementOptions {
-  /** 承認した発行者。空なら、どの software statement も unapproved_software_statement になる。 */
-  publishers: readonly SoftwareStatementPublisher[];
-  /** 現在時刻（ミリ秒）。省略時は Date.now。 */
-  now?: () => number;
-}
-
-/** 検証に成功した software statement。 */
-export interface VerifiedSoftwareStatement {
-  /** 発行者（iss クレーム）。 */
-  issuer: string;
-  /**
-   * software statement が主張するクライアントメタデータ。JWT の標準クレーム
-   * （iss / sub / aud / exp / nbf / iat / jti）は含まない。
-   */
-  metadata: Record<string, unknown>;
-}
-
-/** RFC 7591 §2.3 は RS256 を推奨する。core が検証できる RSA / EC の代表値を既定にする。 */
-export const DEFAULT_SOFTWARE_STATEMENT_ALGORITHMS: readonly string[] = ['RS256', 'ES256'];
-
-/** RFC 7519 §4.1 の登録済みクレーム。クライアントメタデータではないので適用しない。 */
-const JWT_REGISTERED_CLAIMS = ['iss', 'sub', 'aud', 'exp', 'nbf', 'iat', 'jti'];
-
-function invalidStatement(description: string): ClientRegistrationError {
-  return new ClientRegistrationError('invalid_software_statement', description);
-}
+import { defineOwnProperty } from './metadata-values.js';
 
 /**
- * software statement を検証し、主張されたメタデータを返す。
+ * 検証に成功した software statement。OP の設定に渡した検証関数が返す。
  *
- * 1. compact JWS（3 セグメント）で、ペイロードが iss を持つ JSON オブジェクトであること。
- *    違反は invalid_software_statement
- * 2. iss が publishers のいずれかと一致すること。一致しなければ
- *    unapproved_software_statement（RFC 7591 §3.2.2）
- * 3. その発行者の鍵と許可アルゴリズムで署名が検証できること。失敗は
- *    invalid_software_statement。文言は固定で、ヘッダの alg や kid を反映しない
- * 4. exp があれば未来、nbf があれば現在以前であること
- *
- * iss は署名検証の前に読む（どの鍵で検証するかを決めるため）が、返す値はすべて
- * 検証後のペイロードから取る。
+ * metadata は、statement が主張するクライアントメタデータ。ここに残した
+ * JWT の標準クレーム（iss / exp など）は validateClientMetadata が理解しない
+ * メタデータとして無視するので、取り除く必要はない。RFC 7591 が statement
+ * の中身に定める必須項目は無く、本機能も中身を検査しない。
  */
-export async function verifySoftwareStatement(
-  softwareStatement: string,
-  options: VerifySoftwareStatementOptions,
-): Promise<VerifiedSoftwareStatement> {
-  const segments = softwareStatement.split('.');
-  if (segments.length !== 3) {
-    throw invalidStatement('software_statement must be a JWS compact serialization');
-  }
-  const unverifiedPayload = decodeJsonSegment(segments[1] as string);
-  const issuer = unverifiedPayload['iss'];
-  if (typeof issuer !== 'string' || issuer.length === 0) {
-    throw invalidStatement('software_statement must carry an iss claim');
-  }
-
-  const publisher = options.publishers.find((candidate) => candidate.issuer === issuer);
-  if (publisher === undefined) {
-    throw new ClientRegistrationError(
-      'unapproved_software_statement',
-      'the issuer of the software_statement is not approved by this authorization server',
-    );
-  }
-
-  let payload: Record<string, unknown>;
-  try {
-    payload = await parseRequestObject(softwareStatement, {
-      jwks: publisher.jwks,
-      supportedSigningAlgs: [...(publisher.algorithms ?? DEFAULT_SOFTWARE_STATEMENT_ALGORITHMS)].filter(
-        (alg) => alg !== 'none',
-      ),
-      allowUnsigned: false,
-    });
-  } catch {
-    throw invalidStatement('the signature of the software_statement could not be verified');
-  }
-
-  const nowSeconds = Math.floor((options.now ?? Date.now)() / 1000);
-  const exp = payload['exp'];
-  if (exp !== undefined && (typeof exp !== 'number' || exp <= nowSeconds)) {
-    throw invalidStatement('the software_statement has expired');
-  }
-  const nbf = payload['nbf'];
-  if (nbf !== undefined && (typeof nbf !== 'number' || nbf > nowSeconds)) {
-    throw invalidStatement('the software_statement is not yet valid');
-  }
-
-  const metadata: Record<string, unknown> = {};
-  for (const [name, value] of Object.entries(payload)) {
-    if (JWT_REGISTERED_CLAIMS.includes(name)) continue;
-    defineOwnProperty(metadata, name, value);
-  }
-  return { issuer: payload['iss'] as string, metadata };
+export interface VerifiedSoftwareStatement {
+  metadata: Record<string, unknown>;
 }
 
 /**
@@ -1125,7 +1028,8 @@ export async function verifySoftwareStatement(
  *
  * RFC 7591 §3.1.1: software statement のメタデータは平文の同名メタデータに優先する。
  * 返すオブジェクトは software_statement メンバーに元の JWT 文字列を持ち、
- * validateClientMetadata がそれを応答へ返す（§3.2.1 の MUST）。
+ * validateClientMetadata がそれを応答へ返す（§3.2.1 の MUST）。statement の
+ * 中に software_statement という名のクレームがあっても、外側の JWT 文字列が勝つ。
  */
 export function applySoftwareStatement(
   metadata: Readonly<Record<string, unknown>>,
@@ -1142,24 +1046,6 @@ export function applySoftwareStatement(
   }
   merged['software_statement'] = softwareStatement;
   return merged;
-}
-
-/** base64url の JSON セグメントをオブジェクトとして読む。読めなければ invalid_software_statement。 */
-function decodeJsonSegment(segment: string): Record<string, unknown> {
-  let decoded: unknown;
-  try {
-    const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    decoded = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    throw invalidStatement('software_statement must be a JWS compact serialization');
-  }
-  if (!isJsonObject(decoded)) {
-    throw invalidStatement('software_statement must be a JWS compact serialization');
-  }
-  return decoded;
 }
 ```
 
@@ -1320,92 +1206,44 @@ export function buildClientRegistrationResponse(
 }
 ```
 
-### initial-access-token.ts (initial access token comparison)
+### bearer-token.ts (reading the Bearer token)
 
-Reads the Bearer header of RFC 6750 §2.1 and compares it with the expected value in constant time.
-Choosing between the two 401 shapes by header presence is the generated code's job, since it knows the headers.
+Reads the token of an RFC 6750 §2.1 Bearer header.
+A missing header, another scheme or a malformed value yields `undefined`, which the generated code answers with the bare 401 challenge ("no token presented").
+Whether the token is acceptable is for the configured function to decide.
 
 ```typescript
 /**
- * OAuth 2.0 Dynamic Client Registration (RFC 7591) — initial access token の照合。
+ * OAuth 2.0 Bearer Token Usage (RFC 6750) — Authorization ヘッダの読み取り。
  *
  * Experimental: このモジュールの API は安定していない。破壊的変更があり得る。
  *
- * RFC 7591 §3.1 はオープン登録（認可なし）を既定の推奨としつつ、登録に事前
- * 資格を要求する OP のために initial access token（OIDC Dynamic Client
- * Registration 1.0 §3）を定義する。本機能は生成コードの設定に置いた固定
- * 文字列 1 つとの照合だけを提供し、トークンの発行や複数トークンの管理は
- * 持たない（仕様書の非目標）。
+ * 登録エンドポイントの initial access token（OIDC Dynamic Client Registration
+ * 1.0 §3）は Bearer トークンとして送られる。本機能はトークンの検証を持たず、
+ * ヘッダからトークンを読み取ることだけを提供する。トークンが正しいかの判定は
+ * OP の設定に渡した関数の責務で、この関数の返り値がその入力になる。
  */
-
-/**
- * Authorization ヘッダの Bearer トークンを期待値と定数時間比較する。
- *
- * ヘッダは RFC 6750 §2.1 の形式（`Bearer` 1 つの SP、b64token）で読む。
- * スキーム名は HTTP の認証スキームとして大文字小文字を区別しない
- * （RFC 9110 §11.1）。形式不正・Bearer 以外のスキーム・空トークンは
- * 不一致として false を返す。ヘッダが無い場合の扱い（エラーコード無しの
- * 401。RFC 6750 §3.1）はヘッダの有無を知る生成コード側の責務。
- *
- * 比較は Web Crypto の HMAC を使った定数時間比較（core 内部の
- * timingSafeEqual と同じ方式。core は同関数を公開していないため本機能内に
- * 持つ。experimental 機能間でコードの重複を許容する方針どおり）。期待
- * トークンの情報（長さ・部分一致）は返り値以外に漏れない。
- */
-export async function verifyInitialAccessToken(
-  authorizationHeader: string,
-  expectedToken: string,
-): Promise<boolean> {
-  if (expectedToken === '') {
-    return false;
-  }
-  const presented = parseBearerToken(authorizationHeader);
-  if (presented === null) {
-    return false;
-  }
-  return timingSafeEqual(presented, expectedToken);
-}
 
 /**
  * RFC 6750 §2.1: `credentials = "Bearer" 1*SP b64token`。
  * b64token は ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" と末尾の "="。
+ * スキーム名は HTTP の認証スキームとして大文字小文字を区別しない（RFC 9110 §11.1）。
  */
 const BEARER_HEADER = /^Bearer +([A-Za-z0-9\-._~+/]+=*)$/i;
 
-function parseBearerToken(authorizationHeader: string): string | null {
-  const match = BEARER_HEADER.exec(authorizationHeader);
-  return match ? (match[1] as string) : null;
-}
-
 /**
- * 2 つの文字列を constant-time で比較する（core の timingSafeEqual の複製）。
+ * Authorization ヘッダの Bearer トークンを返す。
  *
- * 通常の `===` は先頭から一致した長さに応じて応答時間が変わるため、timing
- * attack で 1 文字ずつトークンを漸進的に推測される恐れがある。Web Crypto
- * には timingSafeEqual が無いので、この呼び出し限りのランダム鍵で
- * HMAC-SHA256 をかけ、固定長ダイジェスト同士を XOR ベースで比較する。
+ * ヘッダが無い（undefined / null）、Bearer 以外のスキーム、形式不正のときは
+ * undefined を返し、「トークンの提示なし」として扱う（RFC 6750 §3.1 は、認証
+ * 情報を持たない要求にエラーコードを付けないことを求める）。
  */
-async function timingSafeEqual(a: string, b: string): Promise<boolean> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.generateKey(
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  const [sigA, sigB] = await Promise.all([
-    crypto.subtle.sign('HMAC', key, encoder.encode(a)),
-    crypto.subtle.sign('HMAC', key, encoder.encode(b)),
-  ]);
-  const bytesA = new Uint8Array(sigA);
-  const bytesB = new Uint8Array(sigB);
-  if (bytesA.length !== bytesB.length) {
-    return false;
+export function readBearerToken(authorizationHeader: string | null | undefined): string | undefined {
+  if (authorizationHeader === undefined || authorizationHeader === null) {
+    return undefined;
   }
-  let diff = 0;
-  for (let i = 0; i < bytesA.length; i++) {
-    diff |= bytesA[i]! ^ bytesB[i]!;
-  }
-  return diff === 0;
+  const match = BEARER_HEADER.exec(authorizationHeader);
+  return match ? (match[1] as string) : undefined;
 }
 ```
 
@@ -1424,19 +1262,24 @@ async function timingSafeEqual(a: string, b: string): Promise<boolean> {
  * `--enable dynamic-client-registration` を明示したときのみ生成コードから
  * 利用される。
  *
- * このモジュールは「登録リクエストの解析・software statement の検証と適用・
+ * このモジュールは「登録リクエストの解析・software statement の適用・
  * 登録メタデータの検証と既定値適用・登録レコードと 201 応答の組み立て・
- * initial access token の照合」だけを持つ純関数群で、HTTP にもストアにも
- * 触れない。`redirect_uris` の検査規則、response_type の正規化、JWS の検証、
- * 乱数生成は core 公開 API（validateRegisteredRedirectUris /
- * normalizeResponseType / parseRequestObject / generateRandomString）を使い、
- * クライアントの保存・総数上限・Content-Type 検査・登録できる値の一覧の決定は
- * 生成コード側の責務のまま変えない。
+ * Authorization ヘッダの Bearer トークンの読み取り」だけを持つ純関数群で、
+ * HTTP にもストアにも触れない。`redirect_uris` の検査規則、response_type の
+ * 正規化、乱数生成は core 公開 API（validateRegisteredRedirectUris /
+ * normalizeResponseType / generateRandomString）を使い、クライアントの保存・
+ * 総数上限・Content-Type 検査・登録できる値の一覧の決定は生成コード側の
+ * 責務のまま変えない。
+ *
+ * initial access token と software statement の検証は持たない。どちらも
+ * RFC 7591 が検証の基準を定めないもので、OP の設定に渡した関数の責務である。
+ * 生成コードは、関数が設定されているときだけ対応する値（Bearer トークン、
+ * software_statement）の提示を要求し、無ければ要求しない。
  *
  * スコープ外（非目標）: RFC 7592（登録後の参照・更新・削除、
  * registration_access_token / registration_client_uri はどちらも返さない）、
- * initial access token と software statement の発行、URL 参照系メタデータ
- * （jwks_uri / sector_identifier_uri など）の取得。
+ * initial access token と software statement の発行と検証、URL 参照系
+ * メタデータ（jwks_uri / sector_identifier_uri など）の取得。
  */
 export {
   ClientRegistrationError,
@@ -1460,14 +1303,7 @@ export {
   type ValidatedClientRegistration,
 } from './registration-request.js';
 
-export {
-  applySoftwareStatement,
-  verifySoftwareStatement,
-  DEFAULT_SOFTWARE_STATEMENT_ALGORITHMS,
-  type SoftwareStatementPublisher,
-  type VerifiedSoftwareStatement,
-  type VerifySoftwareStatementOptions,
-} from './software-statement.js';
+export { applySoftwareStatement, type VerifiedSoftwareStatement } from './software-statement.js';
 
 export {
   buildRegisteredClient,
@@ -1477,13 +1313,13 @@ export {
   type DynamicallyRegisteredClient,
 } from './registered-client.js';
 
-export { verifyInitialAccessToken } from './initial-access-token.js';
+export { readBearerToken } from './bearer-token.js';
 ```
 
 ## Unit tests, in full
 
 The tests were written first, TDD style.
-The software statement tests build a publisher key pair with the test-only fixture (`test-helpers.ts`) and assemble the JWS with Web Crypto alone.
+The `jwks` tests build an RSA key pair with the test-only fixture (`test-helpers.ts`) and register its public key as metadata.
 
 ### registration-request.test.ts
 
@@ -1597,22 +1433,22 @@ describe('parseClientRegistrationBody', () => {
       });
     });
 
+    // RFC 7591 §3.1.1 defines the member as a JWT string; its content is for the verifier of the OP.
     it('should reject a software_statement that is not a string with invalid_software_statement', () => {
       expect(() => parseClientRegistrationBody(body({ ...MINIMAL, software_statement: { iss: 'x' } }))).toThrowError(
-        new ClientRegistrationError(
-          'invalid_software_statement',
-          'software_statement must be a JWS compact serialization',
-        ),
+        new ClientRegistrationError('invalid_software_statement', 'software_statement must be a string'),
       );
     });
 
-    it('should reject an empty software_statement with invalid_software_statement', () => {
-      expect(() => parseClientRegistrationBody(body({ ...MINIMAL, software_statement: '' }))).toThrowError(
-        new ClientRegistrationError(
-          'invalid_software_statement',
-          'software_statement must be a JWS compact serialization',
-        ),
-      );
+    it('should hand any string through unexamined, an empty one included', () => {
+      expect(parseClientRegistrationBody(body({ ...MINIMAL, software_statement: '' }))).toEqual({
+        metadata: MINIMAL,
+        softwareStatement: '',
+      });
+      expect(parseClientRegistrationBody(body({ ...MINIMAL, software_statement: 'not-a-jwt' }))).toEqual({
+        metadata: MINIMAL,
+        softwareStatement: 'not-a-jwt',
+      });
     });
   });
 
@@ -2349,10 +2185,7 @@ describe('validateClientMetadata', () => {
 
     it('should reject a software_statement that is not a string', () => {
       expect(() => validateClientMetadata({ ...MINIMAL, software_statement: 1 })).toThrowError(
-        new ClientRegistrationError(
-          'invalid_software_statement',
-          'software_statement must be a JWS compact serialization',
-        ),
+        new ClientRegistrationError('invalid_software_statement', 'software_statement must be a string'),
       );
     });
   });
@@ -2476,249 +2309,47 @@ describe('isClientRegistrationError', () => {
 ### software-statement.test.ts
 
 ```typescript
-import { beforeAll, describe, expect, it } from 'vitest';
-import { ClientRegistrationError } from './registration-error.js';
-import {
-  applySoftwareStatement,
-  verifySoftwareStatement,
-  type SoftwareStatementPublisher,
-} from './software-statement.js';
-import {
-  base64UrlFromJson,
-  generateTestEs256Key,
-  generateTestRs256Key,
-  signTestJwt,
-  tamperSignature,
-  type TestSigningKey,
-} from './test-helpers.js';
+import { describe, expect, it } from 'vitest';
+import { applySoftwareStatement } from './software-statement.js';
 
-/** 承認する発行者の issuer。 */
-const PUBLISHER = 'https://publisher.example.com';
-/** 2026-01-01T00:00:00Z。 */
-const NOW = Date.UTC(2026, 0, 1);
-const now = (): number => NOW;
-
-let publisherKey: TestSigningKey;
-let otherKey: TestSigningKey;
-let ecKey: TestSigningKey;
-let publishers: SoftwareStatementPublisher[];
-
-beforeAll(async () => {
-  publisherKey = await generateTestRs256Key('publisher-key');
-  otherKey = await generateTestRs256Key('other-key');
-  ecKey = await generateTestEs256Key('publisher-ec-key');
-  publishers = [{ issuer: PUBLISHER, jwks: publisherKey.jwks }];
-});
-
-/** 発行者が署名した software statement（RFC 7591 §2.3 の例に沿ったクレーム）。 */
-async function statement(
-  claims: Record<string, unknown> = {},
-  options: { key?: TestSigningKey; header?: Record<string, unknown> } = {},
-): Promise<string> {
-  const key = options.key ?? publisherKey;
-  return signTestJwt({
-    header: { alg: key.jwk.alg, kid: key.jwk.kid, ...options.header },
-    payload: {
-      iss: PUBLISHER,
-      software_id: '4NRB1-0XZABZI9E6-5SM3R',
-      client_name: 'Example Statement-based Client',
-      client_uri: 'https://client.example.net/',
-      ...claims,
-    },
-    privateKey: key.privateKey,
-  });
-}
-
-async function rejectionOf(promise: Promise<unknown>): Promise<ClientRegistrationError> {
-  const error = await promise.then(
-    () => undefined,
-    (reason: unknown) => reason,
-  );
-  expect(error).toBeInstanceOf(ClientRegistrationError);
-  return error as ClientRegistrationError;
-}
-
-describe('verifySoftwareStatement', () => {
-  describe('verified statements (RFC 7591 Section 3.1.1)', () => {
-    it('should return the issuer and the asserted metadata without the JWT claims', async () => {
-      const verified = await verifySoftwareStatement(
-        await statement({ iat: 1_767_225_000, exp: 1_767_226_000, nbf: 1_767_225_000, jti: 'id-1', sub: 'x', aud: 'y' }),
-        { publishers, now },
-      );
-      expect(verified).toEqual({
-        issuer: PUBLISHER,
-        metadata: {
-          software_id: '4NRB1-0XZABZI9E6-5SM3R',
-          client_name: 'Example Statement-based Client',
-          client_uri: 'https://client.example.net/',
-        },
-      });
-    });
-
-    it('should accept a statement without exp and nbf', async () => {
-      const verified = await verifySoftwareStatement(await statement(), { publishers, now });
-      expect(verified.issuer).toBe(PUBLISHER);
-    });
-
-    it('should verify an ES256 statement of a publisher registered with an EC key', async () => {
-      const verified = await verifySoftwareStatement(await statement({}, { key: ecKey }), {
-        publishers: [{ issuer: PUBLISHER, jwks: ecKey.jwks }],
-        now,
-      });
-      expect(verified.metadata['software_id']).toBe('4NRB1-0XZABZI9E6-5SM3R');
-    });
-
-    it('should accept the algorithms a publisher lists', async () => {
-      const verified = await verifySoftwareStatement(await statement(), {
-        publishers: [{ issuer: PUBLISHER, jwks: publisherKey.jwks, algorithms: ['RS256'] }],
-        now,
-      });
-      expect(verified.issuer).toBe(PUBLISHER);
-    });
-  });
-
-  describe('invalid_software_statement (RFC 7591 Section 3.2.2)', () => {
-    const notCompact = new ClientRegistrationError(
-      'invalid_software_statement',
-      'software_statement must be a JWS compact serialization',
-    );
-
-    it.each([
-      ['a plain string', 'not-a-jwt'],
-      ['two segments', 'eyJhbGciOiJSUzI1NiJ9.e30'],
-      ['a payload that is not base64url JSON', 'eyJhbGciOiJSUzI1NiJ9.%%%.sig'],
-      ['a payload that is a JSON array', `eyJhbGciOiJSUzI1NiJ9.${base64UrlFromJson({}).replace(/.*/, 'W10')}.sig`],
-    ])('should reject %s', async (_label, value) => {
-      const error = await rejectionOf(verifySoftwareStatement(value, { publishers, now }));
-      expect(error).toEqual(notCompact);
-    });
-
-    it('should reject a statement without an iss claim', async () => {
-      const error = await rejectionOf(
-        verifySoftwareStatement(
-          await signTestJwt({
-            header: { alg: 'RS256' },
-            payload: { software_id: 'x' },
-            privateKey: publisherKey.privateKey,
-          }),
-          { publishers, now },
-        ),
-      );
-      expect(error).toEqual(
-        new ClientRegistrationError('invalid_software_statement', 'software_statement must carry an iss claim'),
-      );
-    });
-
-    const unverifiable = new ClientRegistrationError(
-      'invalid_software_statement',
-      'the signature of the software_statement could not be verified',
-    );
-
-    it('should reject a tampered signature', async () => {
-      const error = await rejectionOf(verifySoftwareStatement(tamperSignature(await statement()), { publishers, now }));
-      expect(error).toEqual(unverifiable);
-    });
-
-    it('should reject a statement signed by a key the publisher did not register', async () => {
-      const error = await rejectionOf(
-        verifySoftwareStatement(await statement({}, { key: otherKey }), { publishers, now }),
-      );
-      expect(error).toEqual(unverifiable);
-    });
-
-    it('should reject an alg outside the algorithms of the publisher without reflecting it', async () => {
-      const error = await rejectionOf(
-        verifySoftwareStatement(await statement({}, { key: ecKey }), {
-          publishers: [{ issuer: PUBLISHER, jwks: ecKey.jwks, algorithms: ['RS256'] }],
-          now,
-        }),
-      );
-      expect(error).toEqual(unverifiable);
-    });
-
-    // RFC 7515 §6 / RFC 8725 §3.1: an unsigned statement proves nothing.
-    it('should reject an unsigned statement even when none is listed', async () => {
-      const header = base64UrlFromJson({ alg: 'none' });
-      const payload = base64UrlFromJson({ iss: PUBLISHER, software_id: 'x' });
-      const error = await rejectionOf(
-        verifySoftwareStatement(`${header}.${payload}.`, {
-          publishers: [{ issuer: PUBLISHER, jwks: publisherKey.jwks, algorithms: ['none', 'RS256'] }],
-          now,
-        }),
-      );
-      expect(error).toEqual(unverifiable);
-    });
-
-    it('should reject an expired statement', async () => {
-      const error = await rejectionOf(
-        verifySoftwareStatement(await statement({ exp: Math.floor(NOW / 1000) - 1 }), { publishers, now }),
-      );
-      expect(error).toEqual(
-        new ClientRegistrationError('invalid_software_statement', 'the software_statement has expired'),
-      );
-    });
-
-    it('should reject a statement whose exp is not a number', async () => {
-      const error = await rejectionOf(verifySoftwareStatement(await statement({ exp: 'never' }), { publishers, now }));
-      expect(error).toEqual(
-        new ClientRegistrationError('invalid_software_statement', 'the software_statement has expired'),
-      );
-    });
-
-    it('should reject a statement that is not yet valid', async () => {
-      const error = await rejectionOf(
-        verifySoftwareStatement(await statement({ nbf: Math.floor(NOW / 1000) + 60 }), { publishers, now }),
-      );
-      expect(error).toEqual(
-        new ClientRegistrationError('invalid_software_statement', 'the software_statement is not yet valid'),
-      );
-    });
-  });
-
-  describe('unapproved_software_statement (RFC 7591 Section 3.2.2)', () => {
-    const unapproved = new ClientRegistrationError(
-      'unapproved_software_statement',
-      'the issuer of the software_statement is not approved by this authorization server',
-    );
-
-    it('should reject a statement of an issuer that is not a publisher', async () => {
-      const error = await rejectionOf(
-        verifySoftwareStatement(await statement({ iss: 'https://unknown.example.com' }), { publishers, now }),
-      );
-      expect(error).toEqual(unapproved);
-    });
-
-    it('should reject every statement when no publisher is approved', async () => {
-      const error = await rejectionOf(verifySoftwareStatement(await statement(), { publishers: [], now }));
-      expect(error).toEqual(unapproved);
-    });
-
-    it('should decide on the issuer before the signature, so an unapproved issuer never gets a signature verdict', async () => {
-      const error = await rejectionOf(
-        verifySoftwareStatement(tamperSignature(await statement({ iss: 'https://unknown.example.com' })), {
-          publishers,
-          now,
-        }),
-      );
-      expect(error).toEqual(unapproved);
-    });
-  });
-});
+const STATEMENT = 'eyJhbGciOiJSUzI1NiJ9.e30.sig';
 
 describe('applySoftwareStatement', () => {
+  // RFC 7591 §3.1.1: the asserted values win; §3.2.1: the statement is kept for the response.
   it('should let the asserted metadata take precedence over the plain metadata and keep the statement', () => {
     const merged = applySoftwareStatement(
       { redirect_uris: ['https://app.example.com/cb'], client_name: 'Plain Name', scope: 'openid' },
-      'eyJhbGciOiJSUzI1NiJ9.e30.sig',
-      { issuer: PUBLISHER, metadata: { client_name: 'Asserted Name', software_id: 'sw-1' } },
+      STATEMENT,
+      { metadata: { client_name: 'Asserted Name', software_id: 'sw-1' } },
     );
     expect(merged).toEqual({
       redirect_uris: ['https://app.example.com/cb'],
       client_name: 'Asserted Name',
       scope: 'openid',
       software_id: 'sw-1',
-      software_statement: 'eyJhbGciOiJSUzI1NiJ9.e30.sig',
+      software_statement: STATEMENT,
     });
+  });
+
+  // RFC 7591 defines no required claim inside a statement: whatever the verifier returns is applied as is.
+  it('should apply every asserted claim without requiring or dropping any', () => {
+    const merged = applySoftwareStatement({ redirect_uris: ['https://app.example.com/cb'] }, STATEMENT, {
+      metadata: { iss: 'https://publisher.example.com', exp: 1_790_812_800, tenant_id: 'acme' },
+    });
+    expect(merged).toEqual({
+      redirect_uris: ['https://app.example.com/cb'],
+      iss: 'https://publisher.example.com',
+      exp: 1_790_812_800,
+      tenant_id: 'acme',
+      software_statement: STATEMENT,
+    });
+  });
+
+  it('should keep the outer statement when the asserted claims carry a software_statement of their own', () => {
+    const merged = applySoftwareStatement({ redirect_uris: [] }, STATEMENT, {
+      metadata: { software_statement: 'inner.statement.sig' },
+    });
+    expect(merged['software_statement']).toBe(STATEMENT);
   });
 
   it('should build a new object with the Object prototype', () => {
@@ -2726,7 +2357,7 @@ describe('applySoftwareStatement', () => {
       string,
       unknown
     >;
-    const merged = applySoftwareStatement(plain, 'eyJhbGciOiJSUzI1NiJ9.e30.sig', { issuer: PUBLISHER, metadata: {} });
+    const merged = applySoftwareStatement(plain, STATEMENT, { metadata: {} });
     expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
     // The key stays an inert own data property that validateClientMetadata ignores as unknown metadata.
     expect(Object.getOwnPropertyDescriptor(merged, '__proto__')?.value).toEqual({ polluted: true });
@@ -2976,70 +2607,50 @@ describe('buildClientRegistrationResponse', () => {
 });
 ```
 
-### initial-access-token.test.ts
+### bearer-token.test.ts
 
 ```typescript
 import { describe, expect, it } from 'vitest';
-import { verifyInitialAccessToken } from './initial-access-token.js';
+import { readBearerToken } from './bearer-token.js';
 
-const EXPECTED = 'conformance-suite-token-1';
-
-describe('verifyInitialAccessToken', () => {
-  describe('matching', () => {
-    it('should accept the expected token', async () => {
-      await expect(verifyInitialAccessToken(`Bearer ${EXPECTED}`, EXPECTED)).resolves.toBe(true);
-    });
-
-    it('should reject a different token', async () => {
-      await expect(verifyInitialAccessToken('Bearer wrong-token', EXPECTED)).resolves.toBe(false);
-    });
-
-    it('should reject a token that is a prefix of the expected one', async () => {
-      await expect(
-        verifyInitialAccessToken('Bearer conformance-suite-token-', EXPECTED),
-      ).resolves.toBe(false);
-    });
-
-    it('should reject a token that extends the expected one', async () => {
-      await expect(
-        verifyInitialAccessToken(`Bearer ${EXPECTED}1`, EXPECTED),
-      ).resolves.toBe(false);
-    });
+describe('readBearerToken', () => {
+  // RFC 6750 §2.1: credentials = "Bearer" 1*SP b64token.
+  it('should return the token of a Bearer header', () => {
+    expect(readBearerToken('Bearer abc.DEF-ghi_jkl~mno+pqr/stu')).toBe('abc.DEF-ghi_jkl~mno+pqr/stu');
   });
 
-  describe('header shape (RFC 6750 Section 2.1)', () => {
-    it('should accept a lowercase bearer scheme (RFC 9110 Section 11.1 case-insensitivity)', async () => {
-      await expect(verifyInitialAccessToken(`bearer ${EXPECTED}`, EXPECTED)).resolves.toBe(true);
-    });
-
-    it('should accept multiple spaces between scheme and token', async () => {
-      await expect(verifyInitialAccessToken(`Bearer   ${EXPECTED}`, EXPECTED)).resolves.toBe(true);
-    });
-
-    it('should reject a Basic scheme header', async () => {
-      await expect(
-        verifyInitialAccessToken('Basic dXNlcjpwYXNz', EXPECTED),
-      ).resolves.toBe(false);
-    });
-
-    it('should reject a Bearer header without a token', async () => {
-      await expect(verifyInitialAccessToken('Bearer ', EXPECTED)).resolves.toBe(false);
-    });
-
-    it('should reject an empty header value', async () => {
-      await expect(verifyInitialAccessToken('', EXPECTED)).resolves.toBe(false);
-    });
-
-    it('should reject a token with characters outside b64token', async () => {
-      await expect(verifyInitialAccessToken('Bearer bad token', EXPECTED)).resolves.toBe(false);
-    });
+  it('should keep the trailing padding of the token', () => {
+    expect(readBearerToken('Bearer dG9rZW4==')).toBe('dG9rZW4==');
   });
 
-  describe('configuration guard', () => {
-    it('should reject everything when the expected token is empty', async () => {
-      await expect(verifyInitialAccessToken('Bearer ', '')).resolves.toBe(false);
-      await expect(verifyInitialAccessToken('Bearer x', '')).resolves.toBe(false);
-    });
+  // RFC 9110 §11.1: the scheme name is case-insensitive.
+  it('should accept the scheme name in any case', () => {
+    expect(readBearerToken('bearer token-1')).toBe('token-1');
+    expect(readBearerToken('BEARER token-1')).toBe('token-1');
+  });
+
+  it('should accept more than one space between the scheme and the token', () => {
+    expect(readBearerToken('Bearer    token-1')).toBe('token-1');
+  });
+
+  it('should return undefined for a missing header', () => {
+    expect(readBearerToken(undefined)).toBeUndefined();
+    expect(readBearerToken(null)).toBeUndefined();
+  });
+
+  it('should return undefined for another authentication scheme', () => {
+    expect(readBearerToken('Basic dXNlcjpwYXNz')).toBeUndefined();
+  });
+
+  it('should return undefined for a Bearer header without a token', () => {
+    expect(readBearerToken('Bearer')).toBeUndefined();
+    expect(readBearerToken('Bearer ')).toBeUndefined();
+  });
+
+  it('should return undefined for a token outside the b64token syntax', () => {
+    expect(readBearerToken('Bearer two tokens')).toBeUndefined();
+    expect(readBearerToken('Bearer token!')).toBeUndefined();
+    expect(readBearerToken('Bearer =token')).toBeUndefined();
   });
 });
 ```
@@ -3053,8 +2664,8 @@ Excluded by the tsconfig; never reaches `dist`.
  * dynamic-client-registration テスト専用フィクスチャ。
  *
  * tsconfig の exclude 対象なので dist へは出ない（公開 package に載らない）。
- * software statement の発行者を演じるための鍵生成と JWS 組み立てを Web Crypto
- * API だけで行い、edge-runtime 環境のテストでそのまま動くようにしている。
+ * jwks メタデータの検査に使う公開鍵の生成を Web Crypto API だけで行い、
+ * edge-runtime 環境のテストでそのまま動くようにしている。
  */
 import type { Jwk, JwkSet } from '@maronn-openid-connect/core';
 
@@ -3079,15 +2690,6 @@ export async function generateTestRs256Key(keyId: string): Promise<TestSigningKe
   return exportTestKey(keyPair, keyId, 'RS256');
 }
 
-/** ES256 の鍵ペアを生成し、秘密鍵と公開 JWK セットを返す。 */
-export async function generateTestEs256Key(keyId: string): Promise<TestSigningKey> {
-  const keyPair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
-    'sign',
-    'verify',
-  ]);
-  return exportTestKey(keyPair, keyId, 'ES256');
-}
-
 async function exportTestKey(keyPair: CryptoKeyPair, keyId: string, alg: string): Promise<TestSigningKey> {
   const exported = (await crypto.subtle.exportKey('jwk', keyPair.publicKey)) as Record<string, unknown>;
   const jwk = {
@@ -3098,46 +2700,6 @@ async function exportTestKey(keyPair: CryptoKeyPair, keyId: string, alg: string)
     kid: keyId,
   } as Jwk;
   return { privateKey: keyPair.privateKey, jwk, jwks: { keys: [jwk] } };
-}
-
-function base64UrlFromBytes(bytes: Uint8Array): string {
-  let binary = '';
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-export function base64UrlFromJson(value: Record<string, unknown>): string {
-  return base64UrlFromBytes(new TextEncoder().encode(JSON.stringify(value)));
-}
-
-/**
- * 任意のヘッダーとペイロードで compact JWS を組み立てる。alg はヘッダーの値から
- * RSASSA-PKCS1-v1_5（RS256）か ECDSA P-256（ES256）を選ぶ。
- */
-export async function signTestJwt(options: {
-  header: Record<string, unknown>;
-  payload: Record<string, unknown>;
-  privateKey: CryptoKey;
-}): Promise<string> {
-  const encodedHeader = base64UrlFromJson(options.header);
-  const encodedPayload = base64UrlFromJson(options.payload);
-  const signingInput = `${encodedHeader}.${encodedPayload}`;
-  const algorithm =
-    options.header['alg'] === 'ES256' ? { name: 'ECDSA', hash: 'SHA-256' } : { name: 'RSASSA-PKCS1-v1_5' };
-  const signature = await crypto.subtle.sign(
-    algorithm,
-    options.privateKey,
-    new TextEncoder().encode(signingInput),
-  );
-  return `${signingInput}.${base64UrlFromBytes(new Uint8Array(signature))}`;
-}
-
-/** 署名部だけを別の値に差し替える（署名改ざんケース用）。 */
-export function tamperSignature(token: string): string {
-  const [headerB64 = '', payloadB64 = ''] = token.split('.');
-  return `${headerB64}.${payloadB64}.AAAA`;
 }
 ```
 
@@ -3156,7 +2718,6 @@ Disabled by default; the directory below is copied into the output only with `--
 features/dynamic-client-registration/
   feature.ts                                 # route, discovery, context (client and key resolution composed)
   config.ts                                  # settings object, the applyOidc option, the RegisteredClient extension
-  policy.ts                                  # registration policy (initial access token, software statement, custom metadata)
   store.ts                                   # in-memory store, the stored record, the resolver wrappers
   endpoints/register/
     endpoint.ts                              # the steps (the boxes maronn-oidc graph draws)
@@ -3192,8 +2753,9 @@ import {
  * (store.ts) and resolved after the configured clients, so a static
  * registration always wins; the public keys a registration carried (jwks)
  * are handed out by the ClientKeyResolver the same way. Registration
- * management (RFC 7592) is not implemented. Settings and the registration
- * policy are in config.ts and policy.ts.
+ * management (RFC 7592) is not implemented. The settings, the optional
+ * verifier functions (initial access token, software statement) and the
+ * custom metadata are in config.ts.
  *
  * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
  * may change in a breaking way between releases.
@@ -3217,35 +2779,34 @@ export const dynamicClientRegistration = defineFeature({
 ### config.ts
 
 The defaults of the settings object, the `dynamicClientRegistration` option of `createApp` / `applyOidc`, and the `RegisteredClient.registrationMetadata` declaration.
-The registration policy defaults to the functions of `policy.ts`.
+The registration decisions live in the same settings as two optional functions (`verifyInitialAccessToken`, `verifySoftwareStatement`) and the custom metadata table; both functions are `undefined` as generated.
 
 ```typescript
 import type {
   CustomClientMetadataValidator,
-  SoftwareStatementPublisher,
   VerifiedSoftwareStatement,
 } from '@maronn-openid-connect/experimental/dynamic-client-registration';
-import {
-  customClientMetadata,
-  verifyRegistrationInitialAccessToken,
-  verifyRegistrationSoftwareStatement,
-} from './policy.js';
 
 /**
- * Decides whether a registration request may register, from its Authorization
- * header (OIDC Dynamic Client Registration 1.0 §3). true accepts the request;
- * false answers 401 (a bare Bearer challenge without a header, error="invalid_token"
- * with one; RFC 6750 §3.1).
+ * Decides whether a registration request may register, from the Bearer token
+ * of its Authorization header (OIDC Dynamic Client Registration 1.0 §3; RFC
+ * 6750 §2.1). true accepts the request; false answers 401 with
+ * error="invalid_token" (RFC 6750 §3.1). A request without a Bearer token is
+ * answered 401 with a bare challenge before this function runs.
  */
 export type InitialAccessTokenVerifier = (
-  authorization: string | undefined,
+  token: string,
   config: DynamicClientRegistrationConfig,
 ) => Promise<boolean> | boolean;
 
 /**
  * Verifies a software_statement (RFC 7591 §2.3) and returns the metadata it
- * asserts. Throw ClientRegistrationError with invalid_software_statement or
- * unapproved_software_statement to reject it (RFC 7591 §3.2.2).
+ * asserts, which the register endpoint applies over the plain JSON values
+ * (RFC 7591 §3.1.1). Throw ClientRegistrationError with
+ * invalid_software_statement or unapproved_software_statement to reject it
+ * (§3.2.2). RFC 7591 leaves the trust criteria to the server, so this function
+ * alone decides them: which issuers it accepts, how it verifies the signature,
+ * which claims it reads. Nothing in the generated code examines the statement.
  */
 export type SoftwareStatementVerifier = (
   softwareStatement: string,
@@ -3256,14 +2817,8 @@ export type SoftwareStatementVerifier = (
  * Dynamic client registration settings. The dynamicClientRegistration option of
  * createApp() / applyOidc() extends these defaults (feature.ts,
  * extendDynamicClientRegistrationConfig below), so change them here or per
- * deployment there — the policy functions included.
+ * deployment there — the verifier functions included.
  *
- * - initialAccessToken: when set, POST /register requires
- *   `Authorization: Bearer <value>` (OIDC Dynamic Client Registration 1.0 §3).
- *   Unset means open registration (RFC 7591 §3.1 SHOULD). This is one static
- *   secret for PoC use — there is no issuance or rotation. verifyInitialAccessToken
- *   (policy.ts) is the function that reads it; replace it to check tokens of
- *   your own issuance.
  * - maxRegisteredClients: inventory cap on dynamic registrations
  *   (RFC 7591 §5 DoS consideration). The cap answers 429, not
  *   invalid_client_metadata: nothing about the metadata is wrong, so a
@@ -3283,38 +2838,57 @@ export type SoftwareStatementVerifier = (
  * - jwksPurposes: the ClientKeyResolver purposes the jwks of a registration
  *   serves — a registered key verifies signed Request Objects (request_object),
  *   and stands ready for private_key_jwt and DPoP once a project adds them.
- * - trustedSoftwarePublishers: the issuers whose software statements
- *   (RFC 7591 §2.3) are accepted, with the public keys that verify them.
- *   Empty as generated (fail safe): a software_statement is then answered with
- *   unapproved_software_statement.
- * - verifyInitialAccessToken / verifySoftwareStatement / customClientMetadata:
- *   the registration policy, generated into policy.ts. Edit the functions
- *   there, or pass your own through the dynamicClientRegistration option.
+ * - verifyInitialAccessToken: undefined as generated, which leaves registration
+ *   open (RFC 7591 §3.1 SHOULD). Set a function to require an initial access
+ *   token (OIDC Dynamic Client Registration 1.0 §3): POST /register then answers
+ *   401 to a request without a Bearer token, and the function decides whether
+ *   the presented token may register. The generated code verifies no token of
+ *   its own — the token format, its issuance and its lookup are the function's.
+ * - verifySoftwareStatement: undefined as generated, which ignores a
+ *   software_statement (RFC 7591 §3.1.1 lets a server that does not support
+ *   them do so). Set a function to accept software statements: POST /register
+ *   then requires one (invalid_client_metadata without it), and the function
+ *   verifies it and returns the metadata it asserts. The generated code
+ *   verifies no statement of its own.
+ * - customClientMetadata: metadata beyond the standard fields that a
+ *   registration may carry (RFC 7591 §2 lets a provider understand more). Each
+ *   entry names one field and validates its value: return the value to register
+ *   (it is echoed in the 201 response and kept in
+ *   RegisteredClient.registrationMetadata), return undefined to leave the field
+ *   out, or throw ClientRegistrationError with invalid_client_metadata to reject
+ *   the registration. The validator also runs when the field is absent, so it
+ *   can return a default. Empty as generated: every field outside the standard
+ *   ones is ignored (RFC 7591 §2 MUST). Example — a tenant identifier of at
+ *   most 64 characters:
+ *
+ *     tenant_id: (value) => {
+ *       if (value === undefined) return undefined;
+ *       if (typeof value !== 'string' || !/^[a-z0-9-]{1,64}$/.test(value)) {
+ *         throw new ClientRegistrationError('invalid_client_metadata', 'tenant_id must be a lowercase identifier');
+ *       }
+ *       return value;
+ *     },
  */
 export interface DynamicClientRegistrationConfig {
-  initialAccessToken: string | undefined;
   maxRegisteredClients: number;
   maxRegistrationBodyBytes: number;
   tokenEndpointAuthMethods: readonly string[];
   grantTypes: readonly string[];
   jwksPurposes: readonly string[];
-  trustedSoftwarePublishers: readonly SoftwareStatementPublisher[];
-  verifyInitialAccessToken: InitialAccessTokenVerifier;
-  verifySoftwareStatement: SoftwareStatementVerifier;
+  verifyInitialAccessToken: InitialAccessTokenVerifier | undefined;
+  verifySoftwareStatement: SoftwareStatementVerifier | undefined;
   customClientMetadata: Readonly<Record<string, CustomClientMetadataValidator>>;
 }
 
 export const dynamicClientRegistrationConfig: DynamicClientRegistrationConfig = {
-  initialAccessToken: undefined,
   maxRegisteredClients: 100,
   maxRegistrationBodyBytes: 16384,
   tokenEndpointAuthMethods: ['client_secret_basic', 'client_secret_post', 'none'],
   grantTypes: ['authorization_code', 'refresh_token', 'implicit'],
   jwksPurposes: ['request_object', 'private_key_jwt', 'dpop'],
-  trustedSoftwarePublishers: [],
-  verifyInitialAccessToken: verifyRegistrationInitialAccessToken,
-  verifySoftwareStatement: verifyRegistrationSoftwareStatement,
-  customClientMetadata,
+  verifyInitialAccessToken: undefined,
+  verifySoftwareStatement: undefined,
+  customClientMetadata: {},
 };
 
 /**
@@ -3324,25 +2898,17 @@ export const dynamicClientRegistrationConfig: DynamicClientRegistrationConfig = 
  * The option adds to the lists and the table instead of replacing them, so a
  * deployment extends what the generated code allows without repeating it:
  * tokenEndpointAuthMethods, grantTypes and jwksPurposes gain the given values
- * (each once), trustedSoftwarePublishers gains the given publishers (one
- * with the issuer of a generated publisher replaces it), and
- * customClientMetadata gains the given validators (one with the name of a
- * generated validator replaces it). The scalar settings and the policy
- * functions replace the defaults; a field left out or undefined keeps them.
- * To take a value out of a generated list, edit it in config.ts.
+ * (each once), and customClientMetadata gains the given validators (one with
+ * the name of a generated validator replaces it). The scalar settings and the
+ * verifier functions replace the defaults; a field left out or undefined keeps
+ * them. To take a value out of a generated list, or to drop a verifier set
+ * above, edit it in config.ts.
  */
 export function extendDynamicClientRegistrationConfig(
   base: DynamicClientRegistrationConfig,
   additions: Partial<DynamicClientRegistrationConfig> = {},
 ): DynamicClientRegistrationConfig {
-  const {
-    tokenEndpointAuthMethods,
-    grantTypes,
-    jwksPurposes,
-    trustedSoftwarePublishers,
-    customClientMetadata: customMetadata,
-    ...replaced
-  } = additions;
+  const { tokenEndpointAuthMethods, grantTypes, jwksPurposes, customClientMetadata: customMetadata, ...replaced } = additions;
   const config: DynamicClientRegistrationConfig = { ...base };
   for (const [name, value] of Object.entries(replaced)) {
     if (value !== undefined) (config as unknown as Record<string, unknown>)[name] = value;
@@ -3350,11 +2916,6 @@ export function extendDynamicClientRegistrationConfig(
   config.tokenEndpointAuthMethods = [...new Set([...base.tokenEndpointAuthMethods, ...(tokenEndpointAuthMethods ?? [])])];
   config.grantTypes = [...new Set([...base.grantTypes, ...(grantTypes ?? [])])];
   config.jwksPurposes = [...new Set([...base.jwksPurposes, ...(jwksPurposes ?? [])])];
-  const added = trustedSoftwarePublishers ?? [];
-  config.trustedSoftwarePublishers = [
-    ...base.trustedSoftwarePublishers.filter((publisher) => !added.some((entry) => entry.issuer === publisher.issuer)),
-    ...added,
-  ];
   config.customClientMetadata = { ...base.customClientMetadata, ...customMetadata };
   return config;
 }
@@ -3368,7 +2929,7 @@ declare module '../../app.js' {
      * example from environment variables — without editing the generated
      * file (extendDynamicClientRegistrationConfig). The lists and the custom
      * metadata table gain the given values, the scalar settings and the
-     * policy functions (verifyInitialAccessToken, verifySoftwareStatement)
+     * verifier functions (verifyInitialAccessToken, verifySoftwareStatement)
      * replace the generated ones, and an unset field keeps them.
      */
     dynamicClientRegistration?: Partial<DynamicClientRegistrationConfig>;
@@ -3387,91 +2948,6 @@ declare module '../../config.js' {
     registrationMetadata?: Readonly<Record<string, unknown>>;
   }
 }
-```
-
-### policy.ts
-
-The three decisions a project edits or replaces through the option.
-As generated: constant-time comparison of the initial access token, software statement verification against `trustedSoftwarePublishers`, and an empty custom metadata table.
-
-```typescript
-import {
-  verifyInitialAccessToken,
-  verifySoftwareStatement,
-  type CustomClientMetadataValidator,
-  type VerifiedSoftwareStatement,
-} from '@maronn-openid-connect/experimental/dynamic-client-registration';
-import type { DynamicClientRegistrationConfig } from './config.js';
-
-/**
- * EXPERIMENTAL — the registration policy of POST /register (RFC 7591): who may
- * register, which software statements are trusted, and which metadata beyond
- * the standard fields is accepted.
- *
- * The three exports below are the defaults of dynamicClientRegistrationConfig
- * (config.ts). Edit them here, or pass your own functions through the
- * dynamicClientRegistration option of createApp() / applyOidc().
- */
-
-/**
- * Decide whether a request may register, from its Authorization header
- * (OIDC Dynamic Client Registration 1.0 §3).
- *
- * As generated: open registration while initialAccessToken is unset (RFC 7591
- * §3.1 SHOULD); otherwise the Bearer token (RFC 6750 §2.1) must equal it, in
- * constant time. Replace the body to accept tokens of your own issuance — a
- * signed JWT, a one-time token looked up in a store — and return true for a
- * request that may register.
- */
-export async function verifyRegistrationInitialAccessToken(
-  authorization: string | undefined,
-  config: DynamicClientRegistrationConfig,
-): Promise<boolean> {
-  if (config.initialAccessToken === undefined) return true;
-  if (authorization === undefined) return false;
-  return verifyInitialAccessToken(authorization, config.initialAccessToken);
-}
-
-/**
- * Verify a software_statement (RFC 7591 §2.3 / §3.1.1) and return the metadata
- * it asserts; the step then applies that metadata over the plain JSON values.
- *
- * As generated: the statement must be signed by one of
- * config.trustedSoftwarePublishers (RS256 or ES256 unless a publisher lists
- * other algorithms), carry its iss, and be within exp / nbf. Any other issuer
- * is unapproved_software_statement; a statement that does not verify is
- * invalid_software_statement (RFC 7591 §3.2.2). To look the publisher up
- * elsewhere (a database, a federation), replace the body and throw
- * ClientRegistrationError with one of those two codes to reject.
- */
-export async function verifyRegistrationSoftwareStatement(
-  softwareStatement: string,
-  config: DynamicClientRegistrationConfig,
-): Promise<VerifiedSoftwareStatement> {
-  return verifySoftwareStatement(softwareStatement, { publishers: config.trustedSoftwarePublishers });
-}
-
-/**
- * Metadata beyond the standard fields that a registration may carry (RFC 7591
- * §2 lets a provider understand more). Each entry names one field and
- * validates its value: return the value to register (it is echoed in the 201
- * response and kept in RegisteredClient.registrationMetadata), return
- * undefined to leave the field out, or throw ClientRegistrationError with
- * invalid_client_metadata to reject the registration. The validator also runs
- * when the field is absent, so it can return a default.
- *
- * Empty as generated: every field outside the standard ones is ignored
- * (RFC 7591 §2 MUST). Example — a tenant identifier of at most 64 characters:
- *
- *   tenant_id: (value) => {
- *     if (value === undefined) return undefined;
- *     if (typeof value !== 'string' || value.length > 64 || !/^[a-z0-9-]+$/.test(value)) {
- *       throw new ClientRegistrationError('invalid_client_metadata', 'tenant_id must be a lowercase identifier');
- *     }
- *     return value;
- *   },
- */
-export const customClientMetadata: Record<string, CustomClientMetadataValidator> = {};
 ```
 
 ### store.ts
@@ -3710,9 +3186,11 @@ import { resolveRegistrationMetadata } from './steps/verify-software-statement.j
  * software statement of a publisher this OP trusts — and receives a freshly
  * minted client_id (and, for confidential clients, a client_secret) that works
  * on /authorize and /token right away. Registration is open by default
- * (RFC 7591 §3.1 SHOULD); set initialAccessToken to require a Bearer token.
- * The registration policy (who may register, which publishers are trusted,
- * which metadata beyond the standard fields is accepted) is in ../../policy.ts.
+ * (RFC 7591 §3.1 SHOULD) and a software_statement is ignored (§3.1.1); set
+ * verifyInitialAccessToken / verifySoftwareStatement of ../../config.ts to
+ * require them and verify them with functions of your own — this code
+ * verifies neither. Metadata beyond the standard fields is accepted through
+ * customClientMetadata of the same config.
  * Each block below calls one step (one box of
  * `maronn-oidc graph --detail steps --endpoint register`).
  *
@@ -3788,7 +3266,11 @@ export function sendRegistrationResponse(c: any, response: RegistrationEndpointR
 
 ### steps/verify-initial-access-token.ts
 
+Does nothing without `verifyInitialAccessToken` in the config.
+With one, the presence of a Bearer token picks the 401 shape, and the token is handed to the function.
+
 ```typescript
+import { readBearerToken } from '@maronn-openid-connect/experimental/dynamic-client-registration';
 import { RegistrationEndpointError } from '../response.js';
 import { step } from '../../../../../endpoints/step.js';
 
@@ -3800,30 +3282,32 @@ export const meta = step({
   label: 'Check that the request may register',
   spec: 'OIDC Dynamic Client Registration 1.0 §3 / RFC 6750 §3.1',
   function: 'verifyRegistrationAccess',
-  calls: ['verifyInitialAccessToken'],
+  calls: ['readBearerToken', 'verifyInitialAccessToken'],
   consumes: [],
   produces: [],
   removable: false,
 });
 
 /**
- * Ask the registration policy whether the request may register, before the
- * body is read. OIDC Dynamic Client Registration 1.0 §3 / RFC 6750 §3.1
+ * Ask the verifyInitialAccessToken of the config whether the request may
+ * register, before the body is read (OIDC Dynamic Client Registration 1.0 §3).
  *
- * verifyInitialAccessToken of the config (policy.ts as generated: open
- * registration until initialAccessToken is set, then the configured Bearer
- * token in constant time) decides. The two 401 shapes follow RFC 6750 §3.1:
- * no error code without credentials, and error="invalid_token" for
- * presented-but-refused ones. Neither reflects anything about the expected
- * token.
+ * No function configured means open registration (RFC 7591 §3.1 SHOULD): every
+ * request passes. With one, the request must carry a Bearer token (RFC 6750
+ * §2.1) — 401 with a bare challenge without one, as RFC 6750 §3.1 asks for a
+ * request without credentials — and the function decides whether that token
+ * may register: 401 error="invalid_token" when it says no. Nothing here
+ * verifies the token itself, and neither response reflects anything about
+ * the expected token.
  */
 export async function verifyRegistrationAccess(c: any): Promise<void> {
   const config = c.get('dynamicClientRegistrationConfig');
-  const authorization = c.req.header('Authorization');
-  if (await config.verifyInitialAccessToken(authorization, config)) return;
-  if (authorization === undefined) {
+  if (config.verifyInitialAccessToken === undefined) return;
+  const token = readBearerToken(c.req.header('Authorization'));
+  if (token === undefined) {
     throw new RegistrationEndpointError({ status: 401, body: null, headers: { 'WWW-Authenticate': 'Bearer' } });
   }
+  if (await config.verifyInitialAccessToken(token, config)) return;
   throw new RegistrationEndpointError({
     status: 401,
     body: null,
@@ -3901,9 +3385,13 @@ export async function parseRegistrationRequest(c: any): Promise<ParsedClientRegi
 
 ### steps/verify-software-statement.ts
 
+Without `verifySoftwareStatement` in the config the statement is ignored and the plain values pass through.
+With one, a statement is required and the claims the function returns are applied.
+
 ```typescript
 import {
   applySoftwareStatement,
+  ClientRegistrationError,
   type ParsedClientRegistration,
 } from '@maronn-openid-connect/experimental/dynamic-client-registration';
 import { step } from '../../../../../endpoints/step.js';
@@ -3926,22 +3414,28 @@ export const meta = step({
  * The metadata to register: the plain JSON values, with those a verified
  * software statement asserts taking precedence (RFC 7591 §3.1.1).
  *
- * A request without software_statement passes through unchanged. With one,
- * verifySoftwareStatement of the config (policy.ts as generated: the statement
- * must be signed by a publisher of trustedSoftwarePublishers) decides whether
- * it is trusted — unapproved_software_statement for an unknown issuer,
- * invalid_software_statement for one that does not verify (RFC 7591 §3.2.2) —
- * and the statement itself is kept so the 201 response returns it unmodified
- * (§3.2.1).
+ * No verifySoftwareStatement in the config means this provider does not
+ * support software statements: a software_statement in the request is
+ * ignored, as §3.1.1 allows, and the plain values register. With one, every
+ * registration must carry a software_statement (invalid_client_metadata
+ * without it); the function verifies it — RFC 7591 leaves the trust criteria
+ * to the server, so nothing here examines the statement — and rejects it with
+ * ClientRegistrationError (invalid_software_statement or
+ * unapproved_software_statement; §3.2.2). The metadata it returns is applied
+ * over the plain values, and the statement itself is kept so the 201 response
+ * returns it unmodified (§3.2.1).
  */
 export async function resolveRegistrationMetadata(
   c: any,
   registration: ParsedClientRegistration,
 ): Promise<Record<string, unknown>> {
-  if (registration.softwareStatement === undefined) {
+  const config = c.get('dynamicClientRegistrationConfig');
+  if (config.verifySoftwareStatement === undefined) {
     return registration.metadata;
   }
-  const config = c.get('dynamicClientRegistrationConfig');
+  if (registration.softwareStatement === undefined) {
+    throw new ClientRegistrationError('invalid_client_metadata', 'software_statement is required');
+  }
   const verified = await config.verifySoftwareStatement(registration.softwareStatement, config);
   return applySoftwareStatement(registration.metadata, registration.softwareStatement, verified);
 }
@@ -3997,7 +3491,7 @@ export const meta = step({
  *   standard and the declared ones
  * - id_token_signed_response_alg / userinfo_signed_response_alg: the algs of
  *   the registered signing keys, as discovery advertises them
- * - the custom metadata of the registration policy (policy.ts)
+ * - the custom metadata of the registration config (config.ts)
  *
  * Unknown metadata is silently ignored (§2 MUST), and every error_description
  * is a fixed ASCII string that never reflects request values.
@@ -4176,7 +3670,7 @@ export const meta = step({
  * statement that is not accepted (invalid_software_statement,
  * unapproved_software_statement); the fixed responses of the earlier steps
  * (401, 429) as they are. The registration errors are told apart by shape
- * (isClientRegistrationError), not by class: a policy function of the
+ * (isClientRegistrationError), not by class: a verifier function of the
  * dynamicClientRegistration option may come from another copy of the
  * experimental package.
  */
@@ -4197,7 +3691,7 @@ export function respondRegistrationError(c: any, error: unknown): Response {
 ### The other frameworks
 
 - **Express / Fastify**: extracted from the same `apps/hono/src/oidc-provider`, so the files above are generated as they are; only `apply.ts` and the web-standard router layer differ, and the feature's code is identical
-- **Next.js (App Router)**: `(dynamic-client-registration)/register/route.ts` is the Route Handler, with the same order of operations as the Hono version. Settings, policy and store live in `_oidc-provider/features/dynamic-client-registration/` as `config.ts`, `policy.ts`, `store.ts` and `feature.ts`, with the Hono content in Next.js import style (`config.ts` uses `shared()` for one object per process). So that the feature can wrap key resolution, `ProviderContext` of `_oidc-provider/feature.ts` gained `clientKeyResolver`, and `clientKeyResolver` of `provider.ts` now passes through the context hooks of the features
+- **Next.js (App Router)**: `(dynamic-client-registration)/register/route.ts` is the Route Handler, with the same order of operations as the Hono version. Settings, policy and store live in `_oidc-provider/features/dynamic-client-registration/` as `config.ts`, `store.ts` and `feature.ts`, with the Hono content in Next.js import style (`config.ts` uses `shared()` for one object per process). So that the feature can wrap key resolution, `ProviderContext` of `_oidc-provider/feature.ts` gained `clientKeyResolver`, and `clientKeyResolver` of `provider.ts` now passes through the context hooks of the features
 
 The Next.js Route Handler, in full:
 
@@ -4214,12 +3708,13 @@ The Next.js Route Handler, in full:
  * software statement of a publisher this OP trusts — and receives a freshly
  * minted client_id (and, for confidential clients, a client_secret) that works
  * on /authorize and /token right away. Registration is open by default
- * (RFC 7591 §3.1 SHOULD); set initialAccessToken of
+ * (RFC 7591 §3.1 SHOULD) and a software_statement is ignored (§3.1.1); set
+ * verifyInitialAccessToken / verifySoftwareStatement of
  * dynamicClientRegistrationConfig
- * (_oidc-provider/features/dynamic-client-registration/config.ts) to require a
- * Bearer token. The registration policy (who may register, which publishers
- * are trusted, which metadata beyond the standard fields is accepted) is in
- * _oidc-provider/features/dynamic-client-registration/policy.ts.
+ * (_oidc-provider/features/dynamic-client-registration/config.ts) to require
+ * them and verify them with functions of your own — this code verifies
+ * neither. Metadata beyond the standard fields is accepted through
+ * customClientMetadata of the same config.
  *
  * NOTE (RFC 7591 §5): per-IP rate limiting is deliberately left to the
  * deployment layer (reverse proxy / platform); this endpoint only enforces the
@@ -4232,13 +3727,19 @@ import {
   applySoftwareStatement,
   buildClientRegistrationResponse,
   buildRegisteredClient,
+  ClientRegistrationError,
   isClientRegistrationError,
   parseClientRegistrationBody,
+  readBearerToken,
   validateClientMetadata,
+  type ParsedClientRegistration,
 } from '@maronn-openid-connect/experimental/dynamic-client-registration';
 import { responseTypesOf, tokenGrantsOf } from '../../_oidc-provider/feature';
 import { features } from '../../_oidc-provider/features';
-import { dynamicClientRegistrationConfig } from '../../_oidc-provider/features/dynamic-client-registration/config';
+import {
+  dynamicClientRegistrationConfig,
+  type DynamicClientRegistrationConfig,
+} from '../../_oidc-provider/features/dynamic-client-registration/config';
 import {
   dynamicClientStore,
   toClientRegistration,
@@ -4261,15 +3762,19 @@ export function OPTIONS(request: Request): Response {
 async function registerClient(request: Request): Promise<Response> {
   const config = dynamicClientRegistrationConfig;
 
-  // (1) May the request register? The policy decides (policy.ts as generated:
-  // open registration until initialAccessToken is set, then the configured
-  // Bearer token in constant time), before the body is read. The two 401
-  // shapes follow RFC 6750 §3.1: no error code without credentials, and
-  // error="invalid_token" for presented-but-refused ones. Neither reflects
-  // anything about the expected token.
-  const authorization = request.headers.get('Authorization');
-  if (!(await config.verifyInitialAccessToken(authorization, config))) {
-    return registration401(authorization === null ? 'Bearer' : 'Bearer error="invalid_token"');
+  // (1) May the request register? Open registration while the config sets no
+  // verifyInitialAccessToken (RFC 7591 §3.1 SHOULD). With one, the request
+  // must carry a Bearer token (RFC 6750 §2.1) — a bare 401 challenge without
+  // one, as RFC 6750 §3.1 asks for a request without credentials — and the
+  // configured function decides whether that token may register (401
+  // error="invalid_token" when it says no). Nothing here verifies the token
+  // itself, and neither response reflects anything about the expected token.
+  if (config.verifyInitialAccessToken !== undefined) {
+    const token = readBearerToken(request.headers.get('Authorization'));
+    if (token === undefined) return registration401('Bearer');
+    if (!(await config.verifyInitialAccessToken(token, config))) {
+      return registration401('Bearer error="invalid_token"');
+    }
   }
 
   // (2) RFC 7591 §3.1: application/json only (parameters such as charset are
@@ -4309,20 +3814,16 @@ async function registerClient(request: Request): Promise<Response> {
     // from the plain metadata.
     const registration = parseClientRegistrationBody(rawBody, { maxBodyBytes: config.maxRegistrationBodyBytes });
 
-    // (4) RFC 7591 §3.1.1: a software statement the policy verifies (policy.ts
-    // as generated: signed by a publisher of trustedSoftwarePublishers) has its
-    // metadata applied over the plain values — unapproved_software_statement
-    // for an unknown issuer, invalid_software_statement for one that does not
-    // verify (§3.2.2) — and the statement comes back unmodified in the response
-    // (§3.2.1).
-    const metadata =
-      registration.softwareStatement === undefined
-        ? registration.metadata
-        : applySoftwareStatement(
-            registration.metadata,
-            registration.softwareStatement,
-            await config.verifySoftwareStatement(registration.softwareStatement, config),
-          );
+    // (4) RFC 7591 §3.1.1: without a verifySoftwareStatement in the config this
+    // provider does not support software statements and ignores the member, as
+    // §3.1.1 allows. With one, every registration must carry a
+    // software_statement (invalid_client_metadata without it); the function
+    // verifies it — RFC 7591 leaves the trust criteria to the server, so
+    // nothing here examines the statement — and rejects with
+    // invalid_software_statement or unapproved_software_statement (§3.2.2).
+    // The metadata it returns is applied over the plain values, and the
+    // statement comes back unmodified in the response (§3.2.1).
+    const metadata = await resolveRegistrationMetadata(config, registration);
 
     // (5) Allowlist-pick of the understood fields, value checks, the RFC 7591
     // §2 and OIDC Dynamic Client Registration 1.0 §2 defaults (application_type
@@ -4332,7 +3833,7 @@ async function registerClient(request: Request): Promise<Response> {
     // @maronn-openid-connect/experimental/dynamic-client-registration, bounded
     // to what this provider answers: the methods and grants of the config, the
     // response types of the features, the scopes of scopes.ts, the algs of the
-    // signing keys and the custom metadata of the policy. Unknown metadata is
+    // signing keys and the custom metadata of the config. Unknown metadata is
     // silently ignored (§2 MUST), and every error_description is a fixed ASCII
     // string that never reflects request values.
     const responseTypes = ['code', ...responseTypesOf(features)];
@@ -4384,15 +3885,35 @@ async function registerClient(request: Request): Promise<Response> {
     return registrationJson(buildClientRegistrationResponse(client), 201);
   } catch (error) {
     // RFC 7591 §3.2.2: 400 with error / error_description JSON. The error is
-    // told apart by shape, not by class: the policy functions of config.ts are
-    // created where the app starts (instrumentation.ts), which Next.js bundles
-    // apart from this Route Handler, so their ClientRegistrationError is
-    // another copy of the class.
+    // told apart by shape, not by class: the verifier functions of config.ts
+    // may be set where the app starts (instrumentation.ts), which Next.js
+    // bundles apart from this Route Handler, so their ClientRegistrationError
+    // is another copy of the class.
     if (isClientRegistrationError(error)) {
       return registrationJson({ error: error.error, error_description: error.errorDescription }, 400);
     }
     return registrationJson({ error: 'server_error' }, 500);
   }
+}
+
+/**
+ * The metadata to register: the plain values, with those a verified software
+ * statement asserts taking precedence (RFC 7591 §3.1.1). Without a verifier the
+ * provider does not support software statements and ignores the member; with
+ * one the statement is required and the verifier alone judges it.
+ */
+async function resolveRegistrationMetadata(
+  config: DynamicClientRegistrationConfig,
+  registration: ParsedClientRegistration,
+): Promise<Record<string, unknown>> {
+  if (config.verifySoftwareStatement === undefined) {
+    return registration.metadata;
+  }
+  if (registration.softwareStatement === undefined) {
+    throw new ClientRegistrationError('invalid_client_metadata', 'software_statement is required');
+  }
+  const verified = await config.verifySoftwareStatement(registration.softwareStatement, config);
+  return applySoftwareStatement(registration.metadata, registration.softwareStatement, verified);
 }
 
 /**
@@ -4456,44 +3977,36 @@ function registration401(wwwAuthenticate: string): Response {
 
 ### Samples and the E2E wiring
 
-`samples/hono-cloudflare` (every feature on) and `samples/express-flyio` (the `--db sql` web-standard path) are generated with `--enable dynamic-client-registration`.
-Their hand-written `app.ts`, and the `settings.ts` of `apps/hono` and `apps/nextjs` that the E2E suite runs, read the restricted configuration from environment variables: the initial access token, the cap, and the software statement publishers through `OIDC_DCR_TRUSTED_SOFTWARE_PUBLISHERS_JSON` (an array of `{ issuer, jwks }`).
+`samples/hono-cloudflare` (every feature enabled) and `samples/express-flyio` (the Web-standard path with `--db sql`) are generated with `--enable dynamic-client-registration`.
+Their hand-written `app.ts`, and the `apps/hono/src/settings.ts` and `apps/nextjs/src/settings.ts` the E2E suite runs against, read the inventory cap from the environment variable `OIDC_DCR_MAX_CLIENTS`.
+The verifier functions are code, not environment, so the samples read none.
 
 ```typescript
 // EXPERIMENTAL (RFC 7591): the E2E suite starts a second instance of this
-// sample with an initial access token, a small inventory cap and a trusted
-// software statement publisher, so the restricted-registration paths (401 /
-// 429) and the software statement path can be exercised over real HTTP. With
-// the vars unset the generated defaults stay: open registration, cap 100, no
-// trusted publisher.
+// sample with a small inventory cap, so the 429 path can be exercised over
+// real HTTP. With the var unset the generated default stays (cap 100). The
+// verifier functions of the registration config (initial access token,
+// software statement) are code, not environment: pass them here as
+// verifyInitialAccessToken / verifySoftwareStatement when a deployment needs
+// them; the generated code verifies neither on its own.
 const dynamicClientRegistration = {
-  ...(bindings.OIDC_DCR_INITIAL_ACCESS_TOKEN
-    ? { initialAccessToken: bindings.OIDC_DCR_INITIAL_ACCESS_TOKEN }
-    : {}),
   ...(bindings.OIDC_DCR_MAX_CLIENTS
     ? { maxRegisteredClients: Number(bindings.OIDC_DCR_MAX_CLIENTS) }
-    : {}),
-  ...(bindings.OIDC_DCR_TRUSTED_SOFTWARE_PUBLISHERS_JSON
-    ? {
-        trustedSoftwarePublishers: JSON.parse(
-          bindings.OIDC_DCR_TRUSTED_SOFTWARE_PUBLISHERS_JSON,
-        ) as SoftwareStatementPublisher[],
-      }
     : {}),
 };
 ```
 
-`playwright.config.ts` starts a restricted OP instance beside the open-registration one, because open registration and the initial access token cannot be tested on the same OP.
-That restricted instance is the one that trusts the E2E software statement publisher.
+`playwright.config.ts` starts a capped instance (3 registrations) beside the open-registration one, so the 429 path runs over real HTTP.
+The initial access token and software statement paths are covered by the pipeline tests and the Route Handler tests of the apps, where a function can be passed.
 
 ```typescript
-// EXPERIMENTAL (RFC 7591): the restricted-registration OP instance. It
-// requires the initial access token below on POST /register, caps the
-// dynamic registrations at 3 and trusts the software statement publisher of
-// support/software-publisher.ts, so the 401 and 429 paths and the software
-// statement path of the dynamic-client-registration spec run against real
-// HTTP. The values are mirrored as constants in
-// specs/dynamic-client-registration.spec.ts.
+// EXPERIMENTAL (RFC 7591): the capped-registration OP instance. It caps
+// the dynamic registrations at 3, so the 429 path of the
+// dynamic-client-registration spec runs against real HTTP without filling
+// the main instance. The cap is mirrored as a constant in
+// specs/dynamic-client-registration.spec.ts. The verifier functions of the
+// registration config are code, not environment, so the 401 and software
+// statement paths are covered by the in-process tests of the apps.
 ...(startDcrOp
   ? [
       {
@@ -4506,9 +4019,7 @@ That restricted instance is the one that trusts the E2E software statement publi
           PORT: String(dcrOpPort),
           ISSUER: dcrIssuer,
           OIDC_SIGNING_KEY_ID: 'e2e-dcr-rs256-key',
-          OIDC_DCR_INITIAL_ACCESS_TOKEN: 'e2e-dcr-initial-access-token',
           OIDC_DCR_MAX_CLIENTS: '3',
-          OIDC_DCR_TRUSTED_SOFTWARE_PUBLISHERS_JSON: trustedSoftwarePublishersJson(),
           // ...
         },
       },
@@ -4516,91 +4027,23 @@ That restricted instance is the one that trusts the E2E software statement publi
   : []),
 ```
 
-The publisher key is derived from a fixed P-256 private scalar so that the OP process and every test worker hold the same key.
-It is a test constant of the same standing as the `clientSecret` of the E2E clients, never the key of a real deployment.
-
-```typescript
-/**
- * EXPERIMENTAL (RFC 7591 §2.3): the software statement publisher of the E2E
- * suite.
- *
- * The restricted-registration OP instance (playwright.config.ts) trusts this
- * publisher through OIDC_DCR_TRUSTED_SOFTWARE_PUBLISHERS_JSON, and the
- * dynamic-client-registration spec signs statements as it. Both sides derive
- * the ES256 key pair from one fixed P-256 private scalar, so the key is the
- * same in the OP process and in every test worker without passing secrets
- * around: a test constant like the client secrets of the E2E clients, never a
- * key of any real deployment.
- */
-import { createECDH, createPrivateKey, sign } from 'node:crypto';
-
-export const SOFTWARE_PUBLISHER_ISSUER = 'https://software-publisher.e2e.example.com';
-const SOFTWARE_PUBLISHER_KEY_ID = 'e2e-software-publisher-es256';
-/** The private scalar of the publisher key (32 bytes, below the P-256 group order). */
-const PRIVATE_SCALAR_HEX = '0b0e8e4c6d8f0a7b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d';
-
-function base64Url(bytes: Buffer | Uint8Array): string {
-  return Buffer.from(bytes).toString('base64url');
-}
-
-function keyPair(): { publicJwk: Record<string, string>; privateJwk: Record<string, string> } {
-  const ecdh = createECDH('prime256v1');
-  ecdh.setPrivateKey(Buffer.from(PRIVATE_SCALAR_HEX, 'hex'));
-  // The uncompressed point: 0x04 || X (32 bytes) || Y (32 bytes).
-  const point = ecdh.getPublicKey();
-  const publicJwk = {
-    kty: 'EC',
-    crv: 'P-256',
-    x: base64Url(point.subarray(1, 33)),
-    y: base64Url(point.subarray(33, 65)),
-    alg: 'ES256',
-    use: 'sig',
-    kid: SOFTWARE_PUBLISHER_KEY_ID,
-  };
-  return { publicJwk, privateJwk: { ...publicJwk, d: base64Url(Buffer.from(PRIVATE_SCALAR_HEX, 'hex')) } };
-}
-
-/** The public JWK Set the OP is given for the publisher. */
-export function softwarePublisherJwks(): { keys: Record<string, string>[] } {
-  return { keys: [keyPair().publicJwk] };
-}
-
-/** OIDC_DCR_TRUSTED_SOFTWARE_PUBLISHERS_JSON for an OP that trusts the publisher. */
-export function trustedSoftwarePublishersJson(): string {
-  return JSON.stringify([{ issuer: SOFTWARE_PUBLISHER_ISSUER, jwks: softwarePublisherJwks() }]);
-}
-
-/** A software statement of the publisher with the given metadata claims, as a compact JWS (ES256). */
-export function signSoftwareStatement(claims: Record<string, unknown>): string {
-  const header = base64Url(Buffer.from(JSON.stringify({ alg: 'ES256', kid: SOFTWARE_PUBLISHER_KEY_ID, typ: 'JWT' })));
-  const payload = base64Url(Buffer.from(JSON.stringify({ iss: SOFTWARE_PUBLISHER_ISSUER, ...claims })));
-  const signingInput = `${header}.${payload}`;
-  const key = createPrivateKey({ key: keyPair().privateJwk, format: 'jwk' });
-  // JWS ES256 carries R || S (RFC 7518 §3.4), not the DER encoding.
-  const signature = sign('sha256', Buffer.from(signingInput), { key, dsaEncoding: 'ieee-p1363' });
-  return `${signingInput}.${base64Url(signature)}`;
-}
-```
-
 ## The E2E spec, in full
 
 ```typescript
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
-import { signSoftwareStatement } from '../support/software-publisher';
 
 const host = process.env.E2E_HOST ?? '127.0.0.1';
 const clientPort = Number(process.env.E2E_CLIENT_PORT ?? '3020');
 const clientBaseURL =
   process.env.E2E_CLIENT_BASE_URL ?? `http://${host}:${clientPort}`;
 // EXPERIMENTAL (RFC 7591): a second OP instance started by playwright.config.ts
-// with an initial access token, a small inventory cap and a trusted software
-// statement publisher, so the restricted registration paths (401 / 429) and
-// the software statement path can be exercised without touching the open
-// registration the other tests rely on.
+// with a small inventory cap, so the 429 path can be exercised without filling
+// the open registration the other tests rely on. The verifier functions of the
+// registration config (initial access token, software statement) are code, not
+// environment, so their paths are covered by the in-process tests of the apps.
 const dcrOpPort = Number(process.env.E2E_DCR_OP_PORT ?? '3050');
 const restrictedIssuer = process.env.E2E_DCR_ISSUER ?? `http://${host}:${dcrOpPort}`;
-const initialAccessToken = 'e2e-dcr-initial-access-token';
 const restrictedMaxClients = 3;
 
 // The registered redirect target only has to be a page the browser can land on
@@ -5054,9 +4497,31 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
     expect(Object.hasOwn(registered, 'require_auth_time')).toBe(false);
   });
 
-  // RFC 7591 §3.2.2: a software statement this OP cannot verify, and one from
-  // a publisher it does not trust (the open instance trusts none).
-  test('should answer invalid_software_statement for a software_statement that is not a JWS', async ({
+  // RFC 7591 §3.1.1: a provider without a verifySoftwareStatement in its config
+  // does not support software statements and ignores the member — the plain
+  // values register, and nothing comes back as software_statement. Nothing in
+  // the OP examines the statement, so any string is ignored the same way.
+  test('should ignore a software_statement when the provider has no verifier for it (RFC 7591 §3.1.1)', async ({
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    const endpoint = await registrationEndpoint(request, issuer);
+    test.skip(endpoint === undefined, SKIP_REASON);
+
+    const registered = await registerClient(request, issuer, {
+      redirect_uris: [registeredRedirectUri],
+      client_name: 'E2E Plain Name',
+      software_statement: 'not-a-jws',
+    });
+
+    expect(registered.client_name).toBe('E2E Plain Name');
+    expect(Object.hasOwn(registered, 'software_statement')).toBe(false);
+  });
+
+  // RFC 7591 §3.1.1 defines the member as a JWT string: another JSON type is a
+  // malformed request, whether or not the provider supports statements.
+  test('should answer invalid_software_statement for a software_statement that is not a string', async ({
     request,
     baseURL,
   }) => {
@@ -5066,109 +4531,18 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
 
     const response = await request.post(`${issuer}/register`, {
       headers: { 'Content-Type': 'application/json' },
-      data: { redirect_uris: [registeredRedirectUri], software_statement: 'not-a-jws' },
+      data: { redirect_uris: [registeredRedirectUri], software_statement: { iss: 'https://publisher.example.com' } },
     });
     expect(response.status()).toBe(400);
     expect(await response.json()).toEqual({
       error: 'invalid_software_statement',
-      error_description: 'software_statement must be a JWS compact serialization',
+      error_description: 'software_statement must be a string',
     });
   });
 
-  test('should answer unapproved_software_statement for a publisher this provider does not trust', async ({
-    request,
-    baseURL,
-  }) => {
-    const issuer = requireBaseUrl(baseURL);
-    const endpoint = await registrationEndpoint(request, issuer);
-    test.skip(endpoint === undefined, SKIP_REASON);
+  // --- The capped instance: the inventory cap ---
 
-    const response = await request.post(`${issuer}/register`, {
-      headers: { 'Content-Type': 'application/json' },
-      data: {
-        redirect_uris: [registeredRedirectUri],
-        software_statement: signSoftwareStatement({ client_name: 'E2E Published Client' }),
-      },
-    });
-    expect(response.status()).toBe(400);
-    expect(await response.json()).toEqual({
-      error: 'unapproved_software_statement',
-      error_description: 'the issuer of the software_statement is not approved by this authorization server',
-    });
-  });
-
-  // --- The restricted instance: initial access token, software statements and the inventory cap ---
-
-  test('should answer 401 without an error code when no credentials accompany the request (RFC 6750 §3.1)', async ({
-    request,
-  }) => {
-    const endpoint = await registrationEndpoint(request, restrictedIssuer);
-    test.skip(endpoint === undefined, RESTRICTED_SKIP_REASON);
-
-    const response = await request.post(`${restrictedIssuer}/register`, {
-      headers: { 'Content-Type': 'application/json' },
-      data: { redirect_uris: [registeredRedirectUri] },
-    });
-    expect(response.status()).toBe(401);
-    expect(requireHeader(response.headers(), 'www-authenticate')).toBe('Bearer');
-  });
-
-  test('should answer 401 invalid_token for a presented but wrong initial access token', async ({
-    request,
-  }) => {
-    const endpoint = await registrationEndpoint(request, restrictedIssuer);
-    test.skip(endpoint === undefined, RESTRICTED_SKIP_REASON);
-
-    const response = await request.post(`${restrictedIssuer}/register`, {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer not-the-registered-token',
-      },
-      data: { redirect_uris: [registeredRedirectUri] },
-    });
-    expect(response.status()).toBe(401);
-    expect(requireHeader(response.headers(), 'www-authenticate')).toBe(
-      'Bearer error="invalid_token"',
-    );
-  });
-
-  // RFC 7591 §3.1.1 / §3.2.1: the metadata of a trusted publisher's statement
-  // takes precedence over the plain values, and the statement comes back as
-  // it was sent. This registration takes one of the three slots of the
-  // instance; the cap test below counts from whatever is left.
-  test('should register the metadata a trusted software statement asserts and return the statement unmodified', async ({
-    request,
-  }) => {
-    const endpoint = await registrationEndpoint(request, restrictedIssuer);
-    test.skip(endpoint === undefined, RESTRICTED_SKIP_REASON);
-    const softwareStatement = signSoftwareStatement({
-      client_name: 'E2E Published Client',
-      software_id: 'e2e-published-software',
-      software_version: '1.0.0',
-    });
-
-    const response = await request.post(`${restrictedIssuer}/register`, {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${initialAccessToken}`,
-      },
-      data: {
-        redirect_uris: [registeredRedirectUri],
-        client_name: 'E2E Plain Name',
-        software_statement: softwareStatement,
-      },
-    });
-
-    expect(response.status()).toBe(201);
-    expect(await response.json()).toMatchObject({
-      client_name: 'E2E Published Client',
-      software_id: 'e2e-published-software',
-      software_version: '1.0.0',
-      software_statement: softwareStatement,
-    });
-  });
-
-  test('should register with the initial access token and answer 429 once the inventory cap is reached', async ({
+  test('should answer 429 once the inventory cap is reached', async ({
     request,
   }) => {
     const endpoint = await registrationEndpoint(request, restrictedIssuer);
@@ -5181,10 +4555,7 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
     let lastResponse;
     for (let attempt = 0; attempt < restrictedMaxClients + 1; attempt++) {
       lastResponse = await request.post(`${restrictedIssuer}/register`, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${initialAccessToken}`,
-        },
+        headers: { 'Content-Type': 'application/json' },
         data: { redirect_uris: [registeredRedirectUri] },
       });
       statuses.push(lastResponse.status());
@@ -5207,7 +4578,7 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
 const SKIP_REASON =
   'This sample OP was generated without --enable dynamic-client-registration';
 const RESTRICTED_SKIP_REASON =
-  'The restricted-registration OP instance is not running for this sample';
+  'The capped-registration OP instance is not running for this sample';
 
 interface AuthorizeState {
   codeVerifier: string;
