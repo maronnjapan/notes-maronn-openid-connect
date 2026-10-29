@@ -432,3 +432,24 @@ HTTP レベルの検証マトリクスもこのスペックに置き、既存ス
 - RFC 7592 の管理（`registration_access_token` / `registration_client_uri` / GET・PUT・DELETE）を足すかは、利用者の要望が出た時点で別提案として起こす
 - OIDC 固有メタデータ（`jwks` / `id_token_signed_response_alg` / `default_max_age` など。生成コードの `RegisteredClient` が既に持つ軸）の受理は、フィールドごとに検証とセキュリティ面（とくに URL 参照系の SSRF）を評価して段階的に広げる
 - 定数時間比較（`timingSafeEqual`）を core の公開 API へ昇格させ、本機能内の重複実装を解消する
+
+## 追補（2026-10-29）: 受理メタデータの拡張と登録判定の差し替え
+
+実装後の利用で、受理するメタデータの不足と `response_types` の `code` 固定、登録判定の固定化が制約になったため、次の判断を改めた。
+経緯と実装は `tasks/done/p1-dcr-metadata-coverage-and-registration-policy.md` と実装解説（`implementation-guides/experimental/dynamic-client-registration.ja.md`）にある。
+
+| 当初の判断 | 改めた判断 |
+|---|---|
+| 理解するメタデータは 5 フィールド | RFC 7591 §2 と OIDC Registration 1.0 §2 のうち OP が解釈または表示用に保持できるもの（`scope`、`client_uri`、`logo_uri`、`tos_uri`、`policy_uri`、`contacts`、`software_id`、`software_version`、`application_type`、`default_max_age`、`id_token_signed_response_alg`、`userinfo_signed_response_alg`、`jwks`）を加える。URL を取得しに行くメタデータは引き続き理解しない |
+| `response_types` は `["code"]` のみ | OP が答える response_type（discovery の `response_types_supported`）を登録できる。grant と response の対応（§2.1）が崩れた登録は `invalid_client_metadata` |
+| `grant_types` は `authorization_code` と `refresh_token` のみ | 生成コードの設定 `grantTypes`（既定は `authorization_code`、`refresh_token`、`implicit`）のうち OP が答えるもの。experimental grant の URN は設定に足したときだけ登録できる |
+| `token_endpoint_auth_method` は core の 3 方式のみ | 生成コードの設定 `tokenEndpointAuthMethods` で広げられる。secret 系以外の方式には `client_secret` を発行しない |
+| `software_statement` は未知フィールドとして無視し、`invalid_software_statement` の経路は作らない | 設定の省略可能な関数 `verifySoftwareStatement` が検証して返した主張を平文へ優先して適用し、statement をそのまま返す。関数が投げる `unapproved_software_statement` / `invalid_software_statement` を応答する。関数が無い既定では引き続き statement を無視し、関数がある OP は statement の無い登録を断る。生成コードは statement を自分では検証しない |
+| initial access token は設定の固定文字列との照合のみ | 固定文字列の設定を無くし、判定を設定の省略可能な関数 `verifyInitialAccessToken` に委ねる。関数がある OP は Bearer トークンの無い登録を 401 で断り、トークンの可否は関数が決める。software statement の検証関数とカスタムメタデータの検証表も同じ `config.ts` にあり、`dynamicClientRegistration` オプション（Next.js は `extendDynamicClientRegistrationConfig()`）で渡せる。オプションで渡した一覧と表は既定に追加され、数値と判定関数は置き換わる |
+| 登録レコードは core が解釈するフィールドだけ | `RegisteredClient.registrationMetadata` に登録した全メタデータを持ち、`jwks` の鍵は `ClientKeyResolver` から用途別に引ける |
+
+同日の MUST 要件の照合で、`application_type` の既定 `web`（省略時も `redirect_uris` の制約を検査する）と、`id_token_signed_response_alg` の既定 `RS256` を登録メタデータに書き込む変更を加えた。
+OIDC Registration 1.0 §3.2 が、AS の適用した既定値を応答に含めることを求めるためで、照合表は `tasks/done/p1-dcr-metadata-coverage-and-registration-policy.md` にある。
+
+エラーの振り分けは `instanceof` ではなく形で判定する（`isClientRegistrationError`）。
+Next.js の本番ビルドは instrumentation と Route Handler を別のバンドルにするため、登録ポリシーが投げたエラーのクラスが Route Handler の import したクラスと一致しない。
