@@ -94,8 +94,10 @@ core から使うのは公開 API の `validateRegisteredRedirectUris`、`normal
 - **`error_description` は固定の ASCII 文言に限る**。送られた URI やメタデータの値、JWT のヘッダ値を文言に埋め込まず、検証失敗の詳細を攻撃者の探索に使わせない。許可一覧を示す文言（`token_endpoint_auth_method must be one of ...`）に含まれるのは設定由来の値だけである
 
 登録の判定は、生成コードの `policy.ts` に関数として置いた。
-initial access token の照合、software statement の検証、カスタムメタデータの検証表の 3 つで、利用者はこのファイルを編集するか、同じ形の関数を `applyOidc` の `dynamicClientRegistration` オプションから差し込む。
+initial access token の照合、software statement の検証、カスタムメタデータの検証表の 3 つで、利用者はこのファイルを編集するか、同じ形の関数を `applyOidc` の `dynamicClientRegistration` オプション（Next.js は `config.ts` の `extendDynamicClientRegistrationConfig()`）から差し込む。
 設定オブジェクトに関数を持たせて options から差し替える形は、ID-JAG の `actorTokenResolver` が先例である。
+オプションの適用は `extendDynamicClientRegistrationConfig` が行い、一覧（認証方式、grant、`jwks` の用途、信頼する発行者）とカスタムメタデータの表には渡した値を既定へ足し、数値や文字列と判定関数は置き換える。
+生成コードが許す値を利用者が書き写さずに「足す」だけで済ませるためで、既定から値を外す変更は生成ファイルの編集に残している。
 
 ストアの置き場所にも先例がある。
 動的登録クライアントの in-memory ストアは、PAR、Device、CIBA の experimental ストアと同じく `--db` の有無に関わらず生成コード内の globalThis シングルトンとし、`--db` でバックエンドへ差し替わる core ストア群（`ProviderStores`）へは加えない。
@@ -3078,7 +3080,7 @@ features/dynamic-client-registration/
 
 ```typescript
 import { defineFeature } from '../feature.js';
-import { dynamicClientRegistrationConfig } from './config.js';
+import { dynamicClientRegistrationConfig, extendDynamicClientRegistrationConfig } from './config.js';
 import { registerApp } from './endpoints/register/pipeline.js';
 import {
   dynamicClientStore,
@@ -3105,7 +3107,7 @@ export const dynamicClientRegistration = defineFeature({
   discovery: (issuer) => ({ registration_endpoint: `${issuer}/register` }),
   context: ({ c, options }) => ({
     dynamicClientStore,
-    dynamicClientRegistrationConfig: { ...dynamicClientRegistrationConfig, ...options.dynamicClientRegistration },
+    dynamicClientRegistrationConfig: extendDynamicClientRegistrationConfig(dynamicClientRegistrationConfig, options.dynamicClientRegistration),
     // Dynamically registered clients, and their keys, resolve after the configured clients.
     clientResolver: withDynamicallyRegisteredClients(c.get('clientResolver')),
     tokenClientResolver: withDynamicallyRegisteredClients(c.get('tokenClientResolver')),
@@ -3154,8 +3156,9 @@ export type SoftwareStatementVerifier = (
 
 /**
  * Dynamic client registration settings. The dynamicClientRegistration option of
- * createApp() / applyOidc() is merged over these defaults (feature.ts), so change
- * them here or per deployment there — the policy functions included.
+ * createApp() / applyOidc() extends these defaults (feature.ts,
+ * extendDynamicClientRegistrationConfig below), so change them here or per
+ * deployment there — the policy functions included.
  *
  * - initialAccessToken: when set, POST /register requires
  *   `Authorization: Bearer <value>` (OIDC Dynamic Client Registration 1.0 §3).
@@ -3216,16 +3219,59 @@ export const dynamicClientRegistrationConfig: DynamicClientRegistrationConfig = 
   customClientMetadata,
 };
 
+/**
+ * The settings of a deployment: the generated defaults with the
+ * dynamicClientRegistration option of createApp() / applyOidc() applied.
+ *
+ * The option adds to the lists and the table instead of replacing them, so a
+ * deployment extends what the generated code allows without repeating it:
+ * tokenEndpointAuthMethods, grantTypes and jwksPurposes gain the given values
+ * (each once), trustedSoftwarePublishers gains the given publishers (one
+ * with the issuer of a generated publisher replaces it), and
+ * customClientMetadata gains the given validators (one with the name of a
+ * generated validator replaces it). The scalar settings and the policy
+ * functions replace the defaults; a field left out or undefined keeps them.
+ * To take a value out of a generated list, edit it in config.ts.
+ */
+export function extendDynamicClientRegistrationConfig(
+  base: DynamicClientRegistrationConfig,
+  additions: Partial<DynamicClientRegistrationConfig> = {},
+): DynamicClientRegistrationConfig {
+  const {
+    tokenEndpointAuthMethods,
+    grantTypes,
+    jwksPurposes,
+    trustedSoftwarePublishers,
+    customClientMetadata: customMetadata,
+    ...replaced
+  } = additions;
+  const config: DynamicClientRegistrationConfig = { ...base };
+  for (const [name, value] of Object.entries(replaced)) {
+    if (value !== undefined) (config as unknown as Record<string, unknown>)[name] = value;
+  }
+  config.tokenEndpointAuthMethods = [...new Set([...base.tokenEndpointAuthMethods, ...(tokenEndpointAuthMethods ?? [])])];
+  config.grantTypes = [...new Set([...base.grantTypes, ...(grantTypes ?? [])])];
+  config.jwksPurposes = [...new Set([...base.jwksPurposes, ...(jwksPurposes ?? [])])];
+  const added = trustedSoftwarePublishers ?? [];
+  config.trustedSoftwarePublishers = [
+    ...base.trustedSoftwarePublishers.filter((publisher) => !added.some((entry) => entry.issuer === publisher.issuer)),
+    ...added,
+  ];
+  config.customClientMetadata = { ...base.customClientMetadata, ...customMetadata };
+  return config;
+}
+
 declare module '../../app.js' {
   interface OidcProviderOptions {
     /**
-     * EXPERIMENTAL (RFC 7591): override the dynamic client registration
+     * EXPERIMENTAL (RFC 7591): extend the dynamic client registration
      * settings (dynamicClientRegistrationConfig in
      * features/dynamic-client-registration/config.ts) per deployment — for
      * example from environment variables — without editing the generated
-     * file. Unset fields keep the generated defaults. The policy functions
-     * (verifyInitialAccessToken, verifySoftwareStatement, customClientMetadata)
-     * can be replaced here too.
+     * file (extendDynamicClientRegistrationConfig). The lists and the custom
+     * metadata table gain the given values, the scalar settings and the
+     * policy functions (verifyInitialAccessToken, verifySoftwareStatement)
+     * replace the generated ones, and an unset field keeps them.
      */
     dynamicClientRegistration?: Partial<DynamicClientRegistrationConfig>;
   }

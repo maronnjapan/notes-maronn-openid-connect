@@ -39,7 +39,8 @@ Dynamic Client Registration（RFC 7591、PR #131）は、理解するメタデ�
 - [x] `grant_types` と `response_types` の整合（RFC 7591 §2.1 / OIDC Registration §2）を検査し、生成コードは OP が答える response_type（`supportedResponseTypes()` / `responseTypesOf(features)`）と grant（`tokenGrantsOf(features)`、implicit を答えるときの `implicit`）を渡す
 - [x] 標準外のメタデータを `customMetadata`（名前と検証関数の表）で受理する。値は 201 応答と `RegisteredClient.registrationMetadata` に現れる
 - [x] software statement を `verifySoftwareStatement`（core の `parseRequestObject` で署名検証。発行者の承認、`iss`、`exp` / `nbf`）と `applySoftwareStatement` で扱い、`ClientRegistrationError` に 2 つのコードを足す。既定では発行者を承認せず、statement を送る登録は `unapproved_software_statement` になる
-- [x] 登録の判定を生成コードの `policy.ts` に関数として生成し（`verifyRegistrationInitialAccessToken`、`verifyRegistrationSoftwareStatement`、`customClientMetadata`）、`config.ts` の既定値として持たせる。Hono / Express / Fastify は `applyOidc` の `dynamicClientRegistration` オプションからも差し込める
+- [x] 登録の判定を生成コードの `policy.ts` に関数として生成し（`verifyRegistrationInitialAccessToken`、`verifyRegistrationSoftwareStatement`、`customClientMetadata`）、`config.ts` の既定値として持たせる。Hono / Express / Fastify は `applyOidc` の `dynamicClientRegistration` オプション、Next.js は `extendDynamicClientRegistrationConfig()` から差し込める
+- [x] オプションで渡した一覧（認証方式、grant、`jwks` の用途、信頼する発行者）とカスタムメタデータの表は既定に追加し、数値や文字列と判定関数は置き換える（`extendDynamicClientRegistrationConfig`）。利用者が生成コードの許す値を書き写さずに足せるようにする
 - [x] `client_secret` を secret 系の認証方式にだけ発行し、`tokenEndpointAuthMethods` の拡張で `private_key_jwt` などを登録できるようにする
 - [x] ストアのレコードを `db/` の `ClientRegistration` と同じ形にし、`jwks` の鍵を用途別に持ち、`withDynamicallyRegisteredClientKeys` で鍵解決に合成する。Next.js の `ProviderContext` に `clientKeyResolver` を加える
 - [x] エラーの振り分けを `isClientRegistrationError`（形による判定）にする。Next.js の本番ビルドでは instrumentation と Route Handler が別バンドルになり、`instanceof` では policy が投げたエラーを 500 にしてしまうため
