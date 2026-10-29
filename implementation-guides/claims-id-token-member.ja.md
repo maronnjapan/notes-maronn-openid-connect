@@ -3,6 +3,10 @@
 対象は `@maronn-openid-connect/core` のトークンレスポンス生成と、CLI が生成する token エンドポイントおよび契約テストである。
 OSS リポジトリのタスク `tasks/done/p2-claims-id-token-member-individual-claims.md` から実装した。
 
+> **注意（2026-10-29）**: この解説が掲載する `pickIdTokenRequestedClaims` / `ID_TOKEN_REQUESTABLE_CLAIMS` / `matchesRequestedValue` は、その後のリファクタリングで `applyRequestedIdTokenClaims` / `matchesRequestedClaimValue`（`packages/core/src/token-response.ts`）へ置き換えられ、現行コードには存在しない。
+> 現行実装のアロウリスト（`DEFAULT_REQUESTABLE_CLAIMS`）は `implementation-guides/claims-parameter-claim-name-allowlist.{ja,en}.md` を参照。
+> 本文は実装当時の記録として残している。
+
 ## この機能は何をするのか
 
 OpenID Provider は、認可リクエストの `claims` パラメータ（OIDC Core 1.0 §5.5）で、クレーム単位の返却要求を受け取れる。
