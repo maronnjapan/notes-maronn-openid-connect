@@ -29,7 +29,8 @@ Dynamic Client Registration（RFC 7591、PR #131）は、理解するメタデ�
 - **RFC 7591 §2.3 / §3.1.1**: software statement は発行者が署名した JWT で、`iss` を持ち、主張したメタデータは平文の値に優先する。対応しない AS は無視してよい
 - **RFC 7591 §3.2.1**: 登録に使った software statement は応答にそのまま返す（MUST）
 - **RFC 7591 §3.2.2**: `invalid_software_statement`（検証できない）、`unapproved_software_statement`（発行者を承認していない）
-- **OpenID Connect Dynamic Client Registration 1.0 §2**: response_type ごとに要る grant_type の対応表、`application_type` ごとの `redirect_uris` の制約、`default_max_age`、`id_token_signed_response_alg`（`none` の禁止）
+- **OpenID Connect Dynamic Client Registration 1.0 §2**: response_type ごとに要る grant_type の対応表、`application_type`（既定 `web`）ごとの `redirect_uris` の制約と、登録する全 `redirect_uris` がそれに従うことを AS が確かめる MUST、`default_max_age`、`id_token_signed_response_alg`（既定 `RS256`、`none` の禁止）
+- **OpenID Connect Dynamic Client Registration 1.0 §3.2**: AS が適用した既定値は応答に含める（MUST）。`client_id` は他のクライアントに有効であってはならず、`client_secret_expires_at` は `client_secret` を発行したときに必須、`registration_client_uri` と `registration_access_token` は両方返すか両方返さない
 - **RFC 6749 §3.3**: scope の構文
 
 ## 実装方針
@@ -45,6 +46,34 @@ Dynamic Client Registration（RFC 7591、PR #131）は、理解するメタデ�
 - [x] ストアのレコードを `db/` の `ClientRegistration` と同じ形にし、`jwks` の鍵を用途別に持ち、`withDynamicallyRegisteredClientKeys` で鍵解決に合成する。Next.js の `ProviderContext` に `clientKeyResolver` を加える
 - [x] エラーの振り分けを `isClientRegistrationError`（形による判定）にする。Next.js の本番ビルドでは instrumentation と Route Handler が別バンドルになり、`instanceof` では policy が投げたエラーを 500 にしてしまうため
 - [x] 実装解説（日英）を `apps/*` の構成に合わせて全文書き直し、利用者向け docs と changeset（cli: minor）を更新する
+- [x] RFC 7591 と OIDC Registration 1.0 の MUST 要件を照合し、`application_type` の既定 `web` と省略時の `redirect_uris` の制約検査、`id_token_signed_response_alg` の既定 `RS256` の登録を補う（下記「MUST 要件の照合」）
+
+## MUST 要件の照合
+
+software statement がある登録は、statement の主張を平文の値へ優先して適用した結果を登録メタデータにする（RFC 7591 §3.1.1）。
+`applySoftwareStatement` が平文のオブジェクトへ検証済みの主張を重ね、`validateClientMetadata` はその結果だけを見る。
+statement 自体は `software_statement` としてそのまま応答に返し、statement から使った要素もトップレベルの値として返す（§3.2.1）。
+
+| 要件 | 出典 | 実装 |
+|---|---|---|
+| 理解しないメタデータは無視する | RFC 7591 §2、OIDC Registration §3.2 | `validateClientMetadata` の allowlist-pick |
+| software statement は署名された JWT で `iss` を持つ | RFC 7591 §2.3 | `verifySoftwareStatement`（3 セグメント、`iss`、発行者の鍵で署名検証、`alg: none` を許さない） |
+| statement の値は平文の値に優先する | RFC 7591 §3.1.1 | `applySoftwareStatement` |
+| 登録した全メタデータを返し、statement はそのまま、使った要素はトップレベルにも返す | RFC 7591 §3.2.1 | `buildClientRegistrationResponse`（発行値 + `metadata`） |
+| `client_secret` を発行したら `client_secret_expires_at` を返す | RFC 7591 §3.2.1、OIDC Registration §3.2 | `buildClientRegistrationResponse`（0 = 無期限） |
+| エラー応答は 400 で `error` を持つ | RFC 7591 §3.2.2 | `respondRegistrationError` / Route Handler の catch |
+| `redirect_uris` は必須 | OIDC Registration §2 | `validateRedirectUris`（`invalid_redirect_uri`） |
+| `application_type` の既定は `web`。web + implicit は https かつ `localhost` 以外、native はカスタムスキームかループバック http。AS は全 `redirect_uris` の適合を確かめる | OIDC Registration §2 | `validateApplicationType`（省略時 `web`）と `validateRedirectUrisForApplicationType`（常に実行） |
+| `jwks` に秘密鍵・対称鍵を含めない。`jwks` と `jwks_uri` を併用しない | OIDC Registration §2、RFC 7591 §2 | `validateJwks`（RSA / EC の公開鍵のみ）、併記は `invalid_client_metadata` |
+| `id_token_signed_response_alg` の既定は `RS256`、`none` は使わない | OIDC Registration §2 | `validateSigningAlg`（省略時 `RS256`、`none` 拒否、OP の鍵の alg に限る） |
+| AS が適用した既定値は応答に含める | OIDC Registration §3.2 | `token_endpoint_auth_method`、`grant_types`、`response_types`、`application_type`、`id_token_signed_response_alg` を `metadata` に書き込む |
+| `client_id` は他のクライアントに有効でない。`client_secret` を複数クライアントに割り当てない | OIDC Registration §3.2 | `dcr-` 名前空間 + 128 ビット乱数、256 ビット乱数の secret |
+| `registration_client_uri` と `registration_access_token` は両方返すか両方返さない | OIDC Registration §3.2 | どちらも返さない（RFC 7592 は非目標） |
+| initial access token は Bearer トークンとして受け付ける | OIDC Registration §3 | `verifyRegistrationInitialAccessToken`（`Authorization: Bearer`） |
+| 登録エンドポイントとの通信は TLS | RFC 7591 §5、OIDC Registration §9 | 配備側（リバースプロキシ / プラットフォーム）の責務 |
+
+`sector_identifier_uri`（OIDC Registration §5 の登録時検証）は、`subject_types_supported` が `public` だけの OP では効果が無いため理解せず無視する。
+`logo_uri` などが「有効な画像 / Web ページを指す」MUST はクライアント側の義務で、OP は取得しに行かず構文だけを検査する。
 
 ## テスト要件
 

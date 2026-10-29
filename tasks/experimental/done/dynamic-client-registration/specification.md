@@ -448,5 +448,8 @@ HTTP レベルの検証マトリクスもこのスペックに置き、既存ス
 | initial access token は設定の固定文字列との照合のみ | 照合関数を生成コードの `policy.ts` に生成し、編集か `dynamicClientRegistration` オプション（Next.js は `extendDynamicClientRegistrationConfig()`）で差し替えられる。software statement の検証関数とカスタムメタデータの検証表も同じ場所にある。オプションで渡した一覧と表は既定に追加され、数値や文字列と判定関数は置き換わる |
 | 登録レコードは core が解釈するフィールドだけ | `RegisteredClient.registrationMetadata` に登録した全メタデータを持ち、`jwks` の鍵は `ClientKeyResolver` から用途別に引ける |
 
+同日の MUST 要件の照合で、`application_type` の既定 `web`（省略時も `redirect_uris` の制約を検査する）と、`id_token_signed_response_alg` の既定 `RS256` を登録メタデータに書き込む変更を加えた。
+OIDC Registration 1.0 §3.2 が、AS の適用した既定値を応答に含めることを求めるためで、照合表は `tasks/done/p1-dcr-metadata-coverage-and-registration-policy.md` にある。
+
 エラーの振り分けは `instanceof` ではなく形で判定する（`isClientRegistrationError`）。
 Next.js の本番ビルドは instrumentation と Route Handler を別のバンドルにするため、登録ポリシーが投げたエラーのクラスが Route Handler の import したクラスと一致しない。

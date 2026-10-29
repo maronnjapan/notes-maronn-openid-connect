@@ -474,6 +474,11 @@ Three functions.
 `validateClientRegistrationRequest` chains the two and ignores software statements.
 Every list of allowed values is an option; the defaults are the three auth methods core verifies, `authorization_code` with `refresh_token`, `code`, and RS256.
 
+The defaults of omitted fields are written into the registered metadata: `token_endpoint_auth_method`, `grant_types` and `response_types` of RFC 7591 §2, and `application_type` (`web`) and `id_token_signed_response_alg` (`RS256`) of OIDC Dynamic Client Registration 1.0 §2.
+Its §3.2 requires the AS to include the defaults it applied in the response.
+The `redirect_uris` constraints per `application_type` are checked for an omitted type as `web` too.
+Its §2 requires the AS to verify that every registered `redirect_uris` value conforms, so a web client using the implicit grant can register only https URIs that are not `localhost`.
+
 ```typescript
 /**
  * OAuth 2.0 Dynamic Client Registration (RFC 7591) — 登録リクエストの解析と
@@ -621,7 +626,11 @@ export interface ValidateClientMetadataOptions {
    * 受理する。
    */
   scopes?: readonly string[];
-  /** id_token_signed_response_alg に受理する alg。既定は RS256 のみ。 */
+  /**
+   * id_token_signed_response_alg に受理する alg。既定は RS256 のみ。省略時の
+   * 既定値 RS256（OIDC Dynamic Client Registration 1.0 §2）もこの一覧に照合する
+   * ので、RS256 で署名できない OP は省略した登録を拒否する。
+   */
   idTokenSigningAlgValuesSupported?: readonly string[];
   /** userinfo_signed_response_alg に受理する alg。既定は RS256 のみ。 */
   userinfoSigningAlgValuesSupported?: readonly string[];
@@ -632,17 +641,24 @@ export interface ValidateClientMetadataOptions {
   customMetadata?: Readonly<Record<string, CustomClientMetadataValidator>>;
 }
 
-/** 検証済み登録メタデータ（RFC 7591 §2 の既定値適用後）。 */
+/**
+ * 検証済み登録メタデータ（RFC 7591 §2 / OIDC Dynamic Client Registration 1.0 §2
+ * の既定値適用後）。
+ */
 export interface ValidatedClientRegistration {
   redirectUris: string[];
   tokenEndpointAuthMethod: string;
   grantTypes: string[];
   responseTypes: string[];
+  /** OIDC Dynamic Client Registration 1.0 §2 の application_type。省略時の既定は web。 */
+  applicationType: 'web' | 'native';
   /** RFC 7591 §2 の scope。登録したときだけ持つ（core の ClientInfo.scope と同じ意味）。 */
   scope?: string[];
   /** OIDC Dynamic Client Registration 1.0 §2 の default_max_age。登録したときだけ持つ。 */
   defaultMaxAge?: number;
-  idTokenSignedResponseAlg?: string;
+  /** OIDC Dynamic Client Registration 1.0 §2 の id_token_signed_response_alg。省略時の既定は RS256。 */
+  idTokenSignedResponseAlg: string;
+  /** userinfo_signed_response_alg。登録したときだけ持つ（無ければ UserInfo は署名しない JSON）。 */
   userinfoSignedResponseAlg?: string;
   /** RFC 7591 §2 の jwks（正規化済み）。登録したときだけ持つ。 */
   jwks?: JwkSet;
@@ -703,6 +719,11 @@ const SOFTWARE_VERSION_MAX_LENGTH = 64;
 /**
  * 登録メタデータを検証し、既定値を適用して返す。
  *
+ * 既定値は RFC 7591 §2（token_endpoint_auth_method、grant_types、response_types）と
+ * OIDC Dynamic Client Registration 1.0 §2（application_type、
+ * id_token_signed_response_alg）のもので、AS が適用した既定値は応答に含めなければ
+ * ならない（同 §3.2 MUST）ため、どれも登録メタデータ（metadata）に書き込む。
+ *
  * 未知フィールドは黙って捨てる（RFC 7591 §2 MUST ignore）。実装は「理解する
  * フィールドだけを新しいオブジェクトへ選び取る」allowlist-pick 方式で、
  * パース結果のスプレッドや Object.assign によるコピーをしない。`__proto__`
@@ -729,18 +750,36 @@ export function validateClientMetadata(
   const grantTypes = validateGrantTypes(metadata['grant_types'], grantTypesSupported);
   const responseTypes = validateResponseTypes(metadata['response_types'], responseTypesSupported);
   validateGrantAndResponseTypeConsistency(grantTypes, responseTypes);
+  // OIDC Dynamic Client Registration 1.0 §2: application_type は省略時 web。
+  // AS は登録するすべての redirect_uris がその種別の制約（web で implicit grant を
+  // 使うなら https かつ localhost 以外、native ならカスタムスキームかループバックの
+  // http）に従うことを確かめなければならない（MUST）ので、省略時も web として検査する。
+  const applicationType = validateApplicationType(
+    metadata['application_type'] === undefined ? 'web' : metadata['application_type'],
+  );
+  validateRedirectUrisForApplicationType(redirectUris, applicationType, grantTypes);
+  // OIDC Dynamic Client Registration 1.0 §2: id_token_signed_response_alg は省略時
+  // RS256。既定値も OP が署名できる alg の一覧に照合する。
+  const idTokenSignedResponseAlg = validateSigningAlg(
+    metadata['id_token_signed_response_alg'] === undefined ? 'RS256' : metadata['id_token_signed_response_alg'],
+    'id_token_signed_response_alg',
+    options?.idTokenSigningAlgValuesSupported ?? DEFAULT_SIGNING_ALGS,
+  );
 
   const registered: Record<string, unknown> = {
     redirect_uris: [...redirectUris],
     token_endpoint_auth_method: tokenEndpointAuthMethod,
     grant_types: [...grantTypes],
     response_types: [...responseTypes],
+    application_type: applicationType,
   };
   const validated: ValidatedClientRegistration = {
     redirectUris,
     tokenEndpointAuthMethod,
     grantTypes,
     responseTypes,
+    applicationType,
+    idTokenSignedResponseAlg,
     metadata: registered,
   };
 
@@ -770,11 +809,6 @@ export function validateClientMetadata(
       SOFTWARE_VERSION_MAX_LENGTH,
     );
   }
-  if (metadata['application_type'] !== undefined) {
-    const applicationType = validateApplicationType(metadata['application_type']);
-    validateRedirectUrisForApplicationType(redirectUris, applicationType, grantTypes);
-    registered['application_type'] = applicationType;
-  }
   if (metadata['jwks'] !== undefined && metadata['jwks_uri'] !== undefined) {
     // RFC 7591 §2: jwks_uri と jwks を同時に使ってはならない。jwks_uri 単独は
     // この OP が取得しに行かない（理解しない）メタデータとして無視する。
@@ -790,15 +824,7 @@ export function validateClientMetadata(
     validated.defaultMaxAge = defaultMaxAge;
     registered['default_max_age'] = defaultMaxAge;
   }
-  if (metadata['id_token_signed_response_alg'] !== undefined) {
-    const alg = validateSigningAlg(
-      metadata['id_token_signed_response_alg'],
-      'id_token_signed_response_alg',
-      options?.idTokenSigningAlgValuesSupported ?? DEFAULT_SIGNING_ALGS,
-    );
-    validated.idTokenSignedResponseAlg = alg;
-    registered['id_token_signed_response_alg'] = alg;
-  }
+  registered['id_token_signed_response_alg'] = idTokenSignedResponseAlg;
   if (metadata['userinfo_signed_response_alg'] !== undefined) {
     const alg = validateSigningAlg(
       metadata['userinfo_signed_response_alg'],
@@ -1182,6 +1208,11 @@ export interface DynamicallyRegisteredClient {
   tokenEndpointAuthMethods: [string];
   scope?: string[];
   defaultMaxAge?: number;
+  /**
+   * 登録した id_token_signed_response_alg。buildRegisteredClient は省略時の既定
+   * RS256（OIDC Dynamic Client Registration 1.0 §2）を含めて必ず持たせる。
+   * ほかで組み立てたレコードが欠くときも、core は RS256 として扱う。
+   */
   idTokenSignedResponseAlg?: string;
   userinfoSignedResponseAlg?: string;
   jwks?: JwkSet;
@@ -1254,9 +1285,7 @@ export function buildRegisteredClient(
     tokenEndpointAuthMethods: [metadata.tokenEndpointAuthMethod],
     ...(metadata.scope === undefined ? {} : { scope: [...metadata.scope] }),
     ...(metadata.defaultMaxAge === undefined ? {} : { defaultMaxAge: metadata.defaultMaxAge }),
-    ...(metadata.idTokenSignedResponseAlg === undefined
-      ? {}
-      : { idTokenSignedResponseAlg: metadata.idTokenSignedResponseAlg }),
+    idTokenSignedResponseAlg: metadata.idTokenSignedResponseAlg,
     ...(metadata.userinfoSignedResponseAlg === undefined
       ? {}
       : { userinfoSignedResponseAlg: metadata.userinfoSignedResponseAlg }),
@@ -1474,17 +1503,25 @@ function body(metadata: Record<string, unknown>): string {
 
 const MINIMAL = { redirect_uris: ['https://app.example.com/cb'] };
 
-/** 既定値だけが適用された最小登録の検証結果。 */
+/**
+ * 既定値だけが適用された最小登録の検証結果。RFC 7591 §2 の 3 つの既定値と、
+ * OIDC Dynamic Client Registration 1.0 §2 の application_type（web）と
+ * id_token_signed_response_alg（RS256）は、登録メタデータとして応答に現れる。
+ */
 const MINIMAL_VALIDATED = {
   redirectUris: ['https://app.example.com/cb'],
   tokenEndpointAuthMethod: 'client_secret_basic',
   grantTypes: ['authorization_code'],
   responseTypes: ['code'],
+  applicationType: 'web',
+  idTokenSignedResponseAlg: 'RS256',
   metadata: {
     redirect_uris: ['https://app.example.com/cb'],
     token_endpoint_auth_method: 'client_secret_basic',
     grant_types: ['authorization_code'],
     response_types: ['code'],
+    application_type: 'web',
+    id_token_signed_response_alg: 'RS256',
   },
 };
 
@@ -1607,12 +1644,16 @@ describe('validateClientMetadata', () => {
         tokenEndpointAuthMethod: 'client_secret_post',
         grantTypes: ['authorization_code', 'refresh_token'],
         responseTypes: ['code'],
+        applicationType: 'web',
+        idTokenSignedResponseAlg: 'RS256',
         metadata: {
           redirect_uris: ['https://app.example.com/cb', 'http://127.0.0.1:8080/cb'],
           token_endpoint_auth_method: 'client_secret_post',
           grant_types: ['authorization_code', 'refresh_token'],
           response_types: ['code'],
+          application_type: 'web',
           client_name: 'My Test App',
+          id_token_signed_response_alg: 'RS256',
         },
       });
     });
@@ -2044,6 +2085,20 @@ describe('validateClientMetadata', () => {
   });
 
   describe('application_type (OIDC Dynamic Client Registration 1.0 Section 2)', () => {
+    // §2: the default, if omitted, is web; §3.2: a default the AS applied is
+    // part of the registered metadata it returns.
+    it('should default application_type to web and register the default', () => {
+      const validated = validateClientMetadata(MINIMAL);
+      expect(validated.applicationType).toBe('web');
+      expect(validated.metadata['application_type']).toBe('web');
+    });
+
+    it('should reject a null application_type instead of treating it as omitted', () => {
+      expect(() => validateClientMetadata({ ...MINIMAL, application_type: null })).toThrowError(
+        new ClientRegistrationError('invalid_client_metadata', 'application_type must be web or native'),
+      );
+    });
+
     it('should register web and native', () => {
       expect(validateClientMetadata({ ...MINIMAL, application_type: 'web' }).metadata['application_type']).toBe('web');
       expect(
@@ -2088,6 +2143,27 @@ describe('validateClientMetadata', () => {
       expect(validated.redirectUris).toEqual(['http://localhost:3000/cb']);
     });
 
+    // §2: the AS MUST verify that all registered redirect_uris conform to the
+    // constraints of the application type, so the omitted type is checked as web.
+    it('should apply the web constraints to a registration that omits application_type and uses the implicit grant', () => {
+      const options = { grantTypes: ['authorization_code', 'implicit'], responseTypes: ['code', 'id_token'] };
+      const implicitClient = { grant_types: ['implicit'], response_types: ['id_token'] };
+
+      const registered = validateClientMetadata(
+        { redirect_uris: ['https://app.example.com/cb'], ...implicitClient },
+        options,
+      );
+      expect(registered.metadata['application_type']).toBe('web');
+      expect(() =>
+        validateClientMetadata({ redirect_uris: ['http://127.0.0.1:8080/cb'], ...implicitClient }, options),
+      ).toThrowError(
+        new ClientRegistrationError(
+          'invalid_client_metadata',
+          'a web client using the implicit grant must register https redirect_uris that do not use localhost',
+        ),
+      );
+    });
+
     it('should reject a localhost redirect_uri of a web client using the implicit grant', () => {
       expect(() =>
         validateClientMetadata(
@@ -2127,6 +2203,23 @@ describe('validateClientMetadata', () => {
   });
 
   describe('id_token_signed_response_alg and userinfo_signed_response_alg', () => {
+    // OIDC Dynamic Client Registration 1.0 §2: the default, if omitted, is
+    // RS256; §3.2: the AS returns the defaults it applied. userinfo has no
+    // default alg: an omitted value means an unsigned JSON response.
+    it('should default id_token_signed_response_alg to RS256 and register the default', () => {
+      const validated = validateClientMetadata(MINIMAL);
+      expect(validated.idTokenSignedResponseAlg).toBe('RS256');
+      expect(validated.metadata['id_token_signed_response_alg']).toBe('RS256');
+      expect(validated.userinfoSignedResponseAlg).toBeUndefined();
+      expect(Object.hasOwn(validated.metadata, 'userinfo_signed_response_alg')).toBe(false);
+    });
+
+    it('should reject the omitted id_token_signed_response_alg when the OP cannot sign RS256', () => {
+      expect(() => validateClientMetadata(MINIMAL, { idTokenSigningAlgValuesSupported: ['ES256'] })).toThrowError(
+        new ClientRegistrationError('invalid_client_metadata', 'id_token_signed_response_alg must be one of ES256'),
+      );
+    });
+
     it('should accept RS256 by default and echo it', () => {
       const validated = validateClientMetadata({
         ...MINIMAL,
@@ -2658,11 +2751,15 @@ const CONFIDENTIAL: ValidatedClientRegistration = {
   tokenEndpointAuthMethod: 'client_secret_basic',
   grantTypes: ['authorization_code'],
   responseTypes: ['code'],
+  applicationType: 'web',
+  idTokenSignedResponseAlg: 'RS256',
   metadata: {
     redirect_uris: ['https://app.example.com/cb'],
     token_endpoint_auth_method: 'client_secret_basic',
     grant_types: ['authorization_code'],
     response_types: ['code'],
+    application_type: 'web',
+    id_token_signed_response_alg: 'RS256',
   },
 };
 
@@ -2705,6 +2802,7 @@ describe('buildRegisteredClient', () => {
         grantTypes: ['authorization_code'],
         responseTypes: ['code'],
         tokenEndpointAuthMethods: ['client_secret_basic'],
+        idTokenSignedResponseAlg: 'RS256',
         clientIdIssuedAt: 1_790_812_800,
         metadata: CONFIDENTIAL.metadata,
       });
@@ -2721,6 +2819,7 @@ describe('buildRegisteredClient', () => {
         grantTypes: ['authorization_code'],
         responseTypes: ['code'],
         tokenEndpointAuthMethods: ['none'],
+        idTokenSignedResponseAlg: 'RS256',
         clientIdIssuedAt: 1_790_812_800,
         metadata: PUBLIC.metadata,
       });
@@ -2772,6 +2871,8 @@ describe('buildRegisteredClient', () => {
       });
     });
 
+    // id_token_signed_response_alg is never left out: it always carries at
+    // least its default (OIDC Dynamic Client Registration 1.0 §2).
     it('should leave the optional record fields out when they were not registered', () => {
       const client = buildRegisteredClient(CONFIDENTIAL, FIXED);
       expect(Object.keys(client)).toEqual([
@@ -2782,6 +2883,7 @@ describe('buildRegisteredClient', () => {
         'grantTypes',
         'responseTypes',
         'tokenEndpointAuthMethods',
+        'idTokenSignedResponseAlg',
         'clientIdIssuedAt',
         'metadata',
       ]);
@@ -3878,9 +3980,12 @@ export const meta = step({
 });
 
 /**
- * Allowlist-pick of the understood fields, value checks, RFC 7591 §2 defaults
- * and the §2.1 consistency of grant_types and response_types — pure functions
- * from the experimental package, bounded to what this provider answers:
+ * Allowlist-pick of the understood fields, value checks, the RFC 7591 §2 and
+ * OIDC Dynamic Client Registration 1.0 §2 defaults (application_type web,
+ * id_token_signed_response_alg RS256 — registered and returned, §3.2), the
+ * redirect_uris constraints of the application type and the §2.1 consistency
+ * of grant_types and response_types — pure functions from the experimental
+ * package, bounded to what this provider answers:
  *
  * - token_endpoint_auth_method: the methods of the registration config
  * - grant_types: the grants of the config that this provider answers
@@ -4219,14 +4324,17 @@ async function registerClient(request: Request): Promise<Response> {
             await config.verifySoftwareStatement(registration.softwareStatement, config),
           );
 
-    // (5) Allowlist-pick of the understood fields, value checks, RFC 7591 §2
-    // defaults and the §2.1 consistency of grant_types and response_types —
-    // pure functions from @maronn-openid-connect/experimental/dynamic-client-registration,
-    // bounded to what this provider answers: the methods and grants of the
-    // config, the response types of the features, the scopes of scopes.ts, the
-    // algs of the signing keys and the custom metadata of the policy. Unknown
-    // metadata is silently ignored (§2 MUST), and every error_description is a
-    // fixed ASCII string that never reflects request values.
+    // (5) Allowlist-pick of the understood fields, value checks, the RFC 7591
+    // §2 and OIDC Dynamic Client Registration 1.0 §2 defaults (application_type
+    // web, id_token_signed_response_alg RS256 — registered and returned, §3.2),
+    // the redirect_uris constraints of the application type and the §2.1
+    // consistency of grant_types and response_types — pure functions from
+    // @maronn-openid-connect/experimental/dynamic-client-registration, bounded
+    // to what this provider answers: the methods and grants of the config, the
+    // response types of the features, the scopes of scopes.ts, the algs of the
+    // signing keys and the custom metadata of the policy. Unknown metadata is
+    // silently ignored (§2 MUST), and every error_description is a fixed ASCII
+    // string that never reflects request values.
     const responseTypes = ['code', ...responseTypesOf(features)];
     const validated = validateClientMetadata(metadata, {
       tokenEndpointAuthMethods: config.tokenEndpointAuthMethods,
@@ -4551,6 +4659,10 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
     expect(registered.token_endpoint_auth_method).toBe('client_secret_basic');
     expect(registered.grant_types).toEqual(['authorization_code']);
     expect(registered.response_types).toEqual(['code']);
+    // OIDC Dynamic Client Registration 1.0 §2 defaults the OP applied, returned
+    // as registered metadata (§3.2).
+    expect(registered.application_type).toBe('web');
+    expect(registered.id_token_signed_response_alg).toBe('RS256');
     expect(registered.client_name).toBe('E2E Minimal Client');
   });
 
@@ -4635,7 +4747,9 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
   });
 
   // OIDC Dynamic Client Registration 1.0 §2: the response types the OP
-  // advertises are registrable, and the implicit grant pairs with them.
+  // advertises are registrable, and the implicit grant pairs with them. The
+  // loopback http redirect target of this suite is what a native client may
+  // register (a web client using the implicit grant is held to https).
   test('should register an implicit client and return its ID Token in the fragment (OIDC Core 1.0 §3.2)', async ({
     page,
     request,
@@ -4652,6 +4766,7 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
 
     const registered = await registerClient(request, issuer, {
       redirect_uris: [registeredRedirectUri],
+      application_type: 'native',
       token_endpoint_auth_method: 'none',
       grant_types: ['implicit'],
       response_types: ['token id_token'],
@@ -4661,6 +4776,7 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
     // The response type comes back normalized (OAuth 2.0 Multiple Response Type Encoding Practices §1.2).
     expect(registered.response_types).toEqual(['id_token token']);
     expect(registered.grant_types).toEqual(['implicit']);
+    expect(registered.application_type).toBe('native');
 
     const { fragment, nonce } = await authorizeImplicitInBrowser(page, issuer, clientId);
 
@@ -4668,6 +4784,46 @@ test.describe('Dynamic Client Registration (RFC 7591)', () => {
     const idToken = decodeJwtPayload(requireString(fragment['id_token'], 'id_token'));
     expect(idToken.aud).toBe(clientId);
     expect(idToken.nonce).toBe(nonce);
+  });
+
+  // OIDC Dynamic Client Registration 1.0 §2: application_type defaults to web,
+  // and the OP MUST verify that every registered redirect_uri conforms to the
+  // constraints of that type — for a web client using the implicit grant,
+  // https only and never localhost — so the omitted type is checked too.
+  test('should default application_type to web and hold an implicit client to https redirect_uris (OIDC Registration 1.0 §2)', async ({
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    const endpoint = await registrationEndpoint(request, issuer);
+    test.skip(endpoint === undefined, SKIP_REASON);
+    const metadata = await discoveryMetadata(request, issuer);
+    test.skip(
+      !(metadata.response_types_supported as string[] | undefined)?.includes('id_token'),
+      'This sample OP was generated without implicit-flow',
+    );
+    const implicitClient = {
+      token_endpoint_auth_method: 'none',
+      grant_types: ['implicit'],
+      response_types: ['id_token'],
+    };
+
+    const refused = await request.post(`${issuer}/register`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { ...implicitClient, redirect_uris: [registeredRedirectUri] },
+    });
+    const registered = await registerClient(request, issuer, {
+      ...implicitClient,
+      redirect_uris: ['https://implicit-client.e2e.example.com/cb'],
+    });
+
+    expect(refused.status()).toBe(400);
+    expect(await refused.json()).toEqual({
+      error: 'invalid_client_metadata',
+      error_description: 'a web client using the implicit grant must register https redirect_uris that do not use localhost',
+    });
+    expect(registered.application_type).toBe('web');
+    expect(registered.redirect_uris).toEqual(['https://implicit-client.e2e.example.com/cb']);
   });
 
   // RFC 7591 §2: the scope metadata becomes the client's scope list, so a
