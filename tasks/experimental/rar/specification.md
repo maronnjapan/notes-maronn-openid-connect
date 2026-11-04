@@ -245,7 +245,7 @@ declare module '../../config.js' {
 
 - **fail-closed**: 未知 type、構造違反、上限超過はすべて拒否する（§5 MUST）。型定義が空なら全拒否。
 - **ログ禁止**: `authorization_details` の内容（金額、口座、識別子などの機微情報。§13）をログへ出さない。エラーメッセージにも反映しない。
-- **同意の明示**: details を伴うリクエストは常に同意画面を経由する。prompt=none は `consent_required`。SSO の同意スキップ（`reuse-session` の `consentResolver.hasConsent` 経路)は scope 単位の記録しか持たず details を知らないため、`prompt` への `consent` 付与で迂回を塞ぐ。
+- **同意の明示**: details を伴うリクエストは常に同意画面を経由する。prompt=none は `consent_required`。SSO の同意スキップ（`reuse-session` の `consentResolver.hasConsent` 経路）は scope 単位の記録しか持たず details を知らないため、`prompt` への `consent` 付与で迂回を塞ぐ。
 - **表示の安全**: `describe` はプレーン文字列を返し、HTML を組み立てない。エスケープは view 層の既存機構に委ねる。
 - **インジェクション対策（§12 MUST sanitize）**: details は不透明な JSON 値として保持・転記のみ行い、深いマージ、`eval` 相当、動的キーアクセスによる書き込みをしない。
 - **DoS**: バイト長と要素数の上限。上限値は応答に反映しない。
@@ -390,6 +390,7 @@ apps/hono と apps/nextjs の開発サーバーにデモ型定義（U2 参照）
 ### 解決済み
 
 - **U2: E2E 用デモ型定義の形**（Review 3 で確定）: RFC 9396 §2.1 Figure 1 の例に寄せた `payment_initiation` 型とする。`validate` は、`actions` が `['initiate']` / `['status']` / `['cancel']` の値だけからなる非空の文字列配列であること、型固有フィールド `instructedAmount` が `{ currency: 大文字 3 文字, amount: 小数文字列（`/^\d+\.\d{2}$/`）}` のオブジェクトであることを検査する。`describe` は `Initiate a payment of EUR 123.50` のような固定書式のプレーン文字列を返す。テスト入力には RFC 9396 §2.1 の例の値（EUR 123.50）をそのまま使い、出典を記載する。登録場所は、CLI の抽出範囲の外にある開発用設定の実体、すなわち hono は `apps/hono/src/app.ts` の `createServerApp`（`applyOidc` の `config` へ `rarTypes` を渡す）、nextjs は `apps/nextjs/src/dev-data.ts` の `applyFeatureSettings`（provider の `config` オブジェクトに `rarTypes` を代入する。`rpInitiatedLogoutConfig` などの機能設定を同所で代入する既存パターンに倣う）。どちらも生成コードには含まれない。デモ型定義そのものは E2E からも使うため、`tests/e2e` と重複定義にならないよう apps 側に置き、E2E はプロトコル越しに検証する。
+
 - **U1: grant 紐付けストアの掃除**（Review 2 で確定）: `expiresAt = 発行時刻 + refreshTokenAbsoluteLifetime` の TTL と、書き込み時の lazy eviction（ciba の in-memory ストアの方式）とする。ローテーションは `originalIssuedAt` 起点で絶対寿命を固定するため、有効なリフレッシュトークンより先にエントリが消えることはなく、§7 の MUST と両立する。リフレッシュトークンを発行しない grant では TTL まで過剰保持になるが、in-memory の experimental として許容し、利用者向け Docs の既知の制約に記載する。
 - **U3: `requestObjectClaims` 内の値の型**（Review 2 で実測）: `parseRequestObject` は JWT ペイロードを JSON デコードした `Record<string, unknown>` を返すため、claim 値はパース済み JSON 値（通常は配列）として届く。パース関数は `unknown` を受ける `parseAuthorizationDetailsInput` とし、文字列（クエリ / PAR）とパース済み値（Request Object）の両方を入口で吸収する。
 
