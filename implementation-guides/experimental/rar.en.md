@@ -74,14 +74,10 @@ Everything is pure functions plus a plain in-memory store, using only web-standa
 
 ### authorization-details.ts (structural validation and type-definition matching)
 
-The entry point `parseAuthorizationDetailsInput()` takes `unknown` because the shape depends on the route: query and PAR deliver a URL-encoded string, while a Request Object delivers an already-parsed array (the JWT payload is JSON-decoded by core).
+The entry point `parseAuthorizationDetailsInput()` takes `unknown` because the shape depends on the route: query and PAR deliver a URL-encoded string, while a Request Object delivers an already-parsed array (core JSON-decodes the JWT payload).
 A string has its raw UTF-8 byte length checked before parsing; a parsed value is measured through `JSON.stringify`, so the same cap applies on both routes.
 Checking bytes before parsing stops the parse of a huge JSON document at the door (the DoS guard; §11.4 points large requests to PAR).
-
-Detail objects are treated as opaque JSON values — kept and copied, never deep-merged or written through dynamic keys.
-An input with a `__proto__` key travels as the own property `JSON.parse` creates and never reaches a prototype (the answer to §12's sanitize requirement, pinned by a unit test).
-
-The full file is embedded in the Japanese guide ([rar.ja.md](./rar.ja.md#authorization-detailsts構造検証と型定義の突き合わせ)) and reproduced here:
+Detail objects are treated as opaque JSON values — kept and copied, never deep-merged or written through dynamic keys — so a `__proto__` key travels as an own property and never reaches a prototype (§12's sanitize requirement, pinned by a unit test).
 
 ```typescript
 /**
@@ -327,13 +323,13 @@ export function describeAuthorizationDetails(
 }
 ```
 
-The exception thrown by `describeAuthorizationDetails()` for an unknown type is the approval-stage fail-closed: if the operator removed a type definition after validation, the display line for that entry cannot be built, and silently dropping it would mean the end user "approved" rights they never saw.
+The exception `describeAuthorizationDetails()` throws for an unknown type is the approval-stage fail-closed: if the operator removed a type definition after validation, the display line for that entry cannot be built, and dropping it silently would mean the end user "approved" rights they never saw.
 Failing the page render is the safer outcome.
 
 ### store.ts (keeping the details)
 
 The store contract is just `set` / `get` / `delete`, with the requirement that an entry past its `expiresAt` (epoch milliseconds) is never returned.
-The in-memory implementation evicts expired entries on every `set` (lazy eviction on writes, the same approach as the CIBA store) so an idle store cannot grow without bound, without a resident timer.
+The in-memory implementation evicts expired entries on every `set` (lazy eviction on writes, the same approach as the CIBA store), so an idle store cannot grow without bound and no resident timer is needed.
 
 ```typescript
 /**
@@ -443,8 +439,360 @@ The `package.json` exports gained the `"./rar"` subpath; as for every feature of
 ## The unit tests, in full
 
 The test inputs reuse the `payment_initiation` example of RFC 9396 §2.1 Figure 1 (EUR 123.50) verbatim.
-The suite pins the byte-length boundary in UTF-8 (on / over, with multi-byte characters), the entry-count boundary, that `__proto__` / `constructor` keys stay own properties without polluting prototypes, and that error messages never contain input values (probed with an IBAN-like string).
-Both test files are embedded in full in the Japanese guide ([rar.ja.md](./rar.ja.md#単体テストの全文)); the code is identical, so this guide does not repeat the two test files.
+The suite pins the UTF-8 byte-length boundary (on / over, with multi-byte characters), the entry-count boundary, that `__proto__` / `constructor` keys stay own properties without polluting prototypes, and that error messages never contain input values (probed with an IBAN-like string).
+
+The two test files are identical to the ones embedded in the Japanese guide, section [単体テストの全文 in rar.ja.md](./rar.ja.md#単体テストの全文); both are reproduced below.
+
+### authorization-details.test.ts
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import {
+  AUTHORIZATION_DETAILS_PARAM,
+  RarError,
+  describeAuthorizationDetails,
+  parseAuthorizationDetailsInput,
+  validateAuthorizationDetails,
+  type AuthorizationDetail,
+  type AuthorizationDetailTypeDefinition,
+} from './authorization-details.js';
+
+const LIMITS = { maxBytes: 16384, maxEntries: 16 };
+
+// RFC 9396 §2.1 Figure 1 の payment_initiation の例をテスト入力に使う。
+const PAYMENT_DETAIL = {
+  type: 'payment_initiation',
+  actions: ['initiate'],
+  locations: ['https://example.com/payments'],
+  instructedAmount: { currency: 'EUR', amount: '123.50' },
+};
+
+// 型固有検証と表示のデモ型定義（RFC 9396 §2.1 の例の形）。
+const PAYMENT_TYPE: AuthorizationDetailTypeDefinition = {
+  type: 'payment_initiation',
+  validate(detail: AuthorizationDetail): void {
+    if (!Array.isArray(detail.actions) || detail.actions.length === 0) {
+      throw new RarError('payment_initiation requires actions');
+    }
+  },
+  describe(detail: AuthorizationDetail): readonly string[] {
+    const amount = detail['instructedAmount'] as { currency: string; amount: string };
+    return [`Initiate a payment of ${amount.currency} ${amount.amount}`];
+  },
+};
+
+describe('AUTHORIZATION_DETAILS_PARAM', () => {
+  it('should name the RFC 9396 request parameter', () => {
+    expect(AUTHORIZATION_DETAILS_PARAM).toBe('authorization_details');
+  });
+});
+
+describe('parseAuthorizationDetailsInput', () => {
+  describe('string input (query / PAR)', () => {
+    it('should parse a single-entry JSON array string', () => {
+      const details = parseAuthorizationDetailsInput(JSON.stringify([PAYMENT_DETAIL]), LIMITS);
+      expect(details).toEqual([PAYMENT_DETAIL]);
+    });
+
+    it('should parse multiple entries and keep duplicated types', () => {
+      // RFC 9396 §2: 同じ type の要素が複数あってよい（MAY）。
+      const details = parseAuthorizationDetailsInput(
+        JSON.stringify([PAYMENT_DETAIL, PAYMENT_DETAIL]),
+        LIMITS,
+      );
+      expect(details).toEqual([PAYMENT_DETAIL, PAYMENT_DETAIL]);
+    });
+
+    it('should reject a string that is not valid JSON', () => {
+      expect(() => parseAuthorizationDetailsInput('{not json', LIMITS)).toThrow(RarError);
+    });
+
+    it('should reject JSON that is not an array', () => {
+      expect(() => parseAuthorizationDetailsInput(JSON.stringify(PAYMENT_DETAIL), LIMITS)).toThrow(
+        'authorization_details must be a JSON array',
+      );
+    });
+
+    it('should reject a raw string over maxBytes measured as UTF-8', () => {
+      // 多バイト文字（3 バイトの「あ」）で、文字数でなくバイト数が検査されることを確かめる。
+      const padding = 'あ'.repeat(40);
+      const raw = JSON.stringify([{ ...PAYMENT_DETAIL, note: padding }]);
+      const onLimit = new TextEncoder().encode(raw).length;
+      expect(() => parseAuthorizationDetailsInput(raw, { maxBytes: onLimit, maxEntries: 16 })).not.toThrow();
+      expect(() => parseAuthorizationDetailsInput(raw, { maxBytes: onLimit - 1, maxEntries: 16 })).toThrow(
+        'authorization_details is too large',
+      );
+    });
+  });
+
+  describe('parsed JSON input (Request Object)', () => {
+    it('should accept an already-parsed array', () => {
+      const details = parseAuthorizationDetailsInput([PAYMENT_DETAIL], LIMITS);
+      expect(details).toEqual([PAYMENT_DETAIL]);
+    });
+
+    it('should reject a parsed value that is neither string nor array', () => {
+      expect(() => parseAuthorizationDetailsInput(PAYMENT_DETAIL, LIMITS)).toThrow(
+        'authorization_details must be a JSON array',
+      );
+      expect(() => parseAuthorizationDetailsInput(42, LIMITS)).toThrow(
+        'authorization_details must be a JSON array',
+      );
+    });
+
+    it('should reject undefined input', () => {
+      expect(() => parseAuthorizationDetailsInput(undefined, LIMITS)).toThrow(
+        'authorization_details must be a JSON value',
+      );
+    });
+
+    it('should reject a parsed array whose JSON serialization is over maxBytes', () => {
+      const value = [{ ...PAYMENT_DETAIL, note: 'x'.repeat(50) }];
+      const onLimit = new TextEncoder().encode(JSON.stringify(value)).length;
+      expect(() => parseAuthorizationDetailsInput(value, { maxBytes: onLimit, maxEntries: 16 })).not.toThrow();
+      expect(() => parseAuthorizationDetailsInput(value, { maxBytes: onLimit - 1, maxEntries: 16 })).toThrow(
+        'authorization_details is too large',
+      );
+    });
+  });
+
+  describe('array shape', () => {
+    it('should reject an empty array', () => {
+      expect(() => parseAuthorizationDetailsInput('[]', LIMITS)).toThrow(
+        'authorization_details must not be empty',
+      );
+    });
+
+    it('should reject more entries than maxEntries', () => {
+      const entries = Array.from({ length: 3 }, () => PAYMENT_DETAIL);
+      expect(() =>
+        parseAuthorizationDetailsInput(JSON.stringify(entries), { maxBytes: 16384, maxEntries: 2 }),
+      ).toThrow('authorization_details has too many entries');
+    });
+
+    it('should accept exactly maxEntries entries', () => {
+      const entries = Array.from({ length: 2 }, () => PAYMENT_DETAIL);
+      expect(
+        parseAuthorizationDetailsInput(JSON.stringify(entries), { maxBytes: 16384, maxEntries: 2 }),
+      ).toEqual(entries);
+    });
+
+    it('should reject entries that are not plain objects', () => {
+      for (const entry of ['payment_initiation', ['nested'], null, 42]) {
+        expect(() => parseAuthorizationDetailsInput(JSON.stringify([entry]), LIMITS)).toThrow(
+          'authorization_details entries must be JSON objects',
+        );
+      }
+    });
+  });
+
+  describe('type field (RFC 9396 §2 REQUIRED)', () => {
+    it('should reject an entry without type', () => {
+      expect(() => parseAuthorizationDetailsInput(JSON.stringify([{ actions: ['initiate'] }]), LIMITS)).toThrow(
+        'authorization_details entries must have a non-empty type',
+      );
+    });
+
+    it('should reject an empty-string type', () => {
+      expect(() => parseAuthorizationDetailsInput(JSON.stringify([{ type: '' }]), LIMITS)).toThrow(
+        'authorization_details entries must have a non-empty type',
+      );
+    });
+
+    it('should reject a non-string type', () => {
+      expect(() => parseAuthorizationDetailsInput(JSON.stringify([{ type: 7 }]), LIMITS)).toThrow(
+        'authorization_details entries must have a non-empty type',
+      );
+    });
+  });
+
+  describe('common fields (RFC 9396 §2.2)', () => {
+    it('should reject a locations value that is not an array', () => {
+      expect(() =>
+        parseAuthorizationDetailsInput(JSON.stringify([{ type: 'payment_initiation', locations: 'https://example.com' }]), LIMITS),
+      ).toThrow('authorization_details common fields must have the RFC 9396 types');
+    });
+
+    it('should reject an identifier value that is not a string', () => {
+      expect(() =>
+        parseAuthorizationDetailsInput(JSON.stringify([{ type: 'payment_initiation', identifier: ['account-14'] }]), LIMITS),
+      ).toThrow('authorization_details common fields must have the RFC 9396 types');
+    });
+
+    it('should reject a string-array field holding a non-string item', () => {
+      expect(() =>
+        parseAuthorizationDetailsInput(JSON.stringify([{ type: 'payment_initiation', actions: ['initiate', 7] }]), LIMITS),
+      ).toThrow('authorization_details common fields must have the RFC 9396 types');
+    });
+
+    it('should accept all common fields with their RFC 9396 types', () => {
+      const entry = {
+        type: 'payment_initiation',
+        locations: ['https://example.com/payments'],
+        actions: ['initiate'],
+        datatypes: ['transactions'],
+        identifier: 'account-14',
+        privileges: ['admin'],
+      };
+      expect(parseAuthorizationDetailsInput(JSON.stringify([entry]), LIMITS)).toEqual([entry]);
+    });
+  });
+
+  describe('prototype safety (RFC 9396 §12 sanitize)', () => {
+    it('should keep a __proto__ key as an own property without polluting prototypes', () => {
+      const raw = '[{"type":"payment_initiation","__proto__":{"polluted":true}}]';
+      const [detail] = parseAuthorizationDetailsInput(raw, LIMITS);
+      expect(Object.getOwnPropertyNames(detail)).toEqual(['type', '__proto__']);
+      expect(({} as Record<string, unknown>)['polluted']).toBe(undefined);
+      expect(Object.getPrototypeOf(detail)).toBe(Object.prototype);
+    });
+
+    it('should keep a constructor key as data without replacing the real constructor behavior', () => {
+      const raw = '[{"type":"payment_initiation","constructor":"overridden"}]';
+      const [detail] = parseAuthorizationDetailsInput(raw, LIMITS);
+      expect(detail['constructor']).toBe('overridden');
+      expect(({} as Record<string, unknown>)['constructor']).toBe(Object);
+    });
+  });
+
+  describe('error hygiene (RFC 9396 §13)', () => {
+    it('should keep the input value out of the error message', () => {
+      const secret = 'IBAN-DE75512108001245126199';
+      let caught: unknown;
+      try {
+        parseAuthorizationDetailsInput(JSON.stringify([{ type: 7, account: secret }]), LIMITS);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(RarError);
+      expect((caught as RarError).message).toBe('authorization_details entries must have a non-empty type');
+      expect((caught as RarError).message.includes(secret)).toBe(false);
+    });
+  });
+});
+
+describe('validateAuthorizationDetails', () => {
+  it('should accept entries whose type definition validates', () => {
+    expect(() => validateAuthorizationDetails([PAYMENT_DETAIL], [PAYMENT_TYPE])).not.toThrow();
+  });
+
+  it('should reject every entry when no type definitions are registered', () => {
+    // fail-closed: 型定義が空なら全拒否（RFC 9396 §5）。
+    expect(() => validateAuthorizationDetails([PAYMENT_DETAIL], [])).toThrow(
+      'authorization_details contains an unsupported type',
+    );
+  });
+
+  it('should reject an entry whose type has no definition', () => {
+    const unknownDetail = { type: 'account_information' };
+    expect(() => validateAuthorizationDetails([PAYMENT_DETAIL, unknownDetail], [PAYMENT_TYPE])).toThrow(
+      'authorization_details contains an unsupported type',
+    );
+  });
+
+  it('should propagate a RarError thrown by the type definition validate', () => {
+    const invalid = { type: 'payment_initiation', actions: [] };
+    expect(() => validateAuthorizationDetails([invalid], [PAYMENT_TYPE])).toThrow(
+      'payment_initiation requires actions',
+    );
+  });
+
+  it('should propagate a non-RarError thrown by the type definition validate', () => {
+    const throwingType: AuthorizationDetailTypeDefinition = {
+      type: 'payment_initiation',
+      validate(): void {
+        throw new TypeError('validator bug');
+      },
+      describe(): readonly string[] {
+        return [];
+      },
+    };
+    expect(() => validateAuthorizationDetails([PAYMENT_DETAIL], [throwingType])).toThrow(TypeError);
+  });
+});
+
+describe('describeAuthorizationDetails', () => {
+  it('should build the display lines in entry order', () => {
+    const second = {
+      ...PAYMENT_DETAIL,
+      instructedAmount: { currency: 'USD', amount: '9.99' },
+    };
+    expect(describeAuthorizationDetails([PAYMENT_DETAIL, second], [PAYMENT_TYPE])).toEqual([
+      'Initiate a payment of EUR 123.50',
+      'Initiate a payment of USD 9.99',
+    ]);
+  });
+
+  it('should reject an entry whose type has no definition', () => {
+    expect(() => describeAuthorizationDetails([{ type: 'account_information' }], [PAYMENT_TYPE])).toThrow(
+      'authorization_details contains an unsupported type',
+    );
+  });
+});
+```
+
+### store.test.ts
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createInMemoryRarDetailsStore } from './store.js';
+
+const DETAILS = [{ type: 'payment_initiation', actions: ['initiate'] }] as const;
+
+describe('createInMemoryRarDetailsStore', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-04T00:00:00Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('should return stored details for a key', async () => {
+    const store = createInMemoryRarDetailsStore();
+    await store.set('txn-1', DETAILS);
+    expect(await store.get('txn-1')).toEqual(DETAILS);
+  });
+
+  it('should return undefined for an unknown key', async () => {
+    const store = createInMemoryRarDetailsStore();
+    expect(await store.get('missing')).toBe(undefined);
+  });
+
+  it('should return undefined after delete', async () => {
+    const store = createInMemoryRarDetailsStore();
+    await store.set('txn-1', DETAILS);
+    await store.delete('txn-1');
+    expect(await store.get('txn-1')).toBe(undefined);
+  });
+
+  it('should return undefined once expiresAt has passed', async () => {
+    const store = createInMemoryRarDetailsStore();
+    await store.set('grant-1', DETAILS, Date.now() + 1000);
+    expect(await store.get('grant-1')).toEqual(DETAILS);
+    vi.advanceTimersByTime(1000);
+    expect(await store.get('grant-1')).toBe(undefined);
+  });
+
+  it('should keep an entry without expiresAt alive', async () => {
+    const store = createInMemoryRarDetailsStore();
+    await store.set('txn-1', DETAILS);
+    vi.advanceTimersByTime(10 * 24 * 60 * 60 * 1000);
+    expect(await store.get('txn-1')).toEqual(DETAILS);
+  });
+
+  it('should evict expired entries on the next set', async () => {
+    const store = createInMemoryRarDetailsStore();
+    await store.set('grant-1', DETAILS, Date.now() + 1000);
+    vi.advanceTimersByTime(2000);
+    // 書き込み時の lazy eviction で、失効済みの grant-1 が掃除される。
+    await store.set('grant-2', DETAILS, Date.now() + 1000);
+    expect(await store.get('grant-1')).toBe(undefined);
+    expect(await store.get('grant-2')).toEqual(DETAILS);
+  });
+});
+```
 
 ## CLI integration and the generated-code contribution
 
@@ -455,28 +803,42 @@ The feature is disabled by default (`DEFAULT_FEATURES`), requires no other featu
 { id: 'rar', tier: 'experimental', requires: [], packages: EXPERIMENTAL, frameworks: ALL_FRAMEWORKS, runtimes: ALL_RUNTIMES, summary: 'OAuth 2.0 Rich Authorization Requests (RFC 9396)' },
 ```
 
-The hono output receives the feature directory `features/rar/` (config.ts, store.ts, feature.ts and seven step files) plus owner blocks on four pipelines and small base changes that leave the disabled output behaviorally unchanged.
-All of these files and blocks are embedded in full, with the surrounding prose stating where each block lands, in the Japanese guide ([rar.ja.md](./rar.ja.md#cli-統合と生成コードへの寄与)); the code is byte-identical between the two guides' subject, so this guide summarizes where each piece goes and embeds the blocks that carry a design decision.
+What follows is the complete code the hono output receives.
+The Express and Fastify outputs share the same feature directory and blocks; the Next.js differences are described at the end of this section.
+The feature files below are identical, byte for byte, to the ones embedded in the Japanese guide ([rar.ja.md](./rar.ja.md#cli-統合と生成コードへの寄与)), whose section also carries them in full; the JSDoc of each file explains its own contract, so the prose here sticks to where each piece lands and why.
 
-- `features/rar/config.ts`: the byte / entry caps with fail-fast range checks, and the `declare module` extension that puts `rarTypes` on `ProviderConfig`
-- `features/rar/store.ts`: the two store instances (`rarTransactionStore`, `rarGrantStore`) shared through a `globalThis` registry
-- `features/rar/feature.ts`: the discovery hook (advertises only while types are registered) and the context hook that hands both stores to the steps
-- `steps/validate-authorization-details.ts`: reads the value (Request Object claim first, per OIDC Core 1.0 §6.1 supersede, since core's Request Object merge copies fixed keys only), validates, and applies the prompt control
-- `steps/record-authorization-details.ts`: persists the validated details under the transactionId with the transaction TTL
-- `steps/describe-authorization-details.ts`: builds the consent display rows from the stored details
-- `steps/record-granted-details.ts`: at the consent confirmation point, moves the details from the transactionId key to the grantId key with the refresh-token absolute lifetime
-- `steps/reject-token-request-details.ts`: rejects `authorization_details` on the token request with 400 `invalid_authorization_details`, ahead of every side effect
-- `steps/append-token-response-details.ts`: appends the approved details to the token response body (§7 MUST, no enrichment)
-- `steps/append-introspection-details.ts`: appends them as a top-level member of an `active: true` introspection answer (§9.2), before the optional RFC 9701 signing
+### features/rar/config.ts, store.ts, feature.ts and the seven step files
 
-The pipeline blocks land as follows.
-On `endpoints/authorize/pipeline.ts`, validation sits between `[validate-hybrid-request]` and `[create-transaction]` — before the transaction is created, so the `consent` added to `validatedRequest.prompt` is what gets stored — and recording sits right after `[create-transaction]`.
-On `endpoints/token/pipeline.ts`, the reject block follows `[dispatch-ciba]` and precedes `[validate-grant-type]`, and the append block follows `[build-token-response]`, whose `const tokenResponse` became `let` (the same pattern as PAR's reassigned `let params`).
-On the introspection pipeline, the append block sits between `[build-response]` (now `let introspection`) and `[sign-response]`, so a signed introspection JWT covers the member.
+These ten files are embedded in full in the Japanese guide and are not repeated a second time in this file pair — the two guides document the same, single implementation, and every file below is listed with its role:
+
+- `config.ts`: the byte / entry caps with fail-fast range checks, plus the `declare module` extension that puts `rarTypes` on `ProviderConfig` (the google-login config pattern)
+- `store.ts`: `rarTransactionStore` and `rarGrantStore`, two instances of the experimental store contract shared through a `globalThis` registry (the PAR store pattern)
+- `feature.ts`: the discovery hook — `authorization_details_types_supported` only while types are registered — and the context hook that hands both stores to the steps
+- `steps/validate-authorization-details.ts`: reads the value (the Request Object claim supersedes the query per OIDC Core 1.0 §6.1; core's Request Object merge copies fixed keys only, so the claim is read from `requestObjectClaims`), runs the structural and type-definition validation, and applies the prompt control — `consent_required` for `prompt=none` alone, `consent` appended otherwise, hands off to the base check when `none` is combined with other values
+- `steps/record-authorization-details.ts`: persists the validated details under the transactionId with the transaction TTL, so details of an abandoned transaction expire with it
+- `steps/describe-authorization-details.ts`: builds the consent display rows from the stored details; throws when a stored type no longer has a definition, so nothing is approved unseen
+- `steps/record-granted-details.ts`: at the consent confirmation point, moves the details from the transactionId key to the grantId key with the refresh-token absolute lifetime (rotation fixes the absolute lifetime at the original issuance, so the entry outlives every valid refresh token; a grant without refresh tokens over-retains until the TTL, accepted for an in-memory experimental store)
+- `steps/reject-token-request-details.ts`: throws `TokenEndpointError` (400 `invalid_authorization_details`) when the token request carries the parameter, ahead of every side effect
+- `steps/append-token-response-details.ts`: appends the approved array to the token response body (§7 MUST, no §7.1 enrichment); a grant without details returns the response object unchanged
+- `steps/append-introspection-details.ts`: appends the member to an `active: true` introspection answer (§9.2, no per-RS filtering), placed before the optional RFC 9701 signing so a signed answer covers it
+
+### Where the pipeline blocks land
+
+On `endpoints/authorize/pipeline.ts`, validation sits between `[validate-hybrid-request]` and `[create-transaction]` — before the transaction is created, so the `consent` added to `validatedRequest.prompt` is what gets stored — and recording sits right after `[create-transaction]`:
+
+```typescript
+    // [validate-authorization-details] (feature: rar) authorization_details を検証し、同意を必須にする — RFC 9396 §3 / §5
+    const authorizationDetails = validateAuthorizationDetailsRequest(c, { params, requestObjectClaims, validatedRequest });
+```
+
+```typescript
+    // [record-authorization-details] (feature: rar) authorization details をトランザクションへ保持する — RFC 9396 §3
+    await recordAuthorizationDetails(c, { transactionId, transactionTtlSeconds, authorizationDetails });
+```
 
 One hono-specific wrinkle shaped the consent GET path.
-A feature-owned block in a hono pipeline extends from its marker to the next marker or the end of the handler; a rar block placed last in `prepareConsent()` would swallow the `return` statement when the feature is removed.
-The rar block therefore sits **before** `[describe-consent-screen]`, producing `authorizationDetails`, and the base `return { ...screen, authorizationDetails }` reads it; with rar disabled the generator replaces the binding with `const authorizationDetails = undefined;`, and the screen renders exactly as before:
+A feature-owned block in a hono pipeline extends from its marker to the next marker or the end of the handler, so a rar block placed last in `prepareConsent()` would swallow the `return` statement when the feature is removed.
+The rar block therefore sits **before** `[describe-consent-screen]`, producing `authorizationDetails`, and the base `return` reads it; with rar disabled, the generator replaces the binding with `const authorizationDetails = undefined;` and the screen renders exactly as before:
 
 ```typescript
   // [describe-authorization-details] (feature: rar) 同意画面に出す authorization details の表示行を作る — RFC 9396 §3.1
@@ -487,11 +849,77 @@ The rar block therefore sits **before** `[describe-consent-screen]`, producing `
   return { ...screen, authorizationDetails };
 ```
 
-The consent screen types (`ConsentScreen`, `ConsentPageParams`) gained an optional `authorizationDetails?: readonly string[]`, and the default view lists it only when present, so the disabled output renders the same markup as before.
+In `submitConsent()`, the hand-over block runs at the consent confirmation point, between the authorization-code issuance and the consent record:
+
+```typescript
+  // [record-granted-details] (feature: rar) 承認された authorization details をグラントへ紐付ける — RFC 9396 §7
+  await recordGrantedAuthorizationDetails(c, transactionId, authCodeData);
+```
+
+On `endpoints/token/pipeline.ts`, the reject block follows `[dispatch-ciba]` and precedes `[validate-grant-type]`, and the append block follows `[build-token-response]`, whose `const tokenResponse` became `let` (the same pattern as PAR's reassigned `let params`):
+
+```typescript
+    // [reject-token-request-details] (feature: rar) トークンリクエストの authorization_details を拒否する — RFC 9396 §6
+    rejectTokenRequestAuthorizationDetails(params);
+```
+
+```typescript
+    // [build-token-response] トークンレスポンスのボディを組み立てる — OIDC Core 1.0 §3.1.3.3 / RFC 6749 §5.1
+    let tokenResponse = buildTokenResponse(c, { accessToken, idToken, refreshToken, validatedRequest });
+
+    // [append-token-response-details] (feature: rar) 承認済みの authorization details を応答へ含める — RFC 9396 §7
+    tokenResponse = await appendAuthorizationDetailsToTokenResponse(c, tokenResponse, validatedRequest);
+```
+
+On the introspection pipeline of the introspection feature, the append block sits between `[build-response]` (now `let introspection`) and `[sign-response]`:
+
+```typescript
+    // [build-response] トークンの情報をまとめる（有効かどうか） — RFC 7662 §2.2
+    let introspection = describeIntrospectedToken(resolved);
+
+    // [append-introspection-details] (feature: rar) authorization details を introspection 応答へ含める — RFC 9396 §9.2
+    introspection = await appendAuthorizationDetailsToIntrospection(c, introspection, resolved);
+```
+
+### The consent-screen base change
+
+`ConsentScreen` (the consent logic layer) and `ConsentPageParams` (the view layer) gained an optional field, the default view lists it only when present, and `page.tsx` passes it through — so the disabled output renders the same markup as before:
+
+```typescript
+  /**
+   * Display lines of the requested authorization details (RFC 9396 §3.1),
+   * shown next to the scopes. Set by the rar feature; absent without it or
+   * when the request carried no authorization_details.
+   */
+  authorizationDetails?: readonly string[];
+```
+
+```tsx
+      {params.authorizationDetails && params.authorizationDetails.length > 0 ? (
+        <>
+          <p>The client also requests the following authorization details:</p>
+          <ul>
+            {params.authorizationDetails.map((line) => (
+              <li>{line}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+```
+
+Each endpoint's `endpoint.ts` lists the new feature-tagged steps (authorize: `validate-authorization-details` / `record-authorization-details`; consent: `describe-authorization-details` / `record-granted-details` with GET and approval edges; token: `reject-token-request-details` / `append-token-response-details`; introspection: `append-introspection-details`), and `features/enabled.ts` gains the import and list entry:
+
+```typescript
+import { rar } from './rar/feature.js';
+```
+
+```typescript
+  rar,
+```
 
 ### The Next.js output
 
-Next.js implements the same flow with `_oidc-provider/features/rar/` (config / store / feature / authorize / consent / token / introspect) and same-named owner blocks on the authorize, consent-decision, token and introspect Route Handlers; the code is equivalent to hono and linked rather than embedded ([apps/nextjs/src/app/_oidc-provider/features/rar/](https://github.com/maronnjapan/maronn-openid-connect/tree/main/apps/nextjs/src/app/_oidc-provider/features/rar)).
+Next.js implements the same flow with `_oidc-provider/features/rar/` (config / store / feature / authorize / consent / token / introspect) and same-named owner blocks on the authorize, consent-decision, token and introspect Route Handlers ([apps/nextjs/src/app/_oidc-provider/features/rar/](https://github.com/maronnjapan/maronn-openid-connect/tree/main/apps/nextjs/src/app/_oidc-provider/features/rar)).
 Two structural differences are worth explaining.
 
 First, the consent screen is a React Server Component page, not a Route Handler, so it cannot carry owner blocks.
@@ -510,6 +938,29 @@ With rar disabled the features list has no rar and the rows are empty.
       config: ProviderConfig,
     ) => Promise<readonly string[]>;
   };
+```
+
+```typescript
+/**
+ * 機能が同意画面に加える表示行を、機能の順に集めて返す。
+ *
+ * 各機能の `consent.describeTransaction` をトランザクション ID と設定で呼び、
+ * 返った行をつなげる。表示する内容を持たない機能は空配列を返すので、
+ * どの機能も無ければ結果も空配列になる。
+ */
+export async function consentRowsOf(
+  features: readonly Feature[],
+  transactionId: string,
+  config: ProviderConfig,
+): Promise<string[]> {
+  const rows: string[] = [];
+  for (const feature of features) {
+    const describe = feature.consent?.describeTransaction;
+    if (describe === undefined) continue;
+    rows.push(...(await describe(transactionId, config)));
+  }
+  return rows;
+}
 ```
 
 Second, the type-definition injection has two doors.
@@ -536,20 +987,388 @@ export function resolveRarTypes(
 
 The authorize Route Handler also turned `const prompt` into `let prompt`: the validation block runs before `validatedRequest` exists there, so the updated prompt comes back as a return value and is reassigned.
 
+```typescript
+    // [validate-authorization-details] (feature: rar) authorization_details を検証し、同意を必須にする — RFC 9396 §3 / §5
+    const rarRequest = validateAuthorizationDetailsRequest({ params, requestObjectClaims, prompt, redirectUri, state, rarTypes: resolveRarTypes(config) });
+    const authorizationDetails = rarRequest.authorizationDetails;
+    prompt = rarRequest.prompt;
+```
+
 ### The demo type (outside the generated code)
 
-So the E2E suite can exercise the feature over the protocol, the repository's development apps (apps/hono through `app.ts`, apps/nextjs through `dev-data.ts`) register a demo `payment_initiation` type shaped after RFC 9396 §2.1 Figure 1 — `actions` restricted to `initiate` / `status` / `cancel`, `instructedAmount` checked as `{ currency: three uppercase letters, amount: a two-decimal string }`, and one fixed-format display line per action (`Initiate a payment of EUR 123.50`).
-Both files sit outside the CLI extraction roots, so a generated provider starts with zero types.
-The full demo file is embedded in the Japanese guide ([rar.ja.md](./rar.ja.md#デモ型定義生成コードの外)).
+So the E2E suite can exercise the feature over the protocol, the repository's development apps (apps/hono through `app.ts`, apps/nextjs through `dev-data.ts`) register a demo `payment_initiation` type shaped after RFC 9396 §2.1 Figure 1.
+Both registration points sit outside the CLI extraction roots, so a generated provider starts with zero types.
 
-## The E2E spec
+```typescript
+/**
+ * EXPERIMENTAL (RFC 9396): the demo authorization-details type of this app.
+ *
+ * A payment_initiation type shaped after the example of RFC 9396 §2.1
+ * Figure 1, registered by app.ts so tests/e2e can exercise the rar feature
+ * over the protocol. It is this app's own development data — the CLI never
+ * copies this file into generated code, and a generated provider accepts no
+ * type until its operator injects definitions through config.rarTypes.
+ */
+import {
+  RarError,
+  type AuthorizationDetail,
+  type AuthorizationDetailTypeDefinition,
+} from '@maronn-openid-connect/experimental/rar';
+
+/** The actions the demo type accepts (RFC 9396 §2.1 uses "initiate"). */
+const PAYMENT_ACTIONS = ['initiate', 'status', 'cancel'] as const;
+
+/** The display verb of each accepted action on the consent screen. */
+const ACTION_VERBS: Record<(typeof PAYMENT_ACTIONS)[number], string> = {
+  initiate: 'Initiate a payment of',
+  status: 'Check the status of a payment of',
+  cancel: 'Cancel a payment of',
+};
+
+/**
+ * payment_initiation の要素を検証し、`actions` の値域と `instructedAmount` の構造に違反があれば `RarError` を投げる。
+ *
+ * `actions` は `initiate` / `status` / `cancel` だけからなる非空の配列、
+ * `instructedAmount` は `{ currency: 大文字 3 文字, amount: 小数 2 桁の文字列 }` の
+ * オブジェクトでなければならない（RFC 9396 §2.1 の例の形）。
+ * message は固定の ASCII 文言で、入力値を含めない。
+ *
+ * @spec RFC 9396 §2.1
+ * @throws {RarError} `actions` か `instructedAmount` が上の形でないとき
+ */
+function validatePaymentInitiation(detail: AuthorizationDetail): void {
+  const actions = detail.actions;
+  if (
+    !Array.isArray(actions) ||
+    actions.length === 0 ||
+    actions.some((action) => !(PAYMENT_ACTIONS as readonly string[]).includes(action))
+  ) {
+    throw new RarError('payment_initiation requires actions out of initiate, status, cancel');
+  }
+  const instructedAmount = detail['instructedAmount'];
+  if (typeof instructedAmount !== 'object' || instructedAmount === null || Array.isArray(instructedAmount)) {
+    throw new RarError('payment_initiation requires an instructedAmount object');
+  }
+  const { currency, amount } = instructedAmount as Record<string, unknown>;
+  if (typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency)) {
+    throw new RarError('payment_initiation requires an uppercase three-letter currency');
+  }
+  if (typeof amount !== 'string' || !/^\d+\.\d{2}$/.test(amount)) {
+    throw new RarError('payment_initiation requires a decimal amount string');
+  }
+}
+
+/**
+ * payment_initiation の要素から、同意画面に出す固定書式の表示行（アクションごとに 1 行）を返す。
+ *
+ * `validatePaymentInitiation()` を通った要素だけを受ける前提で、
+ * `Initiate a payment of EUR 123.50` のようなプレーン文字列を組み立てる。
+ *
+ * @spec RFC 9396 §3.1
+ */
+function describePaymentInitiation(detail: AuthorizationDetail): readonly string[] {
+  const { currency, amount } = detail['instructedAmount'] as { currency: string; amount: string };
+  const actions = (detail.actions ?? []) as readonly (typeof PAYMENT_ACTIONS)[number][];
+  return actions.map((action) => `${ACTION_VERBS[action]} ${currency} ${amount}`);
+}
+
+/** The demo type definitions app.ts passes to applyOidc as config.rarTypes. */
+export const demoRarTypes: readonly AuthorizationDetailTypeDefinition[] = [
+  {
+    type: 'payment_initiation',
+    validate: validatePaymentInitiation,
+    describe: describePaymentInitiation,
+  },
+];
+```
+
+## The E2E spec, in full
 
 The E2E client gained a `/start-rar` route that runs the ordinary code flow with the demo `authorization_details` attached, then observes the details on all three channels (token response, refresh, introspection) and prints them as JSON, plus the rotated refresh token.
 The spec skips itself through discovery's `authorization_details_types_supported`, so sample OPs generated without `--enable rar` only run the one test that shows the parameter is still ignored as before.
-
 The token-endpoint rejection test verifies the before-side-effects property over the protocol: after a refresh request carrying `authorization_details` is rejected with 400, a retry with the **same refresh token** succeeds — which is only possible if the rejection happened before the rotation revoked the presented token.
 
-The spec file `tests/e2e/specs/rar.spec.ts` and the client additions are embedded in full in the Japanese guide ([rar.ja.md](./rar.ja.md#e2e-テストの全文)); the code is identical in both repositories' views, so this guide links instead of repeating the roughly 250 lines.
+### specs/rar.spec.ts
+
+```typescript
+import { expect, test } from '@playwright/test';
+
+const host = process.env.E2E_HOST ?? '127.0.0.1';
+const clientPort = Number(process.env.E2E_CLIENT_PORT ?? '3020');
+const clientBaseURL =
+  process.env.E2E_CLIENT_BASE_URL ?? `http://${host}:${clientPort}`;
+const clientId = 'e2e-client';
+const clientSecret = 'e2e-client-secret';
+
+// The demo type the app OPs register (apps/*/src/rar-demo.ts): the
+// payment_initiation example of RFC 9396 §2.1 Figure 1.
+const PAYMENT_DETAIL = {
+  type: 'payment_initiation',
+  actions: ['initiate'],
+  locations: ['https://example.com/payments'],
+  instructedAmount: { currency: 'EUR', amount: '123.50' },
+};
+
+/**
+ * EXPERIMENTAL — Rich Authorization Requests (RFC 9396).
+ *
+ * Only an OP generated with `--enable rar` (and with type definitions
+ * registered) advertises authorization_details_types_supported, so most tests
+ * here skip when discovery does not advertise the demo type. That keeps the
+ * shared spec suite green across all sample OPs; the one test that runs
+ * without the feature shows the parameter is ignored as before.
+ */
+test.describe('Rich Authorization Requests (RAR)', () => {
+  test('should carry the approved details to the token response, the refresh and introspection', async ({
+    page,
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    test.skip(!(await rarAdvertised(request, issuer)), 'This OP was generated without --enable rar');
+
+    await page.goto(`${clientBaseURL}/start-rar`);
+    await page.getByLabel('Username:').fill('testuser');
+    await page.getByLabel('Password:').fill('password');
+    await page.getByRole('button', { name: 'Login' }).click();
+    await expect(page).toHaveURL(new RegExp(`^${escapeRegExp(issuer)}/consent$`));
+
+    // RFC 9396 §3.1: the consent screen lists the requested details next to
+    // the scopes, with the display line the type definition built.
+    await expect(page.getByText('Initiate a payment of EUR 123.50')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Approve' }).click();
+
+    // §7: the token response of the code grant carries the approved details,
+    // and a refresh of the same grant carries them unchanged.
+    await expect(page.getByTestId('token-type')).toHaveText('Bearer');
+    await expect(page.getByTestId('rar-token-details')).toHaveText(JSON.stringify([PAYMENT_DETAIL]));
+    await expect(page.getByTestId('rar-refresh-details')).toHaveText(JSON.stringify([PAYMENT_DETAIL]));
+
+    // §9.2: introspection reports them as a top-level member.
+    await expect(page.getByTestId('rar-introspection-active')).toHaveText('true');
+    await expect(page.getByTestId('rar-introspection-details')).toHaveText(JSON.stringify([PAYMENT_DETAIL]));
+  });
+
+  test('should advertise the registered types in discovery', async ({ request, baseURL }) => {
+    const issuer = requireBaseUrl(baseURL);
+    const types = await advertisedTypes(request, issuer);
+    test.skip(types === undefined, 'This OP was generated without --enable rar');
+
+    // RFC 9396 §10: exactly the registered demo type.
+    expect(types).toEqual(['payment_initiation']);
+  });
+
+  test('should reject an unknown type with an invalid_authorization_details redirect', async ({
+    page,
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    test.skip(!(await rarAdvertised(request, issuer)), 'This OP was generated without --enable rar');
+
+    // RFC 9396 §5: a request with a type the OP does not understand MUST be
+    // refused. The error redirects to the client with the registered code.
+    await page.goto(`${clientBaseURL}/start-rar?type=account_information`);
+    await expect(page.getByTestId('authorization-error')).toHaveText('invalid_authorization_details');
+    // The fixed description carries no detail values (RFC 9396 §13).
+    await expect(page.getByTestId('authorization-error-description')).toHaveText(
+      'The authorization_details parameter is invalid',
+    );
+  });
+
+  test('should answer prompt=none with consent_required', async ({ page, request, baseURL }) => {
+    const issuer = requireBaseUrl(baseURL);
+    test.skip(!(await rarAdvertised(request, issuer)), 'This OP was generated without --enable rar');
+
+    // Details always need fresh consent, and prompt=none forbids showing the
+    // consent screen (OIDC Core 1.0 §3.1.2.1), so the request fails up front.
+    await page.goto(`${clientBaseURL}/start-rar?prompt=none`);
+    await expect(page.getByTestId('authorization-error')).toHaveText('consent_required');
+  });
+
+  test('should reject authorization_details at the token endpoint before any side effect', async ({
+    page,
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    test.skip(!(await rarAdvertised(request, issuer)), 'This OP was generated without --enable rar');
+
+    await page.goto(`${clientBaseURL}/start-rar`);
+    await page.getByLabel('Username:').fill('testuser');
+    await page.getByLabel('Password:').fill('password');
+    await page.getByRole('button', { name: 'Login' }).click();
+    await page.getByRole('button', { name: 'Approve' }).click();
+    await expect(page.getByTestId('token-type')).toHaveText('Bearer');
+    const refreshToken = await page.getByTestId('rar-refresh-token').textContent();
+    expect(refreshToken).not.toBe('');
+
+    // RFC 9396 §6 narrowing is not supported: the request is refused with the
+    // registered error code instead of being silently ignored.
+    const rejected = await request.post(`${issuer}/token`, {
+      form: {
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken ?? '',
+        client_id: clientId,
+        client_secret: clientSecret,
+        authorization_details: JSON.stringify([PAYMENT_DETAIL]),
+      },
+    });
+    expect(rejected.status()).toBe(400);
+    expect(await rejected.json()).toEqual({
+      error: 'invalid_authorization_details',
+      error_description: 'authorization_details is not accepted at the token endpoint',
+    });
+
+    // The rejection happened before any side effect: the presented refresh
+    // token was neither rotated nor revoked, so the same token still works.
+    const retried = await request.post(`${issuer}/token`, {
+      form: {
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken ?? '',
+        client_id: clientId,
+        client_secret: clientSecret,
+      },
+    });
+    expect(retried.status()).toBe(200);
+    const retriedBody = (await retried.json()) as { token_type: string; authorization_details?: unknown };
+    expect(retriedBody.token_type).toBe('Bearer');
+    expect(retriedBody.authorization_details).toEqual([PAYMENT_DETAIL]);
+  });
+
+  test('should complete the flow as before when the OP was generated without rar', async ({
+    page,
+    request,
+    baseURL,
+  }) => {
+    const issuer = requireBaseUrl(baseURL);
+    test.skip(await rarAdvertised(request, issuer), 'This OP answers authorization_details');
+
+    // Without the feature the parameter is an unknown request parameter: the
+    // flow completes and no channel carries authorization_details.
+    await page.goto(`${clientBaseURL}/start-rar`);
+    await page.getByLabel('Username:').fill('testuser');
+    await page.getByLabel('Password:').fill('password');
+    await page.getByRole('button', { name: 'Login' }).click();
+    await expect(page).toHaveURL(new RegExp(`^${escapeRegExp(issuer)}/consent$`));
+    await page.getByRole('button', { name: 'Approve' }).click();
+
+    await expect(page.getByTestId('token-type')).toHaveText('Bearer');
+    await expect(page.getByTestId('rar-token-details')).toHaveText('null');
+    await expect(page.getByTestId('rar-refresh-details')).toHaveText('null');
+    await expect(page.getByTestId('rar-introspection-details')).toHaveText('null');
+  });
+});
+
+interface DiscoveryMetadata {
+  authorization_details_types_supported?: string[];
+}
+
+async function advertisedTypes(
+  request: { get(url: string): Promise<{ json(): Promise<unknown> }> },
+  issuer: string,
+): Promise<string[] | undefined> {
+  const response = await request.get(`${issuer}/.well-known/openid-configuration`);
+  const metadata = (await response.json()) as DiscoveryMetadata;
+  return metadata.authorization_details_types_supported;
+}
+
+async function rarAdvertised(
+  request: { get(url: string): Promise<{ json(): Promise<unknown> }> },
+  issuer: string,
+): Promise<boolean> {
+  return ((await advertisedTypes(request, issuer)) ?? []).includes('payment_initiation');
+}
+
+function requireBaseUrl(baseURL: string | undefined): string {
+  if (baseURL === undefined) {
+    throw new Error('baseURL is not configured');
+  }
+  return baseURL;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+```
+
+### The E2E client additions
+
+The `/start-rar` route, the `authorization_details` attachment on the authorization URL, and the three-channel observation after the callback:
+
+```javascript
+    // EXPERIMENTAL (RFC 9396): run the ordinary code flow with an
+    // authorization_details parameter (the payment_initiation example of
+    // §2.1), then refresh and introspect to see the approved details come
+    // back on every channel.
+    if (req.method === 'GET' && url.pathname === '/start-rar') {
+      await startAuthorization(url, res, { rar: true });
+      return;
+    }
+```
+
+```javascript
+  // EXPERIMENTAL (RFC 9396 §3): the authorization_details parameter, a
+  // URL-encoded JSON array shaped after the payment_initiation example of
+  // §2.1. A spec overrides the type (?type=...) to drive the unknown-type
+  // rejection of §5.
+  if (options.rar === true) {
+    authorizationUrl.searchParams.set('authorization_details', JSON.stringify([
+      {
+        type: requestUrl.searchParams.get('type') ?? 'payment_initiation',
+        actions: ['initiate'],
+        locations: ['https://example.com/payments'],
+        instructedAmount: { currency: 'EUR', amount: '123.50' },
+      },
+    ]));
+  }
+```
+
+```javascript
+/**
+ * EXPERIMENTAL — Rich Authorization Requests (RFC 9396 §7 / §9.2).
+ *
+ * Follows the approved details over every channel they travel on: the token
+ * response of the code grant, the token response of a refresh (same grant),
+ * and the introspection answer a resource server would get. The page prints
+ * each one as JSON ('null' when the member is absent), plus the rotated
+ * refresh token so a spec can drive the token-endpoint rejection of §6 with
+ * it.
+ */
+async function completeRarInspection(res, tokens) {
+  const refreshed = tokens.refresh_token === undefined
+    ? null
+    : await formPost(new URL('/token', issuer), {
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refresh_token,
+      client_id: clientId,
+      client_secret: clientSecret,
+    });
+  const introspected = await formPost(new URL('/introspect', issuer), {
+    token: (refreshed ?? tokens).access_token,
+    client_id: clientId,
+    client_secret: clientSecret,
+  });
+  sendHtml(res, 200, `<!doctype html>
+<html>
+  <head><title>RAR Complete</title></head>
+  <body>
+    <main>
+      <h1>RAR Complete</h1>
+      <dl>
+        <dt>token type</dt><dd data-testid="token-type">${escapeHtml(tokens.token_type)}</dd>
+        <dt>token details</dt><dd data-testid="rar-token-details">${escapeHtml(JSON.stringify(tokens.authorization_details ?? null))}</dd>
+        <dt>refreshed details</dt><dd data-testid="rar-refresh-details">${escapeHtml(JSON.stringify(refreshed?.authorization_details ?? null))}</dd>
+        <dt>refresh token</dt><dd data-testid="rar-refresh-token">${escapeHtml(refreshed?.refresh_token ?? '')}</dd>
+        <dt>introspection active</dt><dd data-testid="rar-introspection-active">${escapeHtml(String(introspected.active))}</dd>
+        <dt>introspection details</dt><dd data-testid="rar-introspection-details">${escapeHtml(JSON.stringify(introspected.authorization_details ?? null))}</dd>
+      </dl>
+    </main>
+  </body>
+</html>`);
+}
+```
 
 ## References
 
