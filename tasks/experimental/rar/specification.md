@@ -245,7 +245,7 @@ declare module '../../config.js' {
 
 - **fail-closed**: 未知 type、構造違反、上限超過はすべて拒否する（§5 MUST）。型定義が空なら全拒否。
 - **ログ禁止**: `authorization_details` の内容（金額、口座、識別子などの機微情報。§13）をログへ出さない。エラーメッセージにも反映しない。
-- **同意の明示**: details を伴うリクエストは常に同意画面を経由する。prompt=none は `consent_required`。SSO の同意スキップ（`reuse-session` の `consentResolver.hasConsent` 経路）は scope 単位の記録しか持たず details を知らないため、`prompt` への `consent` 付与で迂回を塞ぐ。
+- **同意の明示**: details を伴うリクエストは常に同意画面を経由する。prompt=none は `consent_required`。SSO の同意スキップ（`reuse-session` の `consentResolver.hasConsent` 経路)は scope 単位の記録しか持たず details を知らないため、`prompt` への `consent` 付与で迂回を塞ぐ。
 - **表示の安全**: `describe` はプレーン文字列を返し、HTML を組み立てない。エスケープは view 層の既存機構に委ねる。
 - **インジェクション対策（§12 MUST sanitize）**: details は不透明な JSON 値として保持・転記のみ行い、深いマージ、`eval` 相当、動的キーアクセスによる書き込みをしない。
 - **DoS**: バイト長と要素数の上限。上限値は応答に反映しない。
@@ -291,9 +291,11 @@ apps/nextjs は route group `(rar)` を持たず、`_oidc-provider/features/rar/
 
 いずれも rar 無効時の生成物の挙動を変えない形で行い、既存テストと conformance で裏を取る。
 
-1. **同意画面の表示項目**: `ConsentScreen`（hono `endpoints/consent/screen.ts`）と `ConsentPageParams`（`views.tsx`）、nextjs の consent ページに optional な `authorizationDetails?: readonly string[]` を追加し、存在時のみ一覧表示する。値は rar の所有ブロックが produce し、無効時は generator の仕組みで `undefined` になる。
-2. **トークン応答の可変化**: hono `endpoints/token/pipeline.ts` の `const tokenResponse` を `let` にする（PAR が `let params` を再代入する既存パターンと同型）。nextjs の token route も同様。
-3. **introspection 応答の可変化**: `features/introspection/endpoints/introspection/pipeline.ts` の `const introspection` を `let` にする。nextjs の introspect route も同様。
+1. **同意画面の表示項目**: `ConsentScreen`（hono `endpoints/consent/screen.ts`）と `ConsentPageParams`（`views.tsx`）、nextjs の consent ページに optional な `authorizationDetails?: readonly string[]` を追加し、存在時のみ一覧表示する。値は rar の所有ブロックが produce し、無効時は generator の仕組み（除去ブロックの produce を `const <name> = undefined;` に置き換える `transformPipeline` / `transformRouteHandler`）で `undefined` になる。hono の `prepareConsent` は現在 `return describeConsentScreen(...)` と直接返しているため、`const screen = describeConsentScreen(...)` → rar の所有ブロック → `return` の形に組み替えて、ブロックの挿入点を作る（rar 無効時の挙動は変わらない）。
+2. **トークン応答の可変化**: hono `endpoints/token/pipeline.ts` の `const tokenResponse`（main 70959cd 時点 119 行）を `let` にする（PAR が `let params` を再代入する既存パターンと同型）。nextjs の token route（`src/app/token/route.ts` の `const tokenResponse`、384 行）も同様。
+3. **introspection 応答の可変化**: `features/introspection/endpoints/introspection/pipeline.ts` の `const introspection`（38 行）を `let` にする。nextjs の introspect route は既に `let response` で組んである（`(introspection)/introspect/route.ts` 132 行）ため、nextjs 側の base 変更は不要で、所有ブロックの追加だけでよい。
+
+新しいステップはパイプラインの所有ブロックだけでなく、各エンドポイントの `endpoint.ts` にも載せる。hono は `endpoints/*/endpoint.ts`（と introspection の `endpoints/introspection/endpoint.ts`）の steps / edges に feature 付きで追加し、nextjs は route.ts の隣の `endpoint.ts`（`defineEndpoint` の steps）に `id` / `feature: 'rar'` / `produces` を追加する。nextjs の produces は、生成時のブロック除去（`transformRouteHandler`）が `const <name> = undefined;` を作る根拠になるため、ブロックが定義する変数名と正確に一致させる。
 
 ### 依存方向
 
@@ -357,6 +359,7 @@ apps/hono と apps/nextjs の開発サーバーにデモ型定義（U2 参照）
 
 - **利用者向け**: `docs/library-document/src/content/docs/experimental/rar.md` を追加し、index の機能一覧を更新する。概要、Experimental 警告、対応仕様、ユースケース、`--enable rar` とインストール、型定義の書き方（validate / describe の契約と例）、フロー、エラー処理、セキュリティ注意（ログ禁止、完全性保護は PAR / request object 併用）、既知の制約（in-memory 保持、token request での再指定不可、device / CIBA 非対応、資源サーバー別フィルタ無し）、core 機能との違い、トラブルシューティング、参考資料。
 - **実装解説（必須）**: notes リポジトリの `implementation-guides/experimental/` に日本語版と英語版を作成する（`.notes/CLAUDE.md` の規約に従い、全ファイル掲載）。
+- **変更メモ（必須）**: 本実装は関数カタログの関数（`packages/experimental`、`apps/hono`、`apps/nextjs`）とエンドポイントの処理本体を変えるため、PR に `apps/map/changes/` の変更メモ（Markdown）を 1 つ含め、変えた関数ごとに、なぜ変えたかを書く（README の規約。節が無いと地図のビルドが落ちる。雛形は `pnpm --filter @maronn-openid-connect/map changes:draft`）。
 
 ## Changeset要件
 
@@ -369,7 +372,7 @@ apps/hono と apps/nextjs の開発サーバーにデモ型定義（U2 参照）
 3. apps/nextjs の同等実装
 4. CLI registry とテスト
 5. E2E スペックとデモ型定義
-6. 利用者向け Docs と実装解説（日英）
+6. 利用者向け Docs、`apps/map/changes/` の変更メモ、実装解説（日英）
 
 ## 完了条件
 
@@ -377,14 +380,16 @@ apps/hono と apps/nextjs の開発サーバーにデモ型定義（U2 参照）
 - `--enable rar` なしの生成物の挙動が従来と変わらない（既存テストと conformance がグリーンのまま）。
 - `authorization_details` 付きの認可コードフローが E2E で完走し、トークン応答と introspection に details が現れる。
 - core から experimental への import が無い。
+- `apps/map/changes/` の変更メモが PR に含まれ、地図のビルド（`map-preview.yml`）が通る。
 - 実装解説（日英）が notes リポジトリへコミットされている。
 
 ## 未解決事項
 
-- **U2: E2E 用デモ型定義の形**: apps の開発サーバー（`apps/hono/src/server.ts`、`apps/nextjs/src/instrumentation.ts`）へ登録するデモ型の名前とフィールド。RFC 9396 §2 の例（`payment_initiation`）に寄せるか、リポジトリ固有の名前空間にするかを Review 3 までに確定する。
+なし（すべて解決済み）。
 
 ### 解決済み
 
+- **U2: E2E 用デモ型定義の形**（Review 3 で確定）: RFC 9396 §2.1 Figure 1 の例に寄せた `payment_initiation` 型とする。`validate` は、`actions` が `['initiate']` / `['status']` / `['cancel']` の値だけからなる非空の文字列配列であること、型固有フィールド `instructedAmount` が `{ currency: 大文字 3 文字, amount: 小数文字列（`/^\d+\.\d{2}$/`）}` のオブジェクトであることを検査する。`describe` は `Initiate a payment of EUR 123.50` のような固定書式のプレーン文字列を返す。テスト入力には RFC 9396 §2.1 の例の値（EUR 123.50）をそのまま使い、出典を記載する。登録場所は、CLI の抽出範囲の外にある開発用設定の実体、すなわち hono は `apps/hono/src/app.ts` の `createServerApp`（`applyOidc` の `config` へ `rarTypes` を渡す）、nextjs は `apps/nextjs/src/dev-data.ts` の `applyFeatureSettings`（provider の `config` オブジェクトに `rarTypes` を代入する。`rpInitiatedLogoutConfig` などの機能設定を同所で代入する既存パターンに倣う）。どちらも生成コードには含まれない。デモ型定義そのものは E2E からも使うため、`tests/e2e` と重複定義にならないよう apps 側に置き、E2E はプロトコル越しに検証する。
 - **U1: grant 紐付けストアの掃除**（Review 2 で確定）: `expiresAt = 発行時刻 + refreshTokenAbsoluteLifetime` の TTL と、書き込み時の lazy eviction（ciba の in-memory ストアの方式）とする。ローテーションは `originalIssuedAt` 起点で絶対寿命を固定するため、有効なリフレッシュトークンより先にエントリが消えることはなく、§7 の MUST と両立する。リフレッシュトークンを発行しない grant では TTL まで過剰保持になるが、in-memory の experimental として許容し、利用者向け Docs の既知の制約に記載する。
 - **U3: `requestObjectClaims` 内の値の型**（Review 2 で実測）: `parseRequestObject` は JWT ペイロードを JSON デコードした `Record<string, unknown>` を返すため、claim 値はパース済み JSON 値（通常は配列）として届く。パース関数は `unknown` を受ける `parseAuthorizationDetailsInput` とし、文字列（クエリ / PAR）とパース済み値（Request Object）の両方を入口で吸収する。
 
