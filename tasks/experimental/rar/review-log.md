@@ -53,3 +53,36 @@
   - `[reject-token-request-details]` の nextjs 側の配置（route.ts のどの位置に入れるか）は Review 3 の実装着手可否確認で特定する
 - **判定**: Pass with changes（修正は本レビュー内で反映済み。重大指摘 1 は仕様段階で解消したため Blocked にしない）
 - **次回可能日**: 2026-10-29
+
+## Review 3
+
+- **日付**: 2026-11-04（Review 2 と異なる暦日 / `next_review_on`（2026-10-29）到達を確認して実施）
+- **観点**: 実装着手可否（追加調査なしで着手できるか / 受け入れ条件の客観性 / 対象ファイルと変更範囲 / API・CLI・テスト・Docs・実装解説の一貫性 / 実装順序と検証方法 / Experimental であることの利用者への明示）。Review 2 の残リスク 3 点（U2、base 変更 3 点のテンプレート波及、nextjs の reject ステップ配置）の決着と、main の移動（a5e4f70 → 70959cd）に伴う前提の再検証を含む
+- **確認資料**:
+  - リポジトリ現状（main = 70959cd、2026-11-04 取得。ローカルブランチは同一コミット）
+  - `apps/hono/src/oidc-provider/endpoints/token/pipeline.ts`: `[dispatch-ciba]`（64〜66 行）→ `[validate-grant-type]`（68〜69 行）の窓が現存し、`[reject-token-request-details]` の挿入点が成立すること。`const tokenResponse` は 119 行
+  - `apps/nextjs/src/app/token/route.ts`: 同じ dispatch 群（164〜182 行）→ `[validate-grant-type]`（184 行）の窓があり、nextjs 側の reject ブロックの配置が hono と同型に決まること（Review 2 残リスクの決着）。`const tokenResponse` は 384 行
+  - `apps/hono/src/oidc-provider/features/introspection/endpoints/introspection/pipeline.ts`: `const introspection`（38 行）と `[build-response]`→`[sign-response]`→`[respond]` の順序。nextjs の `(introspection)/introspect/route.ts` は既に `let response`（132 行）で、`[respond-jwt]` ブロックの前に rar ブロックを置ける
+  - `apps/hono/src/oidc-provider/endpoints/authorize/pipeline.ts`: `[validate-request]`（75 行）〜`[create-transaction]`（84 行）の窓。`params` / `effectiveParams` / `requestObjectClaims` がすべてスコープ内にあり、検証ステップの入力が揃うこと
+  - `packages/core/src/authorization-request.ts`: `ValidatedAuthorizationRequest.prompt` が可変の `string[]`（257 行）で、prompt 制御（`consent` 付与）を `create-transaction` 前に実施できること
+  - `apps/hono/src/oidc-provider/endpoints/consent/pipeline.ts` / `screen.ts`: `prepareConsent` が `return describeConsentScreen(...)` と直接返しており、所有ブロックの挿入点を作る組み替え（`const screen = ...` → ブロック → `return`）が必要なことの実測。`submitConsent` の `[issue-authorization-code]` が `authCodeData` を返し、`grantId` 紐付けステップの入力が揃うこと
+  - `packages/cli/src/generate.ts`（`transformPipeline` 296 行〜 / `transformRouteHandler` 324 行〜 / `routeStepProduces`）: 除去ブロックの produce が `const <name> = undefined;` になる機構の実測（base 変更 3 点のテンプレート波及の決着。rar 専用の generator 変更は不要で、nextjs の `endpoint.ts` の `produces` 宣言を正確に書けば足りる）
+  - `packages/cli/src/registry.ts`（`FEATURE_REGISTRY` 50〜69 行、`EXPERIMENTAL_FEATURES` 161〜171 行、`EXPERIMENTAL_FEATURE_KEYS`、`DEFAULT_FEATURES`、`OidcFeatureConfig`）: 追加箇所がすべて同一ファイルの列挙末尾で、既存 9 機能と同型であること
+  - `apps/hono/src/oidc-provider/features/feature.ts`: `discovery` フックが `(issuer, config)` を受けること、`context` フックの契約（検証ステップとストアの配線に十分なこと）
+  - `apps/hono/src/oidc-provider/features/ciba/config.ts` / `google-login/config.ts`: `declare module '../../config.js'` による `ProviderConfig` 拡張の先例
+  - `apps/hono/src/app.ts`（`createServerApp` が `applyOidc` の `config` で上書きを渡す）/ `apps/nextjs/src/instrumentation.ts` と `apps/nextjs/src/dev-data.ts`（`applyFeatureSettings` が機能設定モジュールへ代入する）: U2 のデモ型定義の登録場所の実測（いずれも CLI 抽出範囲の外）
+  - `tests/e2e/specs/jarm.spec.ts`: discovery メタデータによる自己スキップの先例（無効時 E2E の形）
+  - `tasks/experimental/done/jarm/` の state.yaml と review-log.md: Approved 更新の形式と Review 3 の判定基準の先例
+- **指摘**:
+  1. **[修正] base 変更 3 の過剰記載**: 仕様書は nextjs の introspect route も `let` 化が必要としていたが、実測では既に `let response` で組まれている。base 変更は hono 側だけでよく、nextjs は所有ブロックの追加のみ。仕様書の記載を実測に合わせた
+  2. **[修正] 変更メモ（apps/map/changes）の欠落**: README の規約により、関数カタログの関数（packages/experimental / apps/hono / apps/nextjs）とエンドポイント処理本体を変える PR には `apps/map/changes/` の変更メモが必須で、説明の節が無いと地図のビルドが落ちる。仕様書のドキュメント要件・実装順序・完了条件のどこにも無く、実装 Routine が PR の CI（map-preview.yml）で詰まる着手阻害要因だった。3 箇所へ追記した
+  3. **[修正] U2 の登録場所の特定誤り**: 仕様書の U2 は登録先を `server.ts` / `instrumentation.ts` としていたが、実測では開発用設定の実体は hono が `app.ts` の `createServerApp`、nextjs が `dev-data.ts` の `applyFeatureSettings` にある（instrumentation.ts は dev-data の呼び出しだけ）。U2 の確定とあわせて修正した
+  4. **[修正] prepareConsent の挿入点**: hono の `prepareConsent` は `describeConsentScreen` の戻り値を直接 `return` しており、所有ブロックを挿入する行間が無い。`const screen = ...` → ブロック → `return` への組み替えを base 変更 1 の一部として明記した（rar 無効時の挙動は不変）
+  5. **[修正] endpoint.ts の更新漏れ**: 新ステップはパイプラインの所有ブロックだけでなく hono / nextjs の `endpoint.ts`（steps / edges / produces）にも載せる必要がある（nextjs の produces はブロック除去時の `const <name> = undefined;` 生成の根拠）。配置案に追記した
+- **U2 の確定**: デモ型は RFC 9396 §2.1 Figure 1 の `payment_initiation` に寄せる（`actions` の値域検査と `instructedAmount` の構造検査、固定書式の表示行）。一次資料の例の値をテスト入力に使えるため、リポジトリ固有の名前空間より検証価値が高い。登録場所は指摘 3 のとおり確定
+- **確認して問題なしとした項目**: 完了条件は全項目が機械的に検証可能（テスト・lint・型検査・build の通過、discovery / トークン応答 / introspection の固定値、import 境界 lint、E2E の完走）。公開 API 案・CLI オプション案・設定値・テスト計画・ドキュメント要件・Changeset 要件（手書きしない）の間に矛盾なし。実装順序 1〜6 は TDD の順に並び、各段階の検証方法（単体 → apps 単体 → CLI 生成 → E2E）が対応する。Experimental の明示は registry の tier / summary、`index.ts` の警告ヘッダ、Docs の experimental 配下ページ、`ProviderConfig.rarTypes` の JSDoc の「EXPERIMENTAL」接頭辞の 4 点で既存機能と同構成。依存方向（core 無変更、experimental → core は peerDependencies、feature 間 import なし）は Review 1〜2 から変更なく、main の移動（a5e4f70 → 70959cd）はマップ関連（apps/map）の変更のみで本仕様の前提に影響しない。`invalid_authorization_details` の投げ方（PAR の enum 外キャスト先例、`TokenEndpointError` の器）も現行 main で不変
+- **残リスク**:
+  - 生成コードの実挙動（ブロック除去後の型検査・build の通過）は実装時の完了条件でのみ最終確認できる（既存 experimental 機能と同じ扱い）
+  - リフレッシュトークン非発行 grant での TTL までの details 過剰保持（U1 で許容済み。Docs の既知の制約に記載する）
+- **判定**: **Pass with changes**（指摘 1〜5 を本レビュー内で仕様書へ反映済み。いずれも記載の精度の問題で、設計自体の欠陥ではない。未解決事項ゼロ・セキュリティ未解決ゼロ・受け入れ条件は客観的に検証可能。Review 3 の全確認項目を満たしたため `status: Approved` / `implementation_ready: true` へ更新する）
+- **次回可能日**: —（3 回のレビューを完了。次は実装 Routine が「実装順序」ステップ 1 から着手する）
