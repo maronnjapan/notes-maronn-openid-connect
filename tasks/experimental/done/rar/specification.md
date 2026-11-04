@@ -42,7 +42,7 @@
 - **部分同意**: 同意は要求された details 全体への承認か拒否かの二択とする（§3 の Note はサブセット承認を MAY としている）。
 - **クライアントメタデータ `authorization_details_types`（§10）によるクライアント単位の型制限**: 静的クライアント設定にもフィールドを追加しない。dynamic-client-registration との連携も行わない。
 - **ID Token への details の反映**: RFC 9396 に要求がなく、行わない。
-- **details の資源サーバー別フィルタリング（§9.2 の \"potentially filtered\"）**: v1 は grant に紐づく details をそのまま introspection へ返す。
+- **details の資源サーバー別フィルタリング（§9.2 の "potentially filtered"）**: v1 は grant に紐づく details をそのまま introspection へ返す。
 
 ## ユースケース / 想定利用者
 
@@ -207,7 +207,7 @@ export const AUTHORIZATION_DETAILS_PARAM = 'authorization_details';
 ## CLIオプション案
 
 - `maronn-oidc generate <framework> --enable rar` でのみ生成する。デフォルト無効。
-- `packages/cli/src/registry.ts` の `FEATURE_REGISTRY` と `EXPERIMENTAL_FEATURES` の末尾へ追加する（`id: 'rar'`、`tier: 'experimental'`、`requires: []`、summary は \"OAuth 2.0 Rich Authorization Requests (RFC 9396)\"）。
+- `packages/cli/src/registry.ts` の `FEATURE_REGISTRY` と `EXPERIMENTAL_FEATURES` の末尾へ追加する（`id: 'rar'`、`tier: 'experimental'`、`requires: []`、summary は "OAuth 2.0 Rich Authorization Requests (RFC 9396)"）。
 - `OidcFeatureConfig` のキー、`EXPERIMENTAL_FEATURE_KEYS`、`DEFAULT_FEATURES`（`false`）、install コマンド案内（`withFeaturePackages` 経由で選択時のみ `@maronn-openid-connect/experimental` を追加）も既存機能と同型に揃える。
 - introspection への反映ブロックは introspection 機能のパイプライン内に置くため、introspection 無効時は生成されない。`requires` には introspection を入れない（RAR 単体で成立するため）。
 
@@ -271,7 +271,7 @@ packages/experimental/src/rar/
   store.test.ts
 ```
 
-`package.json` の `exports` へ `\"./rar\"` を追加する。ルート `.` からの再エクスポートは追加しない。
+`package.json` の `exports` へ `"./rar"` を追加する。ルート `.` からの再エクスポートは追加しない。
 
 ### apps/hono/src/oidc-provider/features/rar/
 
@@ -389,7 +389,7 @@ apps/hono と apps/nextjs の開発サーバーにデモ型定義（U2 参照）
 
 ### 解決済み
 
-- **U2: E2E 用デモ型定義の形**（Review 3 で確定）: RFC 9396 §2.1 Figure 1 の例に寄せた `payment_initiation` 型とする。`validate` は、`actions` が `['initiate']` / `['status']` / `['cancel']` の値だけからなる非空の文字列配列であること、型固有フィールド `instructedAmount` が `{ currency: 大文字 3 文字, amount: 小数文字列（`/^\\d+\\.\\d{2}$/`）}` のオブジェクトであることを検査する。`describe` は `Initiate a payment of EUR 123.50` のような固定書式のプレーン文字列を返す。テスト入力には RFC 9396 §2.1 の例の値（EUR 123.50）をそのまま使い、出典を記載する。登録場所は、CLI の抽出範囲の外にある開発用設定の実体、すなわち hono は `apps/hono/src/app.ts` の `createServerApp`（`applyOidc` の `config` へ `rarTypes` を渡す）、nextjs は `apps/nextjs/src/dev-data.ts` の `applyFeatureSettings`（provider の `config` オブジェクトに `rarTypes` を代入する。`rpInitiatedLogoutConfig` などの機能設定を同所で代入する既存パターンに倣う）。どちらも生成コードには含まれない。デモ型定義そのものは E2E からも使うため、`tests/e2e` と重複定義にならないよう apps 側に置き、E2E はプロトコル越しに検証する。
+- **U2: E2E 用デモ型定義の形**（Review 3 で確定）: RFC 9396 §2.1 Figure 1 の例に寄せた `payment_initiation` 型とする。`validate` は、`actions` が `['initiate']` / `['status']` / `['cancel']` の値だけからなる非空の文字列配列であること、型固有フィールド `instructedAmount` が `{ currency: 大文字 3 文字, amount: 小数文字列（`/^\d+\.\d{2}$/`）}` のオブジェクトであることを検査する。`describe` は `Initiate a payment of EUR 123.50` のような固定書式のプレーン文字列を返す。テスト入力には RFC 9396 §2.1 の例の値（EUR 123.50）をそのまま使い、出典を記載する。登録場所は、CLI の抽出範囲の外にある開発用設定の実体、すなわち hono は `apps/hono/src/app.ts` の `createServerApp`（`applyOidc` の `config` へ `rarTypes` を渡す）、nextjs は `apps/nextjs/src/dev-data.ts` の `applyFeatureSettings`（provider の `config` オブジェクトに `rarTypes` を代入する。`rpInitiatedLogoutConfig` などの機能設定を同所で代入する既存パターンに倣う）。どちらも生成コードには含まれない。デモ型定義そのものは E2E からも使うため、`tests/e2e` と重複定義にならないよう apps 側に置き、E2E はプロトコル越しに検証する。
 
 - **U1: grant 紐付けストアの掃除**（Review 2 で確定）: `expiresAt = 発行時刻 + refreshTokenAbsoluteLifetime` の TTL と、書き込み時の lazy eviction（ciba の in-memory ストアの方式）とする。ローテーションは `originalIssuedAt` 起点で絶対寿命を固定するため、有効なリフレッシュトークンより先にエントリが消えることはなく、§7 の MUST と両立する。リフレッシュトークンを発行しない grant では TTL まで過剰保持になるが、in-memory の experimental として許容し、利用者向け Docs の既知の制約に記載する。
 - **U3: `requestObjectClaims` 内の値の型**（Review 2 で実測）: `parseRequestObject` は JWT ペイロードを JSON デコードした `Record<string, unknown>` を返すため、claim 値はパース済み JSON 値（通常は配列）として届く。パース関数は `unknown` を受ける `parseAuthorizationDetailsInput` とし、文字列（クエリ / PAR）とパース済み値（Request Object）の両方を入口で吸収する。
