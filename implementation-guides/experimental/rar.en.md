@@ -805,22 +805,564 @@ The feature is disabled by default (`DEFAULT_FEATURES`), requires no other featu
 
 What follows is the complete code the hono output receives.
 The Express and Fastify outputs share the same feature directory and blocks; the Next.js differences are described at the end of this section.
-The feature files below are identical, byte for byte, to the ones embedded in the Japanese guide ([rar.ja.md](./rar.ja.md#cli-統合と生成コードへの寄与)), whose section also carries them in full; the JSDoc of each file explains its own contract, so the prose here sticks to where each piece lands and why.
 
-### features/rar/config.ts, store.ts, feature.ts and the seven step files
+### features/rar/config.ts (new file, in full)
 
-These ten files are embedded in full in the Japanese guide and are not repeated a second time in this file pair — the two guides document the same, single implementation, and every file below is listed with its role:
+The byte / entry caps with fail-fast range checks, plus the `declare module` extension that puts `rarTypes` on `ProviderConfig` (the google-login config pattern).
 
-- `config.ts`: the byte / entry caps with fail-fast range checks, plus the `declare module` extension that puts `rarTypes` on `ProviderConfig` (the google-login config pattern)
-- `store.ts`: `rarTransactionStore` and `rarGrantStore`, two instances of the experimental store contract shared through a `globalThis` registry (the PAR store pattern)
-- `feature.ts`: the discovery hook — `authorization_details_types_supported` only while types are registered — and the context hook that hands both stores to the steps
-- `steps/validate-authorization-details.ts`: reads the value (the Request Object claim supersedes the query per OIDC Core 1.0 §6.1; core's Request Object merge copies fixed keys only, so the claim is read from `requestObjectClaims`), runs the structural and type-definition validation, and applies the prompt control — `consent_required` for `prompt=none` alone, `consent` appended otherwise, hands off to the base check when `none` is combined with other values
-- `steps/record-authorization-details.ts`: persists the validated details under the transactionId with the transaction TTL, so details of an abandoned transaction expire with it
-- `steps/describe-authorization-details.ts`: builds the consent display rows from the stored details; throws when a stored type no longer has a definition, so nothing is approved unseen
-- `steps/record-granted-details.ts`: at the consent confirmation point, moves the details from the transactionId key to the grantId key with the refresh-token absolute lifetime (rotation fixes the absolute lifetime at the original issuance, so the entry outlives every valid refresh token; a grant without refresh tokens over-retains until the TTL, accepted for an in-memory experimental store)
-- `steps/reject-token-request-details.ts`: throws `TokenEndpointError` (400 `invalid_authorization_details`) when the token request carries the parameter, ahead of every side effect
-- `steps/append-token-response-details.ts`: appends the approved array to the token response body (§7 MUST, no §7.1 enrichment); a grant without details returns the response object unchanged
-- `steps/append-introspection-details.ts`: appends the member to an `active: true` introspection answer (§9.2, no per-RS filtering), placed before the optional RFC 9701 signing so a signed answer covers it
+```typescript
+/**
+ * EXPERIMENTAL — Rich Authorization Requests settings (RFC 9396).
+ *
+ * Read by the validate-authorization-details step of the authorization
+ * endpoint. The type definitions themselves (`rarTypes`) live on
+ * ProviderConfig, so an application injects them next to its other provider
+ * settings.
+ *
+ * - maxAuthorizationDetailsBytes: UTF-8 byte cap of the whole parameter
+ *   (range 1024–65536). RFC 9396 §11.4 points large requests to PAR; this cap
+ *   is the DoS guard for everything the endpoint still parses.
+ * - maxAuthorizationDetailsEntries: entries allowed in the array (range 1–64).
+ */
+import type { AuthorizationDetailTypeDefinition } from '@maronn-openid-connect/experimental/rar';
+
+export const rarConfig = {
+  maxAuthorizationDetailsBytes: 16384,
+  maxAuthorizationDetailsEntries: 16,
+};
+
+// Fail fast on a config edit that leaves the documented ranges: a typo here
+// either re-opens the DoS surface or rejects every request.
+if (rarConfig.maxAuthorizationDetailsBytes < 1024 || rarConfig.maxAuthorizationDetailsBytes > 65536) {
+  throw new Error('rarConfig.maxAuthorizationDetailsBytes must be between 1024 and 65536');
+}
+if (rarConfig.maxAuthorizationDetailsEntries < 1 || rarConfig.maxAuthorizationDetailsEntries > 64) {
+  throw new Error('rarConfig.maxAuthorizationDetailsEntries must be between 1 and 64');
+}
+
+declare module '../../config.js' {
+  interface ProviderConfig {
+    /**
+     * EXPERIMENTAL (RFC 9396 §5): 受理する authorization details 型の定義。
+     * 登録した type だけが受理され、空（未設定）なら `authorization_details`
+     * 付きのリクエストはすべて `invalid_authorization_details` になる
+     * （fail-closed）。discovery はこの一覧の type 値を
+     * `authorization_details_types_supported` として広告する（§10）。
+     */
+    rarTypes?: readonly AuthorizationDetailTypeDefinition[];
+  }
+}
+```
+
+### features/rar/store.ts (new file, in full)
+
+Two instances of the experimental store contract, shared through a `globalThis` registry (the PAR store pattern).
+
+```typescript
+import {
+  createInMemoryRarDetailsStore,
+  type RarDetailsStore,
+} from '@maronn-openid-connect/experimental/rar';
+
+/**
+ * EXPERIMENTAL — in-memory stores of the requested and granted
+ * authorization details (RFC 9396).
+ *
+ * Two instances of the same contract:
+ *
+ * - rarTransactionStore: keyed by transactionId, holds the validated details
+ *   between the authorization request and the consent decision. Entries live
+ *   as long as the authorization transaction.
+ * - rarGrantStore: keyed by grantId, holds the approved details for the token
+ *   response (§7) and introspection (§9.2). Entries live as long as the
+ *   refresh token absolute lifetime, evicted lazily on writes.
+ *
+ * Replace with persistent stores (Redis, KV, database) in production. Keys
+ * are opaque identifiers minted by this provider: never interpolate them into
+ * a query, always bind them as parameters.
+ */
+
+// Kept on globalThis so every module that asks for the stores gets the same
+// ones, also where a framework loads a module more than once (dev-mode hot
+// reloads, separate module layers).
+const rarStoreRegistry = globalThis as typeof globalThis & {
+  __oidcRarTransactionStore?: RarDetailsStore;
+  __oidcRarGrantStore?: RarDetailsStore;
+};
+
+export const rarTransactionStore: RarDetailsStore =
+  (rarStoreRegistry.__oidcRarTransactionStore ??= createInMemoryRarDetailsStore());
+
+export const rarGrantStore: RarDetailsStore =
+  (rarStoreRegistry.__oidcRarGrantStore ??= createInMemoryRarDetailsStore());
+```
+
+### features/rar/feature.ts (new file, in full)
+
+The discovery hook advertises `authorization_details_types_supported` only while type definitions are registered, and the context hook hands both stores to the steps.
+
+```typescript
+import { defineFeature } from '../feature.js';
+import { rarGrantStore, rarTransactionStore } from './store.js';
+
+/**
+ * EXPERIMENTAL — Rich Authorization Requests (RFC 9396): the
+ * authorization_details parameter of the authorization endpoint, its rows on
+ * the consent screen, and the approved details on the token response and
+ * introspection. Settings are in config.ts; the accepted types are injected
+ * through ProviderConfig.rarTypes.
+ *
+ * Backed by @maronn-openid-connect/experimental, whose API is NOT stable: it
+ * may change in a breaking way between releases.
+ */
+export const rar = defineFeature({
+  id: 'rar',
+  // RFC 9396 §10 metadata. Only advertised while type definitions are
+  // registered: a client must not send RAR to an OP that does not advertise
+  // the member, and this OP rejects every request while the list is empty.
+  discovery: (_issuer, config) =>
+    config.rarTypes !== undefined && config.rarTypes.length > 0
+      ? { authorization_details_types_supported: config.rarTypes.map((definition) => definition.type) }
+      : {},
+  context: { rarTransactionStore, rarGrantStore },
+});
+```
+
+### features/rar/steps/validate-authorization-details.ts (new file, in full)
+
+Reads the value (the Request Object claim supersedes the query per OIDC Core 1.0 §6.1), validates it, and applies the prompt control.
+
+```typescript
+import {
+  AuthorizationError,
+  type AuthorizationErrorCode,
+  type ValidatedAuthorizationRequest,
+} from '@maronn-openid-connect/core';
+import {
+  AUTHORIZATION_DETAILS_PARAM,
+  RarError,
+  parseAuthorizationDetailsInput,
+  validateAuthorizationDetails,
+  type AuthorizationDetail,
+} from '@maronn-openid-connect/experimental/rar';
+import type { AuthorizationRequestInput } from '../../../endpoints/authorize/outcome.js';
+import { step } from '../../../endpoints/step.js';
+import { rarConfig } from '../config.js';
+
+export const meta = step({
+  id: 'validate-authorization-details',
+  endpoint: 'authorize',
+  feature: 'rar',
+  kind: 'validate',
+  label: 'authorization_details を検証し、同意を必須にする',
+  spec: 'RFC 9396 §3 / §5',
+  function: 'validateAuthorizationDetailsRequest',
+  consumes: ['params', 'requestObjectClaims', 'validatedRequest'],
+  optional: ['requestObjectClaims'],
+  produces: ['authorizationDetails'],
+  removable: false,
+});
+
+/**
+ * `authorization_details` を検証して返し、details があるリクエストには同意画面を必須にする。
+ *
+ * パラメータは、Request Object の claim（あればクエリより優先。OIDC Core 1.0 §6.1 の
+ * supersede 規則）、無ければクエリ / PAR 由来の `params` から読む。無ければ何もせず
+ * `undefined` を返す。あれば構造（RFC 9396 §2 / §2.2）と上限（`rarConfig`）を検査し、
+ * `config.rarTypes` の型定義と突き合わせる（§5。型定義が空ならすべて拒否）。
+ *
+ * details があるリクエストはエンドユーザーの同意を毎回要する（SSO の同意スキップは
+ * scope 単位の記録しか持たず details を知らない）ので、`prompt=none` 単独なら
+ * `consent_required` で拒否し、それ以外なら `validatedRequest.prompt` へ `consent` を
+ * 加えて、silent / SSO の両経路を同意画面へ向ける。`none` が他の値と組む不正な
+ * リクエストには手を出さず、base の `[validate-prompt-combination]` に委ねる。
+ *
+ * エラーの `error_description` は固定の ASCII 文言で、details の内容を反映しない
+ * （RFC 9396 §13）。
+ *
+ * 実験的な機能である。
+ *
+ * @spec RFC 9396 §3
+ * @spec RFC 9396 §5
+ * @throws {AuthorizationError} `invalid_authorization_details`: 構造違反、上限超過、未知の type、型定義の検証違反のとき
+ * @throws {AuthorizationError} `consent_required`: details 付きのリクエストが `prompt=none` 単独のとき
+ */
+export function validateAuthorizationDetailsRequest(
+  c: any,
+  input: {
+    params: AuthorizationRequestInput;
+    requestObjectClaims?: Record<string, unknown>;
+    validatedRequest: ValidatedAuthorizationRequest;
+  },
+): AuthorizationDetail[] | undefined {
+  const { params, requestObjectClaims, validatedRequest } = input;
+  const raw = requestObjectClaims?.[AUTHORIZATION_DETAILS_PARAM] ?? params[AUTHORIZATION_DETAILS_PARAM];
+  if (raw === undefined) return undefined;
+
+  const config = c.get('config');
+  let details: AuthorizationDetail[];
+  try {
+    details = parseAuthorizationDetailsInput(raw, {
+      maxBytes: rarConfig.maxAuthorizationDetailsBytes,
+      maxEntries: rarConfig.maxAuthorizationDetailsEntries,
+    });
+    validateAuthorizationDetails(details, config.rarTypes ?? []);
+  } catch (error) {
+    // 失敗の種類（構造、上限、未知 type、型定義の違反）によらず同じ固定文言にし、
+    // details の値（金額、口座、type 名）をエラー経由で漏らさない（RFC 9396 §13）。
+    if (error instanceof RarError) {
+      throw new AuthorizationError(
+        error.code as AuthorizationErrorCode,
+        'The authorization_details parameter is invalid',
+        validatedRequest.redirectUri,
+        validatedRequest.state,
+      );
+    }
+    throw error;
+  }
+
+  const promptValues = validatedRequest.prompt ?? [];
+  if (promptValues.includes('none')) {
+    // `none` 単独は、画面を出せないのに新規同意が要るので `consent_required`（OIDC Core 1.0 §3.1.2.1 の意味論）。
+    // `none` と他の値の組み合わせは本機能の管轄外で、base の検査が `invalid_request` にする。
+    if (promptValues.length === 1) {
+      throw new AuthorizationError(
+        'consent_required' as AuthorizationErrorCode,
+        'authorization_details requires user consent',
+        validatedRequest.redirectUri,
+        validatedRequest.state,
+      );
+    }
+    return details;
+  }
+
+  // details は毎回ユーザーに見せて承認させる。`prompt=consent` は OIDC Core 1.0
+  // §3.1.2.1 の「consent MUST re-display」にそのまま乗り、silent / SSO の同意
+  // スキップ（authenticate-silently / reuse-session）の両方がこの値で止まる。
+  if (!promptValues.includes('consent')) {
+    validatedRequest.prompt = [...promptValues, 'consent'];
+  }
+  return details;
+}
+```
+
+### features/rar/steps/record-authorization-details.ts (new file, in full)
+
+Persists the validated details under the transactionId with the transaction TTL.
+
+```typescript
+import type { AuthorizationDetail } from '@maronn-openid-connect/experimental/rar';
+import { step } from '../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'record-authorization-details',
+  endpoint: 'authorize',
+  feature: 'rar',
+  kind: 'persist',
+  label: 'authorization details をトランザクションへ保持する',
+  spec: 'RFC 9396 §3',
+  function: 'recordAuthorizationDetails',
+  calls: ['rarTransactionStore.set'],
+  consumes: ['transactionId', 'transactionTtlSeconds', 'authorizationDetails'],
+  optional: ['authorizationDetails'],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * 検証済みの authorization details を、トランザクション ID をキーに保存する。
+ *
+ * details の無いリクエスト（`authorizationDetails` が `undefined`）では何もしない。
+ * 保存の寿命は認可トランザクションと同じ（`transactionTtlSeconds`）で、同意まで
+ * 進まなかったトランザクションの details はストアの失効で消える。
+ *
+ * 実験的な機能である。
+ *
+ * @spec RFC 9396 §3
+ */
+export async function recordAuthorizationDetails(
+  c: any,
+  input: {
+    transactionId: string;
+    transactionTtlSeconds: number;
+    authorizationDetails: AuthorizationDetail[] | undefined;
+  },
+): Promise<void> {
+  const { transactionId, transactionTtlSeconds, authorizationDetails } = input;
+  if (authorizationDetails === undefined) return;
+  const rarTransactionStore = c.get('rarTransactionStore');
+  await rarTransactionStore.set(
+    transactionId,
+    authorizationDetails,
+    Date.now() + transactionTtlSeconds * 1000,
+  );
+}
+```
+
+### features/rar/steps/describe-authorization-details.ts (new file, in full)
+
+Builds the consent display rows from the stored details; throws when a stored type no longer has a definition, so nothing is approved unseen.
+
+```typescript
+import { describeAuthorizationDetails } from '@maronn-openid-connect/experimental/rar';
+import { step } from '../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'describe-authorization-details',
+  endpoint: 'consent',
+  feature: 'rar',
+  kind: 'transform',
+  label: '同意画面に出す authorization details の表示行を作る',
+  spec: 'RFC 9396 §3.1',
+  function: 'describeTransactionAuthorizationDetails',
+  calls: ['rarTransactionStore.get'],
+  consumes: ['transactionId'],
+  produces: ['authorizationDetails'],
+  removable: false,
+});
+
+/**
+ * トランザクションに保持した authorization details の表示行を返す。
+ *
+ * details の無いトランザクションでは `undefined` を返し、同意画面は従来どおりに
+ * なる。あれば、`config.rarTypes` の型定義の `describe` が作るプレーン文字列の行を
+ * 返し、同意画面が scope の一覧と併記する（RFC 9396 §3.1 の merged set）。
+ * 行のエスケープは view 層（JSX）に委ねる。
+ *
+ * 保持した details の type に対応する型定義が無くなっていたら例外を投げる
+ * （表示できない要素を黙って落とすと、見ていない権限が承認されてしまう）。
+ *
+ * 実験的な機能である。
+ *
+ * @spec RFC 9396 §3.1
+ * @throws {RarError} 保持した details の type に対応する型定義が設定から消えているとき
+ */
+export async function describeTransactionAuthorizationDetails(
+  c: any,
+  transactionId: string,
+): Promise<readonly string[] | undefined> {
+  const rarTransactionStore = c.get('rarTransactionStore');
+  const details = await rarTransactionStore.get(transactionId);
+  if (details === undefined) return undefined;
+  const config = c.get('config');
+  return describeAuthorizationDetails(details, config.rarTypes ?? []);
+}
+```
+
+### features/rar/steps/record-granted-details.ts (new file, in full)
+
+At the consent confirmation point, moves the details from the transactionId key to the grantId key with the refresh-token absolute lifetime.
+
+```typescript
+import type { AuthorizationCodeData } from '@maronn-openid-connect/core';
+import { step } from '../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'record-granted-details',
+  endpoint: 'consent',
+  feature: 'rar',
+  kind: 'persist',
+  label: '承認された authorization details をグラントへ紐付ける',
+  spec: 'RFC 9396 §7',
+  function: 'recordGrantedAuthorizationDetails',
+  calls: ['rarTransactionStore.get', 'rarTransactionStore.delete', 'rarGrantStore.set'],
+  consumes: ['transactionId', 'authCodeData'],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * 承認されたトランザクションの authorization details を grantId へ付け替える。
+ *
+ * details の無いトランザクションでは何もしない。あれば grantId をキーに保存し、
+ * transactionId 側のエントリを削除する。grantId は authorization_code と
+ * refresh_token の両グラントを貫通するので、トークン応答（RFC 9396 §7）と
+ * introspection（§9.2）はこのキーで details を引ける。
+ *
+ * 保存の寿命は `発行時刻 + config.refreshTokenAbsoluteLifetime`。ローテーションは
+ * 絶対寿命を初回発行時刻起点で固定するため、有効なリフレッシュトークンが存在する
+ * 間にエントリが先に消えることはない。リフレッシュトークンを発行しないグラントでは
+ * 寿命まで過剰保持になるが、in-memory の experimental として許容している。
+ *
+ * 実験的な機能である。
+ *
+ * @spec RFC 9396 §7
+ */
+export async function recordGrantedAuthorizationDetails(
+  c: any,
+  transactionId: string,
+  authCodeData: AuthorizationCodeData,
+): Promise<void> {
+  const rarTransactionStore = c.get('rarTransactionStore');
+  const details = await rarTransactionStore.get(transactionId);
+  if (details === undefined) return;
+  const config = c.get('config');
+  const rarGrantStore = c.get('rarGrantStore');
+  await rarGrantStore.set(
+    authCodeData.grantId,
+    details,
+    Date.now() + config.refreshTokenAbsoluteLifetime * 1000,
+  );
+  await rarTransactionStore.delete(transactionId);
+}
+```
+
+### features/rar/steps/reject-token-request-details.ts (new file, in full)
+
+Rejects `authorization_details` on the token request with 400 `invalid_authorization_details`, ahead of every side effect.
+
+```typescript
+import { AUTHORIZATION_DETAILS_PARAM } from '@maronn-openid-connect/experimental/rar';
+import { TokenEndpointError } from '../../../endpoints/token/response.js';
+import { step } from '../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'reject-token-request-details',
+  endpoint: 'token',
+  feature: 'rar',
+  kind: 'validate',
+  label: 'トークンリクエストの authorization_details を拒否する',
+  spec: 'RFC 9396 §6',
+  function: 'rejectTokenRequestAuthorizationDetails',
+  consumes: ['params'],
+  produces: [],
+  removable: false,
+});
+
+/**
+ * トークンリクエストに `authorization_details` があれば、400 の `invalid_authorization_details` で拒否する。
+ *
+ * RFC 9396 §6 のトークンリクエストでの再指定（narrowing）には対応しない。黙って
+ * 無視すると「絞り込まれた」とクライアントに誤認させるので、明示的に拒否する。
+ * このステップは feature grant の dispatch 群の直後・`[validate-grant-type]` の前に
+ * 置き、トークンの発行・保存・提示リフレッシュトークンのローテーション失効という
+ * どの副作用よりも前に拒否を確定させる（応答組み立て時の拒否は、拒否済み
+ * リクエストの副作用を残すため禁止している）。
+ *
+ * 実験的な機能である。
+ *
+ * @spec RFC 9396 §6
+ * @throws {TokenEndpointError} 400 `invalid_authorization_details`: リクエストに `authorization_details` パラメータがあるとき
+ */
+export function rejectTokenRequestAuthorizationDetails(params: Record<string, string>): void {
+  if (params[AUTHORIZATION_DETAILS_PARAM] === undefined) return;
+  throw new TokenEndpointError({
+    status: 400,
+    body: {
+      error: 'invalid_authorization_details',
+      error_description: 'authorization_details is not accepted at the token endpoint',
+    },
+  });
+}
+```
+
+### features/rar/steps/append-token-response-details.ts (new file, in full)
+
+Appends the approved array to the token response body (§7 MUST, no §7.1 enrichment).
+
+```typescript
+import type { ValidatedTokenRequest } from '@maronn-openid-connect/core';
+import type { TokenEndpointResponse } from '../../../endpoints/token/response.js';
+import { step } from '../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'append-token-response-details',
+  endpoint: 'token',
+  feature: 'rar',
+  kind: 'transform',
+  label: '承認済みの authorization details を応答へ含める',
+  spec: 'RFC 9396 §7',
+  function: 'appendAuthorizationDetailsToTokenResponse',
+  calls: ['rarGrantStore.get'],
+  consumes: ['tokenResponse', 'validatedRequest'],
+  produces: ['tokenResponse'],
+  removable: false,
+});
+
+/**
+ * グラントに紐づく authorization details があれば、トークンレスポンスのボディへ加えて返す。
+ *
+ * `validatedRequest.grantId`（authorization_code / refresh_token の両グラントを
+ * 貫通する）で grant ストアを引き、あれば承認された配列をそのまま
+ * `authorization_details` メンバーとして加える（RFC 9396 §7 の MUST。§7.1 の
+ * enrichment はしない）。無ければ応答を変えずに返すので、details を持たない
+ * グラントの応答は従来とバイト単位で同じである。
+ *
+ * 実験的な機能である。
+ *
+ * @spec RFC 9396 §7
+ */
+export async function appendAuthorizationDetailsToTokenResponse(
+  c: any,
+  tokenResponse: TokenEndpointResponse,
+  validatedRequest: ValidatedTokenRequest,
+): Promise<TokenEndpointResponse> {
+  const rarGrantStore = c.get('rarGrantStore');
+  const details = await rarGrantStore.get(validatedRequest.grantId);
+  if (details === undefined) return tokenResponse;
+  return {
+    ...tokenResponse,
+    body: { ...tokenResponse.body, authorization_details: details },
+  };
+}
+```
+
+### features/rar/steps/append-introspection-details.ts (new file, in full)
+
+Appends the member to an `active: true` introspection answer (§9.2), before the optional RFC 9701 signing.
+
+```typescript
+import type {
+  IntrospectionResponse,
+  ResolvedIntrospectionToken,
+} from '@maronn-openid-connect/core';
+import { step } from '../../../endpoints/step.js';
+
+export const meta = step({
+  id: 'append-introspection-details',
+  endpoint: 'introspection',
+  feature: 'rar',
+  kind: 'transform',
+  label: 'authorization details を introspection 応答へ含める',
+  spec: 'RFC 9396 §9.2',
+  function: 'appendAuthorizationDetailsToIntrospection',
+  calls: ['rarGrantStore.get'],
+  consumes: ['introspection', 'resolved'],
+  produces: ['introspection'],
+  removable: false,
+});
+
+/**
+ * 有効なトークンのグラントに authorization details があれば、introspection 応答へ加えて返す。
+ *
+ * `active: true` の応答に限り、解決済みトークンの `grantId` で grant ストアを引き、
+ * あれば `authorization_details` を top-level member として加える（RFC 9396 §9.2 の
+ * 構造要件。資源サーバー別のフィルタリングはしない）。`active: false` の応答と
+ * details を持たないトークンの応答は変えずに返す。jwt-introspection-response
+ * 併用時は、このステップの後に署名されるので member は署名対象に含まれる。
+ *
+ * 実験的な機能である。
+ *
+ * @spec RFC 9396 §9.2
+ */
+export async function appendAuthorizationDetailsToIntrospection(
+  c: any,
+  introspection: IntrospectionResponse,
+  resolved: ResolvedIntrospectionToken | null,
+): Promise<IntrospectionResponse> {
+  if (!introspection.active || resolved === null) return introspection;
+  const grantId =
+    resolved.tokenType === 'access_token'
+      ? resolved.accessToken.grantId
+      : resolved.refreshToken.grantId;
+  const rarGrantStore = c.get('rarGrantStore');
+  const details = await rarGrantStore.get(grantId);
+  if (details === undefined) return introspection;
+  // RFC 9396 §9.2 の拡張 member。core の IntrospectionResponse 型は閉じた union
+  // なので、member を足した応答は型表明で IntrospectionResponse に戻す。
+  return { ...introspection, authorization_details: details } as IntrospectionResponse;
+}
+```
 
 ### Where the pipeline blocks land
 

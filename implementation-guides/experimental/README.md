@@ -20,6 +20,7 @@ Each guide explains what the feature does, which use cases it serves, and walks 
 | JWT Introspection Response | RFC 9701 | [jwt-introspection-response.ja.md](./jwt-introspection-response.ja.md) | [jwt-introspection-response.en.md](./jwt-introspection-response.en.md) |
 | RP-Initiated Logout | OpenID Connect RP-Initiated Logout 1.0 (Final, 2022-09-12) | [rp-initiated-logout.ja.md](./rp-initiated-logout.ja.md) | [rp-initiated-logout.en.md](./rp-initiated-logout.en.md) |
 | Dynamic Client Registration | RFC 7591 | [dynamic-client-registration.ja.md](./dynamic-client-registration.ja.md) | [dynamic-client-registration.en.md](./dynamic-client-registration.en.md) |
+| Rich Authorization Requests | RFC 9396 | [rar.ja.md](./rar.ja.md) | [rar.en.md](./rar.en.md) |
 
 ## 各解説が全文を載せる範囲 / What each guide embeds in full
 
